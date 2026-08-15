@@ -114,6 +114,43 @@ The per-slot latch-at-own-mount-pulse pattern is proven in the UK101 core (`VDNU
 
 **Gate (hardware):** core boots from floppy exactly as before — both drives, 400K and 800K images, eject and remount, floppy + SCSI together. No write behaviour introduced. If this phase regresses anything, it is provably the plumbing and not the GCR work.
 
+**STATUS: RTL COMPLETE, ELABORATION CLEAN (2026-08-15), hardware gate not yet run.**
+New `rtl/floppy_loader.v` (one instance per floppy, `ldr_int`/`ldr_ext` in `MacPlus.sv`): on its slot's `img_mounted` pulse, streams the whole image in via `sd_rd`, sector by sector, staging each 512-byte sector in a small local BRAM (`sd_buff_wr` has no rate limit against on-chip RAM) then draining it out to SDRAM one word at a time through `addrController_top.v`'s previously-unused extra slot 3 (recurs every ~2us — the drain, not the SD transfer, is the slow half of a mount; a 1600-sector 800K image is on the order of a second, correctness-first for Phase 1, not optimized). Drains to the exact same byte offsets (`0x100000`/`0x200000`) the read side already expects, so `floppy.v`/`floppy_track_encoder.v` are untouched.
+
+`insertDisk` (via `dsk_int_ds`/`dsk_int_ss`/etc.) now only goes true on the loader's `done` pulse — i.e. once the whole image is resident — never at the bare mount pulse, so the Mac can never observe a partially-loaded disk; this replaces the old `old_down && ~dio_download` end-of-download latch, with size detection now reading the loader's own latched `img_size` instead of a word-address counter. Also added clear-on-mount (drop `insertDisk` immediately on a fresh mount pulse, before the reload completes), mirroring the SAVE-feature precedent in the UK101 core ([[project-uk101-save-feature]]).
+
+`addrController_top.v` gained a fixed-priority (int-over-ext) arbiter for the shared slot-3 write port (`dskLoadAddrInt/Ext`, `dskLoadReqInt/Ext`, `dskLoadAckInt/Ext`, `dskLoadWrEn`) — address/control only, matching the existing `dskReadAddr*/dskReadAck*` read-side split; `MacPlus.sv` muxes the actual write word using the same ack pulses. `CONF_STR` converted `F1`/`F2` to `S2,DSK,...`/`S3,DSK,...`; `VDNUM` raised 2→4; SCSI (`dataController_top`) still only ever sees a narrowed 2-wide view of the shared arrays (via intermediate `scsi_sd_*` wires — Verilog can't port-slice an unpacked array, so each consumer indexes the shared arrays itself, the same pattern UK101.sv uses per-drive). `img_readonly` is now wired top-to-bottom and latched per-slot (`readonly_latched`) for Phase 3/4 to consume — currently an intentionally-dangling output (confirmed Info-level only in the elaboration connectivity report, not a warning).
+
+Verified via `quartus_map --analysis_and_elaboration`: 0 errors, 20 warnings (all pre-existing/unrelated — `scc.v`/`rxuart.v`/`txuart.v` truncation and unused-signal warnings that predate this change). The only connectivity notes touching new code are Info-level "dangling logic" on `readonly_latched` (expected — unused until Phase 3/4) and a pre-existing `configRAMSize[1]` stuck-at note on `addrController_top` unrelated to this work.
+
+**Full compile completed (2026-08-15, user go-ahead given): 0 errors, 57 warnings, timing met** (setup slack 0.565ns, hold slack 0.246ns). The only warning touching this session's files (`serialCTS` unconnected, `MacPlus.sv:255`) predates this change (commented-out serial port block). `buf_mem` in `floppy_loader.v` correctly inferred as `altsyncram` block RAM (confirmed in the fitter report), not fanned-out logic — the exact trap flagged in the UK101 disk_reader.sv precedent for a two-port BRAM array. Resource usage: 14,884/41,910 ALMs (36%), 452,549/5,662,720 block memory bits (8%) — no blowup. Output: `output_files/MacPlus.rbf`/`.sof`.
+
+**HARDWARE GATE FAILED, then ROOT-CAUSED (2026-08-15).** Every mounted image read as "damaged / not a Macintosh disk", both sizes, both drives, several System versions, while the activity light showed the load running to completion. Not a byte-order problem (the swap in `floppy_loader.v` is correct — it matches what the ROM-download path did, and both derivations of it agree). The bug was in the **slot-3 write handshake vs. `sdram.v`'s two-phase sampling**:
+
+`sdram.v` does not latch a memory cycle in one shot. It issues `ACTIVE` — row, bank, and the `oe`/`we` decision — from the signals present during `busPhase 0`, and `WRITE` — **column address and write data** — from the signals present one `clk_sys` cycle later, during `busPhase 1`. Every memory control signal must therefore hold for the whole four-phase bus cycle. That is exactly why the ROM download path only ever changes `dio_write` while `~dioBusControl`, and why `dskReadAckInt/Ext` are asserted for a whole bus cycle instead of pulsed.
+
+The Phase 1 arbiter instead made `dskLoadGrant` (and hence `dskLoadAckInt/Ext`, `dskLoadWrEn`, and the `memoryAddr` mux) purely combinational on `dskLoadReq*`. The loader sampled its ack at the end of `busPhase 0` and dropped `wr_req` at the start of `busPhase 1` — after RAS had already committed to performing a write, but before CAS sampled the column and the data. So every word was written to the **correct row and bank but the wrong column, with `memoryDataOut` (CPU bus contents) instead of the disk byte**. Confirmed in sim: the whole image region ends up junk-at-column-0 plus never-written words. (The combinational grant also fired a *second* time in `busPhase 3` of the same window, so the loader consumed two words per slot and both were lost.)
+
+Fix (`addrController_top.v`): sample `dskLoadReq*` once at the bus-cycle boundary (`busPhase == 2'b11`), hold the grant for the entire cycle, and make the ack a late pulse in `busPhase 3` so the loader cannot tear its request down before CAS. One word per slot-3 window; ~0.8s for an 800K image.
+
+Why sim missed it: both testbenches modelled SDRAM as a single-cycle latch off `dskLoadAckInt`. `sim/tb_floppy_loader_integrated.v` now replicates `MacPlus.sv`'s `sdram_addr`/`sdram_din`/`sdram_we` muxes and `sdram.v`'s real RAS-at-phase-0 / CAS-at-phase-1 sampling (including the `bank=addr[21:20]`, `row=addr[19:8]`, `col={addr[22],addr[7:0]}` split), and counts stray out-of-region writes. It **fails on the pre-fix arbiter and passes on the fixed one** — the diagnosis is demonstrated, not asserted.
+
+**Re-compiled 2026-08-15 (user gave explicit go-ahead): 0 errors, 57 warnings, timing met** (setup slack 0.386ns, hold slack 0.247ns), 35% ALMs / 8% block memory — no regression from the pre-fix compile.
+
+**Hardware retest: drive 1 (int) works, drive 2 (ext) still fails, 2026-08-15.** SECOND bug, same root cause class, in the code the first fix didn't touch: `MacPlus.sv`'s `loader_wr_data` mux —
+
+```verilog
+wire [15:0] loader_wr_data = ldr_ext_wr_ack ? ldr_ext_wr_data : ldr_int_wr_data;
+```
+
+— selected which loader's write data reaches SDRAM using `ldr_ext_wr_ack` (`dskLoadAckExt`), which is a late pulse asserted only in busPhase 3. sdram.v's CAS phase (busPhase 1, one phase earlier) is what actually latches `din`. So at the instant that mattered, `ldr_ext_wr_ack` was always 0, and the mux always fell through to `ldr_int_wr_data` — drive 1 "worked" only because it was the ternary's default branch; drive 2 always wrote int's (idle/stale) data instead of its own. The first fix (addrController_top.v's arbiter) got the *address* selection right via an internal `dskLoadSelExt` signal, but never exposed it — so MacPlus.sv's *data* selection was still keyed off the wrong (pulse) signal.
+
+**Fix (2026-08-15):** exposed `dskLoadSelExt` as a new `addrController_top.v` output (held for the whole grant cycle, unlike the ack pulses), wired it into `MacPlus.sv`, and changed the mux to `dskLoadSelExt ? ldr_ext_wr_data : ldr_int_wr_data`. New sim `sim/tb_floppy_loader_ext.v` reproduces MacPlus.sv's dual-loader wiring (both `floppy_loader` instances, real fixed mux formula), mounts only the ext image, and PASSES byte-exact; `tb_floppy_loader_integrated.v` (int path) re-verified still PASSES after the port addition. Neither prior testbench could have caught this — both drove only one loader, so the inter-loader data-selection mux was never exercised in sim.
+
+**Re-compiled 2026-08-15 (user gave explicit go-ahead): 0 errors, 57 warnings, timing met** (setup slack 0.585ns, hold slack 0.245ns), 36% ALMs / 8% block memory — no regression from either fix.
+
+**Not yet done:** re-run the hardware gate on both drives (400K/800K, eject/remount, floppy+SCSI together) — needs the user to flash and test on real MiSTer hardware.
+
 ---
 
 ### Phase 2 — GCR decoder RTL

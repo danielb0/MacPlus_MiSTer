@@ -30,7 +30,7 @@ assign USER_OUT = '1;
 assign {DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, DDRAM_RD, DDRAM_WE} = 0; 
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
-assign LED_USER  = dio_download || (disk_act ^ |diskMotor);
+assign LED_USER  = dio_download || ldr_int_busy || ldr_ext_busy || (disk_act ^ |diskMotor);
 assign LED_DISK  = 0;
 assign LED_POWER = 0;
 assign BUTTONS   = 0;
@@ -58,8 +58,8 @@ video_freak video_freak
 localparam CONF_STR = {
 	"MACPLUS;UART115200;",
 	"-;",
-	"F1,DSK,Mount Pri Floppy;",
-	"F2,DSK,Mount Sec Floppy;",
+	"S2,DSK,Mount Pri Floppy;",
+	"S3,DSK,Mount Sec Floppy;",
 	"-;",
 	"SC0,IMGVHD,Mount SCSI-6;",
 	"SC1,IMGVHD,Mount SCSI-5;",
@@ -124,20 +124,42 @@ end
 ///////////////////////////////////////////////////
 
 localparam SCSI_DEVS = 2;
+// VDNUM: slots 0/1 = SCSI (unchanged), slots 2/3 = the two floppies
+// (Phase 1: converted from ioctl_download F1/F2 to real S-type block-device
+// mounts - see FLOPPY_WRITE_PLAN.md section 3). The per-slot
+// latch-at-own-mount-pulse pattern below mirrors the UK101 core's
+// four-drive support (VDNUM=5 there).
+localparam VDNUM = 4;
 
 // the status register is controlled by the on screen display (OSD)
 wire [31:0] status;
 wire  [1:0] buttons;
-wire [31:0] sd_lba[SCSI_DEVS];
-wire  [SCSI_DEVS-1:0] sd_rd;
-wire  [SCSI_DEVS-1:0] sd_wr;
-wire  [SCSI_DEVS-1:0] sd_ack;
+wire [31:0] sd_lba[VDNUM];
+wire  [VDNUM-1:0] sd_rd;
+wire  [VDNUM-1:0] sd_wr;
+wire  [VDNUM-1:0] sd_ack;
 wire            [7:0] sd_buff_addr;
 wire           [15:0] sd_buff_dout;
-wire           [15:0] sd_buff_din[SCSI_DEVS];
+wire           [15:0] sd_buff_din[VDNUM];
 wire                  sd_buff_wr;
-wire  [SCSI_DEVS-1:0] img_mounted;
+wire  [VDNUM-1:0] img_mounted;
 wire           [63:0] img_size;
+wire                  img_readonly;
+
+// SCSI (dataController_top) only ever sees slots 0/1 of the VDNUM=4 arrays
+// above - these are its own narrower view, mirroring how each floppy_loader
+// below gets scalar per-slot ports instead of an array (the same pattern
+// UK101.sv uses per-drive: each consumer indexes the shared array itself,
+// no consumer declares its own sub-array port).
+wire [31:0] scsi_sd_lba[SCSI_DEVS];
+wire [15:0] scsi_sd_buff_din[SCSI_DEVS];
+wire [SCSI_DEVS-1:0] scsi_sd_rd, scsi_sd_wr;
+assign sd_lba[0] = scsi_sd_lba[0];
+assign sd_lba[1] = scsi_sd_lba[1];
+assign sd_buff_din[0] = scsi_sd_buff_din[0];
+assign sd_buff_din[1] = scsi_sd_buff_din[1];
+assign sd_buff_din[2] = 16'h0; // floppy loaders never sd_wr in Phase 1
+assign sd_buff_din[3] = 16'h0;
 
 wire        ioctl_write;
 reg         ioctl_wait = 0;
@@ -151,7 +173,7 @@ wire [15:0] ioctl_data;
 
 wire [32:0] TIMESTAMP;
 
-hps_io #(.CONF_STR(CONF_STR), .VDNUM(SCSI_DEVS), .WIDE(1)) hps_io
+hps_io #(.CONF_STR(CONF_STR), .VDNUM(VDNUM), .WIDE(1)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(HPS_BUS),
@@ -171,6 +193,7 @@ hps_io #(.CONF_STR(CONF_STR), .VDNUM(SCSI_DEVS), .WIDE(1)) hps_io
 	
 	.img_mounted(img_mounted),
 	.img_size(img_size),
+	.img_readonly(img_readonly),
 
 	.ioctl_download(dio_download),
 	.ioctl_index(dio_index),
@@ -297,6 +320,14 @@ wire dskReadAckInt;
 wire [21:0] dskReadAddrInt;
 wire dskReadAckExt;
 wire [21:0] dskReadAddrExt;
+
+// floppy image loader (Phase 1: SD-mount -> SDRAM), shared extra-slot-3 port
+wire [21:0] ldr_int_wr_addr, ldr_ext_wr_addr;
+wire        ldr_int_wr_req,  ldr_ext_wr_req;
+wire        ldr_int_wr_ack,  ldr_ext_wr_ack;
+wire [15:0] ldr_int_wr_data, ldr_ext_wr_data;
+wire        dskLoadWrEn;
+wire        dskLoadSelExt;
 
 // dtack generation in turbo mode
 reg  turbo_dtack_en, cpuBusControl_d;
@@ -477,7 +508,16 @@ addrController_top ac0
 	.dskReadAddrInt(dskReadAddrInt),
 	.dskReadAckInt(dskReadAckInt),
 	.dskReadAddrExt(dskReadAddrExt),
-	.dskReadAckExt(dskReadAckExt)
+	.dskReadAckExt(dskReadAckExt),
+
+	.dskLoadAddrInt(ldr_int_wr_addr),
+	.dskLoadReqInt(ldr_int_wr_req),
+	.dskLoadAckInt(ldr_int_wr_ack),
+	.dskLoadAddrExt(ldr_ext_wr_addr),
+	.dskLoadReqExt(ldr_ext_wr_req),
+	.dskLoadAckExt(ldr_ext_wr_ack),
+	.dskLoadWrEn(dskLoadWrEn),
+	.dskLoadSelExt(dskLoadSelExt)
 );
 
 wire [1:0] diskEject;
@@ -553,18 +593,96 @@ dataController_top #(SCSI_DEVS) dc0
 	.diskAct(diskAct),
 
 	// block device interface for scsi disk
-	.img_mounted(img_mounted),
+	.img_mounted(img_mounted[SCSI_DEVS-1:0]),
 	.img_size(img_size[40:9]),
-	.io_lba(sd_lba),
-	.io_rd(sd_rd),
-	.io_wr(sd_wr),
-	.io_ack(sd_ack),
+	.io_lba(scsi_sd_lba),
+	.io_rd(scsi_sd_rd),
+	.io_wr(scsi_sd_wr),
+	.io_ack(sd_ack[SCSI_DEVS-1:0]),
 
 	.sd_buff_addr(sd_buff_addr),
 	.sd_buff_dout(sd_buff_dout),
-	.sd_buff_din(sd_buff_din),
+	.sd_buff_din(scsi_sd_buff_din),
 	.sd_buff_wr(sd_buff_wr)
 );
+
+// sd_rd/sd_wr are consumer OUTPUTS -> hps_io INPUTS, so the SCSI 2-bit view
+// above and each floppy_loader's own scalar request must be combined into
+// the full VDNUM=4 vectors here. Floppies never sd_wr in Phase 1 (still
+// read-only).
+wire ldr_int_sd_rd, ldr_ext_sd_rd;
+assign sd_rd = {ldr_ext_sd_rd, ldr_int_sd_rd, scsi_sd_rd};
+assign sd_wr = {1'b0, 1'b0, scsi_sd_wr};
+
+wire        ldr_int_done, ldr_ext_done;
+wire        ldr_int_busy, ldr_ext_busy;
+wire [63:0] ldr_int_size, ldr_ext_size;
+wire        ldr_int_readonly, ldr_ext_readonly;
+
+floppy_loader ldr_int
+(
+	.clk_sys(clk_sys),
+	.reset(!pll_locked), // power-up only - a Mac "Reset & Apply" must not abort an in-flight mount
+
+	.img_mounted(img_mounted[2]),
+	.img_size(img_size),
+	.img_readonly(img_readonly),
+
+	.sd_lba(sd_lba[2]),
+	.sd_rd(ldr_int_sd_rd),
+	.sd_ack(sd_ack[2]),
+
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_wr(sd_buff_wr),
+
+	.wr_addr(ldr_int_wr_addr),
+	.wr_data(ldr_int_wr_data),
+	.wr_req(ldr_int_wr_req),
+	.wr_ack(ldr_int_wr_ack),
+
+	.done(ldr_int_done),
+	.loaded_size(ldr_int_size),
+	.readonly_latched(ldr_int_readonly),
+	.busy(ldr_int_busy)
+);
+
+floppy_loader ldr_ext
+(
+	.clk_sys(clk_sys),
+	.reset(!pll_locked),
+
+	.img_mounted(img_mounted[3]),
+	.img_size(img_size),
+	.img_readonly(img_readonly),
+
+	.sd_lba(sd_lba[3]),
+	.sd_rd(ldr_ext_sd_rd),
+	.sd_ack(sd_ack[3]),
+
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_wr(sd_buff_wr),
+
+	.wr_addr(ldr_ext_wr_addr),
+	.wr_data(ldr_ext_wr_data),
+	.wr_req(ldr_ext_wr_req),
+	.wr_ack(ldr_ext_wr_ack),
+
+	.done(ldr_ext_done),
+	.loaded_size(ldr_ext_size),
+	.readonly_latched(ldr_ext_readonly),
+	.busy(ldr_ext_busy)
+);
+
+// word written into SDRAM this cycle when dskLoadWrEn is high - selects
+// whichever loader addrController_top's arbiter (fixed priority int-over-ext)
+// actually granted this cycle. Must use dskLoadSelExt (held for the whole
+// grant cycle), not ldr_ext_wr_ack/dskLoadAckExt - that ack is a late pulse
+// in busPhase 3, one phase after sdram.v's CAS phase (busPhase 1) already
+// latched this data, so gating on it left every ext (drive 2) load writing
+// int's stale data instead of its own.
+wire [15:0] loader_wr_data = dskLoadSelExt ? ldr_ext_wr_data : ldr_int_wr_data;
 
 reg disk_act;
 always @(posedge clk_sys) begin
@@ -595,15 +713,23 @@ reg dsk_int_ss, dsk_ext_ss;  // single sided image inserted
 wire dsk_int_ins = dsk_int_ds || dsk_int_ss;
 wire dsk_ext_ins = dsk_ext_ds || dsk_ext_ss;
 
-// at the end of a download latch file size
-// diskEject is set by macos on eject
+// Phase 1: floppies are now S-type block-device mounts, loaded into SDRAM
+// by floppy_loader (see instantiation above) instead of streamed in via
+// ioctl_download. insertDisk therefore only goes true once ldr_*_done
+// fires - i.e. once the WHOLE image is resident in SDRAM - never at the
+// bare img_mounted pulse, so the Mac can never observe a partially-loaded
+// disk. Also clear-on-mount (not just on eject/size-mismatch): a remount
+// while already inserted must drop insertDisk immediately so nothing reads
+// mid-reload, mirroring the SAVE-feature precedent in the UK101 core.
+// diskEject is still set by macOS on eject, unchanged.
 always @(posedge clk_sys) begin
-	reg old_down;
-
-	old_down <= dio_download;
-	if(old_down && ~dio_download && dio_index == 1) begin
-		dsk_int_ds <= (dio_addr == 409600);   // double sides disk, addr counts words, not bytes
-		dsk_int_ss <= (dio_addr == 204800);   // single sided disk
+	if (img_mounted[2] && img_size != 0) begin
+		dsk_int_ds <= 1'b0;
+		dsk_int_ss <= 1'b0;
+	end
+	else if (ldr_int_done) begin
+		dsk_int_ds <= (ldr_int_size == 64'd819200);
+		dsk_int_ss <= (ldr_int_size == 64'd409600);
 	end
 
 	if(diskEject[0]) begin
@@ -613,12 +739,13 @@ always @(posedge clk_sys) begin
 end	
 
 always @(posedge clk_sys) begin
-	reg old_down;
-
-	old_down <= dio_download;
-	if(old_down && ~dio_download && dio_index == 2) begin
-		dsk_ext_ds <= (dio_addr == 409600);   // double sided disk, addr counts words, not bytes
-		dsk_ext_ss <= (dio_addr == 204800);   // single sided disk
+	if (img_mounted[3] && img_size != 0) begin
+		dsk_ext_ds <= 1'b0;
+		dsk_ext_ss <= 1'b0;
+	end
+	else if (ldr_ext_done) begin
+		dsk_ext_ds <= (ldr_ext_size == 64'd819200);
+		dsk_ext_ss <= (ldr_ext_size == 64'd409600);
 	end
 
 	if(diskEject[1]) begin
@@ -627,17 +754,19 @@ always @(posedge clk_sys) begin
 	end
 end
 
-// disk images are being stored right after os rom at word offset 0x80000 and 0x100000 
+// ROM is being stored at word offset 0x00000/0x40000 (normal/alt, bit6-selected).
+// Floppy images no longer come through here as of Phase 1 - see the
+// floppy_loader instances above.
 reg [20:0] dio_a;
 reg [15:0] dio_data;
 reg        dio_write;
 
 always @(posedge clk_sys) begin
 	reg old_cyc = 0;
-	
+
 	if(ioctl_write) begin
 		dio_data <= {ioctl_data[7:0], ioctl_data[15:8]};
-		dio_a <= dio_index[1:0] ? {dio_index[1:0], dio_addr[18:0]} : {dio_index[6], dio_addr[17:0]};
+		dio_a <= {dio_index[6], dio_addr[17:0]};
 		ioctl_wait <= 1;
 	end
 
@@ -652,13 +781,13 @@ wire download_cycle = dio_download && dioBusControl;
 
 ////////////////////////// SDRAM /////////////////////////////////
 
-wire [24:0] sdram_addr = download_cycle ? {4'b0001, dio_a[20:0] } : 
+wire [24:0] sdram_addr = download_cycle ? {4'b0001, dio_a[20:0] } :
                          ~_romOE        ? {4'b0001, 2'b00, status_mod, memoryAddr[18:1]} :
-                                          {3'b000, (dskReadAckInt || dskReadAckExt), memoryAddr[21:1]};
+                                          {3'b000, (dskReadAckInt || dskReadAckExt || dskLoadWrEn), memoryAddr[21:1]};
 
-wire [15:0] sdram_din  = download_cycle ? dio_data              : memoryDataOut;
-wire  [1:0] sdram_ds   = download_cycle ? 2'b11                 : { !_memoryUDS, !_memoryLDS };
-wire        sdram_we   = download_cycle ? dio_write             : !_ramWE;
+wire [15:0] sdram_din  = download_cycle ? dio_data  : dskLoadWrEn ? loader_wr_data : memoryDataOut;
+wire  [1:0] sdram_ds   = download_cycle ? 2'b11     : dskLoadWrEn ? 2'b11          : { !_memoryUDS, !_memoryLDS };
+wire        sdram_we   = download_cycle ? dio_write : dskLoadWrEn ? 1'b1           : !_ramWE;
 wire        sdram_oe   = download_cycle ? 1'b0                  : (!_ramOE || !_romOE || dskReadAckInt || dskReadAckExt);
 wire [15:0] sdram_do   = download_cycle ? 16'hffff : (dskReadAckInt || dskReadAckExt) ? extra_rom_data_demux : sdram_out;
 
