@@ -167,6 +167,10 @@ wire [15:0] loader_wr_data = ldr_ext_wr_ack ? ldr_ext_wr_data : ldr_int_wr_data;
 
 RTL-to-RTL round-trip is worth insisting on over comparing against the Phase 0 model, because it proves consistency with the exact stream this core actually produces.
 
+**DONE, gate passed (2026-08-15).** `rtl/floppy_track_decoder.v` is a direct RTL port of the Phase 0 reference decoder (`sim/decode_track.py`), including its one-group-lookback subtlety. The reverse GCR table was generated mechanically from `sim/gcr_common.py`'s `REVERSE_SONY_TABLE` (never hand-transcribed). New testbench `sim/tb_floppy_track_decoder.v` wires the RTL encoder directly into the RTL decoder and validates all 8 (track, side) combinations Phase 0 used (0/16/40/79 × both sides) byte-exact, plus the same three negative-test cases as `sim/test_negative.py` (corrupt data byte, corrupt checksum byte, truncated field) — all reject cleanly, never asserting `sector_valid`.
+
+One non-obvious bring-up issue, worth remembering for any future testbench on this core: this Icarus Verilog build does not reliably hold a registered pulse output (`sector_valid`/`reject`) stable if the testbench executes a further blocking assignment to an unrelated signal (here, `ready`) in the same simulation timestep before reading it — confirmed via `$strobe` and a minimal repro. Sampling the pulse immediately after `@(posedge clk)`, before touching anything else, is reliable; a `#1`-delayed read after other statements is not. This wasn't caught by the Phase 0 encoder testbench because it only ever read a combinational output (`odata`), which is immune (recomputing from stable state always gives the same answer regardless of extra delta-cycle re-evaluation). `tb_floppy_track_decoder.v` captures the pulse into a testbench reg at the correct moment instead of re-reading the DUT's live signal later.
+
 ---
 
 ### Phase 3 — IWM write path, volatile writes only
