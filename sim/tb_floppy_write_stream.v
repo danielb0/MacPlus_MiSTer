@@ -1,0 +1,207 @@
+`timescale 1ns/1ps
+//
+// Phase 3 -- real-write decode gate for rtl/floppy_track_decoder.v.
+//
+// Unlike tb_floppy_track_decoder.v (which round-trips the RTL *encoder*'s
+// output back through the decoder), this feeds the decoder a stream built
+// by sim/gen_write_stream.py: a from-scratch encoding of what a real Mac
+// write actually puts on the wire -- one continuous checksummed 524-byte
+// tag(12)+data(512) payload per sector, not the encoder's all-zero-tag
+// literal-sync shortcut. side 0's stream uses an all-zero tag (sanity);
+// side 1's uses a real, non-zero, non-trivial tag per sector -- the exact
+// case floppy_track_decoder.v rejected before the Phase 3 fix (see its
+// header comment and FLOPPY_WRITE_PLAN.md Phase 3).
+//
+// Both streams must decode to the same 512-byte sector_pattern() payload
+// sim/image.hex already carries for track 0 (both sides) -- the tag bytes
+// must be recovered-and-discarded, never leak into buf_mem.
+//
+module tb_floppy_write_stream;
+
+   localparam READY_GAP = 8; // clk cycles between ready pulses
+
+   reg clk = 0;
+   always #5 clk = ~clk;
+
+   reg ready = 0;
+   reg rst = 1;
+   reg side = 0;
+   reg sides = 1;
+   reg [6:0] track = 0;
+
+   reg [7:0] mem [0:819199];       // expected sector data (sim/image.hex)
+   reg [7:0] wmem [0:5999];        // write-stream bytes for the active side
+
+   reg [8:0] dec_buf_addr = 0;
+   wire [7:0] dec_buf_data;
+   wire sector_valid, reject;
+   wire [3:0] sector;
+   wire [21:0] addr;
+
+   reg corrupt_this_tick = 0;
+   integer byte_idx;
+   wire [7:0] feed_byte = wmem[byte_idx] ^ (corrupt_this_tick ? 8'hFF : 8'h00);
+
+   floppy_track_decoder dut_dec (
+      .clk(clk), .ready(ready), .rst(rst),
+      .side(side), .sides(sides), .track(track),
+      .idata(feed_byte),
+      .sector_valid(sector_valid), .sector(sector), .addr(addr),
+      .reject(reject),
+      .buf_addr(dec_buf_addr), .buf_data(dec_buf_data)
+   );
+
+   reg last_sector_valid, last_reject;
+   reg [3:0] last_sector;
+   reg [21:0] last_addr;
+
+   // matches tb_floppy_track_decoder.v's own bring-up note: sample the
+   // registered pulse outputs into testbench regs right at the edge, not
+   // after further blocking assignments in the same timestep (Icarus
+   // does not reliably hold them stable otherwise).
+   task tick;
+      input do_corrupt;
+      begin
+         corrupt_this_tick = do_corrupt;
+         ready = 0;
+         repeat (READY_GAP - 1) @(posedge clk);
+         ready = 1;
+         @(posedge clk);
+         last_sector_valid = sector_valid;
+         last_reject       = reject;
+         last_sector       = sector;
+         last_addr         = addr;
+         ready = 0;
+         corrupt_this_tick = 0;
+         if (byte_idx < 5999) byte_idx = byte_idx + 1;
+         #1;
+      end
+   endtask
+
+   task do_reset;
+      begin
+         rst = 1;
+         @(posedge clk);
+         @(negedge clk);
+         rst = 0;
+         #1;
+      end
+   endtask
+
+   integer all_ok, cyc, i, base, seen_count, mismatches;
+   reg [3:0] seen_mask;
+
+   task run_side;
+      input s;
+      input [8*30-1:0] hexfile;
+      begin
+         side = s;
+         track = 7'd0;
+         do_reset;
+         byte_idx = 0;
+         $readmemh(hexfile, wmem);
+         seen_mask = 4'd0;
+         seen_count = 0;
+         mismatches = 0;
+
+         for (cyc = 0; cyc < 3000; cyc = cyc + 1) begin
+            tick(1'b0);
+            if (last_sector_valid) begin
+               seen_count = seen_count + 1;
+               seen_mask[last_sector] = 1'b1;
+               base = last_addr;
+               for (i = 0; i < 512; i = i + 1)
+                  if (dut_dec.buf_mem[i] !== mem[base + i])
+                     mismatches = mismatches + 1;
+            end
+         end
+
+         if (seen_count == 4 && mismatches == 0 && seen_mask == 4'b1111) begin
+            $display("PASS: side %0d - all 4 sectors recovered byte-exact (tag discarded correctly)", s);
+         end else begin
+            $display("FAIL: side %0d - seen %0d/4 sectors (mask %b), %0d byte mismatches",
+                      s, seen_count, seen_mask, mismatches);
+            all_ok = 0;
+         end
+      end
+   endtask
+
+   // ---- negative tests: run exactly one (real-tag) sector field,
+   // optionally corrupting one tick or truncating, and confirm
+   // sector_valid never fires for it. Field layout (side 1, sector 0):
+   // D5 AA AD(3) + sector(1) + GRP(699) + DSUM(4) + DTRL(2) = 709 bytes.
+   integer t2, corrupt_tick, stop_tick;
+   reg got_valid, got_reject;
+
+   task run_one_field;
+      input integer c_tick; // -1 = no corruption
+      input integer s_tick; // stop feeding after this many ticks (-1 = full field)
+      begin
+         side = 1'b1;
+         track = 7'd0;
+         do_reset;
+         byte_idx = 0;
+         $readmemh("sim/write_stream_side1.hex", wmem);
+         got_valid  = 1'b0;
+         got_reject = 1'b0;
+         for (t2 = 0; t2 < 709; t2 = t2 + 1) begin
+            if (s_tick >= 0 && t2 >= s_tick) begin
+               #(READY_GAP * 10);
+            end else begin
+               tick(t2 == c_tick);
+               if (last_sector_valid) got_valid  = 1'b1;
+               if (last_reject)       got_reject = 1'b1;
+            end
+         end
+      end
+   endtask
+
+   initial begin
+      $readmemh("sim/image.hex", mem);
+      all_ok = 1;
+
+      run_side(1'b0, "sim/write_stream_side0.hex");
+      run_side(1'b1, "sim/write_stream_side1.hex");
+
+      run_one_field(-1, -1);
+      if (got_valid && !got_reject) begin
+         $display("PASS: clean real-tag field decodes with no reject");
+      end else begin
+         $display("FAIL: clean real-tag field did not decode cleanly (valid=%b reject=%b)", got_valid, got_reject);
+         all_ok = 0;
+      end
+
+      // corrupt one byte deep in the tag+data payload (tick 200, well
+      // inside the 699-byte GRP region which starts at tick 4)
+      run_one_field(200, -1);
+      if (!got_valid && got_reject) begin
+         $display("PASS: corrupt payload byte rejected, never committed");
+      end else begin
+         $display("FAIL: corrupt payload byte - valid=%b reject=%b (expected valid=0 reject=1)", got_valid, got_reject);
+         all_ok = 0;
+      end
+
+      // corrupt the first checksum byte (GRP ends at tick 702, DSUM starts tick 703)
+      run_one_field(703, -1);
+      if (!got_valid && got_reject) begin
+         $display("PASS: corrupt checksum byte rejected, never committed");
+      end else begin
+         $display("FAIL: corrupt checksum byte - valid=%b reject=%b (expected valid=0 reject=1)", got_valid, got_reject);
+         all_ok = 0;
+      end
+
+      // truncate mid-payload (stop feeding bytes partway through GRP)
+      run_one_field(-1, 300);
+      if (!got_valid) begin
+         $display("PASS: truncated field never committed");
+      end else begin
+         $display("FAIL: truncated field asserted sector_valid");
+         all_ok = 0;
+      end
+
+      $display("");
+      $display("%s", all_ok ? "PHASE 3 WRITE-STREAM GATE: PASS" : "PHASE 3 WRITE-STREAM GATE: FAIL");
+      $finish;
+   end
+
+endmodule

@@ -3,6 +3,18 @@
 // Phase 2 -- RTL encoder -> RTL decoder round-trip gate for
 // rtl/floppy_track_decoder.v, per FLOPPY_WRITE_PLAN.md Phase 2.
 //
+// Still valid after the Phase 3 tag-decode fix (see floppy_track_decoder.v's
+// header comment): the fixed decoder recovers a continuous 524-byte
+// tag(12)+data(512) payload directly, group g -> payload bytes 3g..3g+2, no
+// lookback/discard, over exactly the 699 raw bytes floppy_track_encoder.v's
+// DZRO+DPRE+DATA region already emits (its all-zero-tag DZRO shortcut is
+// bit-identical to what running 12 real zero bytes through that same
+// direct mapping would produce) -- so this round-trip still passes
+// unmodified. sim/tb_floppy_write_stream.v additionally covers the case
+// this file cannot (a real, non-zero-tag write, which the encoder never
+// produces).
+//
+
 // Wires floppy_track_encoder's odata directly into floppy_track_decoder's
 // idata (same `ready` pulse train driving both, same convention as
 // tb_floppy_track_encoder.v: sparse one-cycle-high ready pulses, not held

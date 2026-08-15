@@ -81,6 +81,18 @@ module dataController_top(
 	output [21:0] dskReadAddrExt,
 	input dskReadAckExt,
 
+	// write path (Phase 3 of FLOPPY_WRITE_PLAN.md)
+	input [1:0] writeProtect, // {ext,int}
+
+	output [21:0] dskWriteAddrInt,
+	output [15:0] dskWriteDataInt,
+	output        dskWriteReqInt,
+	input         dskWriteAckInt,
+	output [21:0] dskWriteAddrExt,
+	output [15:0] dskWriteDataExt,
+	output        dskWriteReqExt,
+	input         dskWriteAckExt,
+
 	// connections to io controller
 	input   [SCSI_DEVS-1:0] img_mounted,
 	input            [31:0] img_size,
@@ -453,7 +465,17 @@ module dataController_top(
 		.dskReadAckInt(dskReadAckInt),
 		.dskReadAddrExt(dskReadAddrExt),
 		.dskReadAckExt(dskReadAckExt),
-		.dskReadData(memoryDataIn[7:0])
+		.dskReadData(memoryDataIn[7:0]),
+
+		.writeProtect(writeProtect),
+		.dskWriteAddrInt(dskWriteAddrInt),
+		.dskWriteDataInt(dskWriteDataInt),
+		.dskWriteReqInt(dskWriteReqInt),
+		.dskWriteAckInt(dskWriteAckInt),
+		.dskWriteAddrExt(dskWriteAddrExt),
+		.dskWriteDataExt(dskWriteDataExt),
+		.dskWriteReqExt(dskWriteReqExt),
+		.dskWriteAckExt(dskWriteAckExt)
 	);
 
 	// SCC

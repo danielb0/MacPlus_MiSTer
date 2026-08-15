@@ -69,6 +69,7 @@ localparam CONF_STR = {
 	"-;",
 	"O9,Model,Plus,SE;",
 	"O5,Speed,8MHz,16MHz;",
+	"O6,Floppy Write,Off,On;",
 	"ODE,CPU,68000,68010,68020;",
 	"O4,Memory,1MB,4MB;",
 	"-;",
@@ -329,6 +330,39 @@ wire [15:0] ldr_int_wr_data, ldr_ext_wr_data;
 wire        dskLoadWrEn;
 wire        dskLoadSelExt;
 
+// floppy write-back (Phase 3: IWM write path -> SDRAM), same shared
+// extra-slot-3 port. Combined with the loader's own request below, since
+// addrController_top.v's arbiter (proven on hardware in Phase 1) is only
+// ever given ONE request/ack per side - loader and committer share that
+// one slot per side with the loader given fixed priority.
+wire [21:0] wc_int_wr_addr, wc_ext_wr_addr;
+wire        wc_int_wr_req,  wc_ext_wr_req;
+wire        wc_int_wr_ack,  wc_ext_wr_ack;
+wire [15:0] wc_int_wr_data, wc_ext_wr_data;
+
+// per-side combined (loader-or-committer) request presented to
+// addrController_top.v; loader wins whenever it is requesting, since a
+// mount and a write-commit contending for the same side is only possible
+// as a rare corner case, never a steady-state situation.
+wire [21:0] slot3_int_addr = ldr_int_wr_req ? ldr_int_wr_addr : wc_int_wr_addr;
+wire        slot3_int_req  = ldr_int_wr_req | wc_int_wr_req;
+wire [15:0] slot3_int_data = ldr_int_wr_req ? ldr_int_wr_data : wc_int_wr_data;
+wire        slot3_int_ack;
+assign ldr_int_wr_ack = slot3_int_ack &  ldr_int_wr_req;
+assign wc_int_wr_ack  = slot3_int_ack & ~ldr_int_wr_req;
+
+wire [21:0] slot3_ext_addr = ldr_ext_wr_req ? ldr_ext_wr_addr : wc_ext_wr_addr;
+wire        slot3_ext_req  = ldr_ext_wr_req | wc_ext_wr_req;
+wire [15:0] slot3_ext_data = ldr_ext_wr_req ? ldr_ext_wr_data : wc_ext_wr_data;
+wire        slot3_ext_ack;
+assign ldr_ext_wr_ack = slot3_ext_ack &  ldr_ext_wr_req;
+assign wc_ext_wr_ack  = slot3_ext_ack & ~ldr_ext_wr_req;
+
+// OSD write-protect toggle (defaults to protected/status[6]=0), ANDed per
+// drive with that drive's own latched img_readonly - see floppy_loader.v.
+wire wp_int = ~status[6] | ldr_int_readonly;
+wire wp_ext = ~status[6] | ldr_ext_readonly;
+
 // dtack generation in turbo mode
 reg  turbo_dtack_en, cpuBusControl_d;
 always @(posedge clk_sys) begin
@@ -510,12 +544,12 @@ addrController_top ac0
 	.dskReadAddrExt(dskReadAddrExt),
 	.dskReadAckExt(dskReadAckExt),
 
-	.dskLoadAddrInt(ldr_int_wr_addr),
-	.dskLoadReqInt(ldr_int_wr_req),
-	.dskLoadAckInt(ldr_int_wr_ack),
-	.dskLoadAddrExt(ldr_ext_wr_addr),
-	.dskLoadReqExt(ldr_ext_wr_req),
-	.dskLoadAckExt(ldr_ext_wr_ack),
+	.dskLoadAddrInt(slot3_int_addr),
+	.dskLoadReqInt(slot3_int_req),
+	.dskLoadAckInt(slot3_int_ack),
+	.dskLoadAddrExt(slot3_ext_addr),
+	.dskLoadReqExt(slot3_ext_req),
+	.dskLoadAckExt(slot3_ext_ack),
 	.dskLoadWrEn(dskLoadWrEn),
 	.dskLoadSelExt(dskLoadSelExt)
 );
@@ -591,6 +625,16 @@ dataController_top #(SCSI_DEVS) dc0
 	.dskReadAckExt(dskReadAckExt),
 	.diskMotor(diskMotor),
 	.diskAct(diskAct),
+
+	.writeProtect({wp_ext, wp_int}),
+	.dskWriteAddrInt(wc_int_wr_addr),
+	.dskWriteDataInt(wc_int_wr_data),
+	.dskWriteReqInt(wc_int_wr_req),
+	.dskWriteAckInt(wc_int_wr_ack),
+	.dskWriteAddrExt(wc_ext_wr_addr),
+	.dskWriteDataExt(wc_ext_wr_data),
+	.dskWriteReqExt(wc_ext_wr_req),
+	.dskWriteAckExt(wc_ext_wr_ack),
 
 	// block device interface for scsi disk
 	.img_mounted(img_mounted[SCSI_DEVS-1:0]),
@@ -676,13 +720,15 @@ floppy_loader ldr_ext
 );
 
 // word written into SDRAM this cycle when dskLoadWrEn is high - selects
-// whichever loader addrController_top's arbiter (fixed priority int-over-ext)
-// actually granted this cycle. Must use dskLoadSelExt (held for the whole
-// grant cycle), not ldr_ext_wr_ack/dskLoadAckExt - that ack is a late pulse
-// in busPhase 3, one phase after sdram.v's CAS phase (busPhase 1) already
-// latched this data, so gating on it left every ext (drive 2) load writing
-// int's stale data instead of its own.
-wire [15:0] loader_wr_data = dskLoadSelExt ? ldr_ext_wr_data : ldr_int_wr_data;
+// whichever side (int/ext) addrController_top's arbiter (fixed priority
+// int-over-ext) actually granted this cycle, and within that side,
+// whichever source (loader/committer) slot3_int_req/slot3_ext_req above
+// selected. Must use dskLoadSelExt (held for the whole grant cycle), not
+// ldr_ext_wr_ack/dskLoadAckExt - that ack is a late pulse in busPhase 3,
+// one phase after sdram.v's CAS phase (busPhase 1) already latched this
+// data, so gating on it left every ext (drive 2) write writing int's
+// stale data instead of its own.
+wire [15:0] slot3_wr_data = dskLoadSelExt ? slot3_ext_data : slot3_int_data;
 
 reg disk_act;
 always @(posedge clk_sys) begin
@@ -785,7 +831,7 @@ wire [24:0] sdram_addr = download_cycle ? {4'b0001, dio_a[20:0] } :
                          ~_romOE        ? {4'b0001, 2'b00, status_mod, memoryAddr[18:1]} :
                                           {3'b000, (dskReadAckInt || dskReadAckExt || dskLoadWrEn), memoryAddr[21:1]};
 
-wire [15:0] sdram_din  = download_cycle ? dio_data  : dskLoadWrEn ? loader_wr_data : memoryDataOut;
+wire [15:0] sdram_din  = download_cycle ? dio_data  : dskLoadWrEn ? slot3_wr_data : memoryDataOut;
 wire  [1:0] sdram_ds   = download_cycle ? 2'b11     : dskLoadWrEn ? 2'b11          : { !_memoryUDS, !_memoryLDS };
 wire        sdram_we   = download_cycle ? dio_write : dskLoadWrEn ? 1'b1           : !_ramWE;
 wire        sdram_oe   = download_cycle ? 1'b0                  : (!_ramOE || !_romOE || dskReadAckInt || dskReadAckExt);

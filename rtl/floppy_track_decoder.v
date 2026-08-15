@@ -10,13 +10,19 @@
  own pacing convention - see sim/tb_floppy_track_encoder.v's header comment).
  Scans continuously for the D5 AA AD data-field marker (ignoring everything
  else, including the address field's D5 AA 96, whose differing third byte
- never matches), decodes the sector number, verifies the 12-byte DZRO sync
- run, de-nibblizes the 683-byte 6:2 payload back to 512 bytes while running
- the C1/C2/C3 checksum chain in reverse, verifies it against the trailing
- 4-byte checksum field, and verifies the DE AA trailer. `sector_valid`
+ never matches), decodes the sector number, then de-nibblizes the whole
+ 524-byte continuous payload (12-byte Sony tag + 512-byte sector data, one
+ unbroken 6:2 group stream per real Apple GCR format - the 12 tag bytes are
+ genuine data written by the Mac, NOT a literal sync run, despite this
+ core's own read-side encoder faking an all-zero tag as one; see
+ FLOPPY_WRITE_PLAN.md Phase 3) back to 524 bytes while running the C1/C2/C3
+ checksum chain in reverse across all of it, discards the first 12
+ recovered bytes (the tag - this core has nowhere to expose it) keeping
+ only the 512 sector-data bytes, verifies the recovered checksum against
+ the trailing 4-byte checksum field, and verifies the DE AA trailer. `sector_valid`
  pulses for exactly one clk if and only if every one of those checks
  passed - never for a partial, corrupt, or truncated field. Any failure
- (bad encoding, bad DZRO run, checksum mismatch, bad trailer) instead
+ (bad encoding, checksum mismatch, bad trailer) instead
  pulses `reject` and returns to scanning; a field that simply stops
  arriving (truncation) just leaves the decoder waiting, which is the
  correct behaviour - there is no code path that can assert sector_valid
@@ -24,9 +30,17 @@
 
  The nibble-recovery arithmetic below is a direct RTL port of the reference
  decoder proved out in Phase 0 (sim/decode_track.py) against this project's
- own RTL encoder dumps: group g's four output bytes recover group (g-1)'s
- three data bytes (a one-group lookback - see decode_track.py's module
- docstring for why), so group 0's bytes are read and discarded, not used.
+ own RTL encoder dumps: group g's four raw bytes recover group g's own
+ three payload bytes directly (payload bytes 3g..3g+2) - there is no
+ lookback and no discarded group. (An earlier reading of decode_track.py's
+ own docstring claimed a one-group lookback with group 0 thrown away; that
+ was a misreading of why the original 512-byte-only decode happened to
+ come out right - re-derived and empirically confirmed against the real,
+ unmodified floppy_track_encoder.v's actual output during the Phase 3 tag
+ fix: decoding its whole 699-byte DZRO+DPRE+DATA region this way, with no
+ group discarded, recovers exactly the 12 zero tag bytes followed by the
+ real 512-byte sector data, byte-for-byte, using precisely the bytes the
+ encoder emits - no invented extra warmup group needed.)
  The forward/reverse GCR table below was generated mechanically from
  sim/gcr_common.py's REVERSE_SONY_TABLE (itself extracted from
  floppy_track_encoder.v's own table, never hand-transcribed), so it cannot
@@ -61,9 +75,16 @@ module floppy_track_decoder (
    output reg        reject,
 
    // recovered 512-byte payload from the most recently completed sector,
-   // synchronous-address / combinational-read port
+   // registered (1-clk-latency) read port - buf_data reflects buf_addr as
+   // it stood one cycle earlier, the standard inferrable-block-RAM idiom
+   // (matches floppy_loader.v's buf_rd). An earlier combinational-read
+   // version of this port elaborated correctly but could not map to a
+   // Cyclone V M10K at all (no combinational read mode), so Quartus built
+   // it out of plain registers plus a 512:1 mux - roughly 6,500 ALMs per
+   // drive instance, found only once this module was actually synthesized
+   // for hardware in Phase 3 (Phase 2 was sim-only).
    input      [8:0]  buf_addr,
-   output     [7:0]  buf_data
+   output reg [7:0]  buf_data
 );
 
    // ------------------------------------------------------------------
@@ -141,8 +162,10 @@ module floppy_track_decoder (
    // ------------------------------------------------------------------
    localparam S_SCAN = 3'd0;  // hunting for D5 AA AD
    localparam S_SECT = 3'd1;  // 1 byte: sector number
-   localparam S_DZRO = 3'd2;  // 12 bytes: must all be the sync-zero byte
-   localparam S_GRP  = 3'd3;  // 687 bytes across 172 groups (last partial)
+   localparam S_GRP  = 3'd3;  // 699 bytes across 175 groups (last partial):
+                               // recovers the 524-byte tag(12)+data(512)
+                               // continuous payload directly, group g ->
+                               // payload bytes 3g..3g+2, no lookback
    localparam S_DSUM = 3'd4;  // 4 bytes: checksum
    localparam S_DTRL = 3'd5;  // 2 bytes: DE AA trailer
 
@@ -151,9 +174,7 @@ module floppy_track_decoder (
 
    reg [3:0]  sector_reg;
 
-   reg [3:0]  dzro_cnt;
-
-   reg [7:0]  group_index;   // 0..171
+   reg [7:0]  group_index;   // 0..174
    reg [1:0]  byte_in_group; // 0..3
    reg [5:0]  grp_byte0, grp_byte1, grp_byte2;
 
@@ -166,11 +187,11 @@ module floppy_track_decoder (
    reg        dtrl_idx;
 
    reg [7:0]  buf_mem [0:511];
-   assign buf_data = buf_mem[buf_addr];
+   always @(posedge clk) buf_data <= buf_mem[buf_addr];
 
    // group-completion combinational helpers (S_GRP only)
    wire has_s3    = (byte_in_group == 2'd3);
-   wire grp_done  = has_s3 || (group_index == 8'd171 && byte_in_group == 2'd2);
+   wire grp_done  = has_s3 || (group_index == 8'd174 && byte_in_group == 2'd2);
    wire [5:0] gs2 = has_s3 ? grp_byte2 : nib_cur; // s2: stored, or live on the partial group's completing byte
 
    wire [1:0] top0 = grp_byte0[5:4];
@@ -193,6 +214,14 @@ module floppy_track_decoder (
    wire [7:0] nib_xor_2 = {top2_, nib_cur}; // only meaningful when has_s3
    wire [7:0] nib_in_3  = nib_xor_2 ^ new_c2;
    wire [7:0] new_c1_full = rol_c1 + nib_in_3 + {7'd0, new_c2x};
+
+   // buf_mem write indices: recovered_count runs 0..523 across the whole
+   // tag+data payload (needs the full 10 bits - it exceeds 511), so the
+   // "-12" (drop the tag) has to happen before truncating to the 9-bit
+   // buf_mem address, not after.
+   wire [9:0] buf_idx0 = recovered_count - 10'd12;
+   wire [9:0] buf_idx1 = recovered_count + 10'd1 - 10'd12;
+   wire [9:0] buf_idx2 = recovered_count + 10'd2 - 10'd12;
 
    wire [5:0] want_dsum_top = {c3[7:6], c2[7:6], c1[7:6]};
 
@@ -228,22 +257,13 @@ module floppy_track_decoder (
             S_SECT: begin
                if (!nib_valid) do_reject;
                else begin
-                  sector_reg <= nib_cur[3:0];
-                  state      <= S_DZRO;
-                  dzro_cnt   <= 4'd0;
-               end
-            end
-
-            S_DZRO: begin
-               if (idata != 8'h96) do_reject;
-               else if (dzro_cnt == 4'd11) begin
+                  sector_reg      <= nib_cur[3:0];
                   state           <= S_GRP;
                   group_index     <= 8'd0;
                   byte_in_group   <= 2'd0;
                   c1 <= 8'd0; c2 <= 8'd0; c3 <= 8'd0;
                   recovered_count <= 10'd0;
-               end else
-                  dzro_cnt <= dzro_cnt + 4'd1;
+               end
             end
 
             S_GRP: begin
@@ -258,25 +278,31 @@ module floppy_track_decoder (
                   end
 
                   if (grp_done) begin
-                     if (group_index != 8'd0) begin
-                        // group 0 is read-and-discarded (see header comment) -
-                        // only groups 1..171 actually recover/commit bytes.
-                        buf_mem[recovered_count[8:0]]     <= nib_in_1;
-                        buf_mem[recovered_count[8:0] + 1] <= nib_in_2;
-                        if (has_s3) begin
-                           buf_mem[recovered_count[8:0] + 2] <= nib_in_3;
-                           recovered_count <= recovered_count + 10'd3;
-                           c1 <= new_c1_full;
-                        end else begin
-                           recovered_count <= recovered_count + 10'd2;
-                           c1 <= rol_c1; // last (partial) group: no third byte to add
-                        end
-                        c2 <= new_c2;
-                        c3 <= new_c3;
+                     // groups 0..174 recover the full 524-byte tag+data
+                     // payload directly (group g -> payload bytes 3g..3g+2,
+                     // no lookback/discard - see header comment) -
+                     // bytes 0..11 are the Sony tag, which this core has
+                     // nowhere to expose, so only bytes 12..523
+                     // (recovered_count-12, i.e. buf index 0..511) are
+                     // actually committed to buf_mem.
+                     if (recovered_count >= 10'd12)
+                        buf_mem[buf_idx0[8:0]] <= nib_in_1;
+                     if (recovered_count + 10'd1 >= 10'd12)
+                        buf_mem[buf_idx1[8:0]] <= nib_in_2;
+                     if (has_s3) begin
+                        if (recovered_count + 10'd2 >= 10'd12)
+                           buf_mem[buf_idx2[8:0]] <= nib_in_3;
+                        recovered_count <= recovered_count + 10'd3;
+                        c1 <= new_c1_full;
+                     end else begin
+                        recovered_count <= recovered_count + 10'd2;
+                        c1 <= rol_c1; // last (partial) group: no third byte to add
                      end
+                     c2 <= new_c2;
+                     c3 <= new_c3;
 
                      byte_in_group <= 2'd0;
-                     if (group_index == 8'd171) begin
+                     if (group_index == 8'd174) begin
                         state    <= S_DSUM;
                         dsum_idx <= 2'd0;
                      end else

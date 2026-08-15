@@ -56,7 +56,19 @@ module iwm
 	input dskReadAckInt,
 	output [21:0] dskReadAddrExt,
 	input dskReadAckExt,
-	input [7:0] dskReadData
+	input [7:0] dskReadData,
+
+	// write path (Phase 3 of FLOPPY_WRITE_PLAN.md)
+	input [1:0] writeProtect, // {ext,int} - OSD toggle ANDed with img_readonly, per drive
+
+	output [21:0] dskWriteAddrInt,
+	output [15:0] dskWriteDataInt,
+	output        dskWriteReqInt,
+	input         dskWriteAckInt,
+	output [21:0] dskWriteAddrExt,
+	output [15:0] dskWriteDataExt,
+	output        dskWriteReqExt,
+	input         dskWriteAckExt
 );
 
 	wire [7:0] dataInLo = dataIn[7:0];
@@ -67,11 +79,13 @@ module iwm
 	reg ca0, ca1, ca2, lstrb, selectExternalDrive, q6, q7;
 	reg ca0Next, ca1Next, ca2Next, lstrbNext, selectExternalDriveNext, q6Next, q7Next;
 	wire advanceDriveHead; // prevents overrun when debugging, does not exit on a real Mac!
-	reg [7:0] writeData;
 	reg [7:0] readDataLatch;
 	wire _iwmBusy, _writeUnderrun;
-	assign _iwmBusy = 1'b1; // for writes, a value of 1 here indicates the IWM write buffer is empty
-	assign _writeUnderrun = 1'b1;
+	// for writes, a value of 1 here indicates the IWM write buffer is empty -
+	// muxed from whichever drive is currently selected, mirroring readData/
+	// newByteReady below. See floppy.v's writeBusy/writeUnderrun comment.
+	assign _iwmBusy       = ~(selectExternalDrive ? writeBusyExt : writeBusyInt);
+	assign _writeUnderrun = ~(selectExternalDrive ? writeUnderrunExt : writeUnderrunInt);
 
 	// floppy disk drives 
 	reg diskEnableExt, diskEnableInt;
@@ -82,7 +96,18 @@ module iwm
 	wire newByteReadyExt;
 	wire [7:0] readDataExt;
 	wire senseExt = readDataExt[7]; // bit 7 doubles as the sense line here
-	
+
+	// write path: which drive's data register a CPU write targets follows
+	// selectExternalDriveNext, mirroring q7Next/q6Next's use below for the
+	// same in-flight access (see the "write IWM state" block further down).
+	wire dataRegWrite = (_cpuRW == 1'b0) && selectIWM && (_cpuLDS == 1'b0) &&
+	                    ({q7Next, q6Next} == 2'b11) && (diskEnableExt | diskEnableInt);
+	wire writeReqInt = cen && dataRegWrite && !selectExternalDriveNext;
+	wire writeReqExt = cen && dataRegWrite &&  selectExternalDriveNext;
+
+	wire writeBusyInt, writeUnderrunInt;
+	wire writeBusyExt, writeUnderrunExt;
+
 	floppy floppyInt
 	(
 		.clk(clk),
@@ -96,22 +121,35 @@ module iwm
 		.SEL(SEL),
 		.lstrb(lstrb),
 		._enable(~(diskEnableInt & driveSel)),
-		.writeData(writeData),
+		// dataInLo directly, not a registered copy: writeReqInt pulses the
+		// same cycle a register load from dataInLo would be scheduled, and
+		// nonblocking assignments only see pre-edge values, so a register
+		// read here would lag the strobe by one cycle.
+		.writeData(dataInLo),
 		.readData(readDataInt),
 		.advanceDriveHead(advanceDriveHead),
 		.newByteReady(newByteReadyInt),
 		.insertDisk(insertDisk[0]),
 		.diskSides(diskSides[0]),
-		.diskEject(diskEject[0]),	
+		.diskEject(diskEject[0]),
 
 		.motor(diskMotor[0]),
 		.act(diskAct[0]),
 
 		.dskReadAddr(dskReadAddrInt),
 		.dskReadAck(dskReadAckInt),
-		.dskReadData(dskReadData)
+		.dskReadData(dskReadData),
+
+		.writeReq(writeReqInt),
+		.writeProtect(writeProtect[0]),
+		.writeBusy(writeBusyInt),
+		.writeUnderrun(writeUnderrunInt),
+		.dskWriteAddr(dskWriteAddrInt),
+		.dskWriteData(dskWriteDataInt),
+		.dskWriteReq(dskWriteReqInt),
+		.dskWriteAck(dskWriteAckInt)
 	);
-		
+
 	floppy floppyExt
 	(
 		.clk(clk),
@@ -125,22 +163,31 @@ module iwm
 		.SEL(SEL),
 		.lstrb(lstrb),
 		._enable(~diskEnableExt),
-		.writeData(writeData),
+		.writeData(dataInLo), // see floppyInt's writeData comment above
 		.readData(readDataExt),
 		.advanceDriveHead(advanceDriveHead),
 		.newByteReady(newByteReadyExt),
 		.insertDisk(insertDisk[1]),
 		.diskSides(diskSides[1]),
 		.diskEject(diskEject[1]),
-		
+
 		.motor(diskMotor[1]),
 		.act(diskAct[1]),
 
 		.dskReadAddr(dskReadAddrExt),
 		.dskReadAck(dskReadAckExt),
-		.dskReadData(dskReadData)
+		.dskReadData(dskReadData),
+
+		.writeReq(writeReqExt),
+		.writeProtect(writeProtect[1]),
+		.writeBusy(writeBusyExt),
+		.writeUnderrun(writeUnderrunExt),
+		.dskWriteAddr(dskWriteAddrExt),
+		.dskWriteData(dskWriteDataExt),
+		.dskWriteReq(dskWriteReqExt),
+		.dskWriteAck(dskWriteAckExt)
 	);
-	
+
 	wire [7:0] readData = selectExternalDrive ? readDataExt : readDataInt;
 	wire newByteReady = selectExternalDrive ? newByteReadyExt : newByteReadyInt;
 	
@@ -250,19 +297,20 @@ module iwm
 	end
 
 	// write IWM state
+	// Note: the write-data-register case (diskEnableExt|diskEnableInt) is
+	// handled directly by writeReqInt/Ext + dataInLo above (floppy.v does
+	// its own byte capture), not by a register here - see the writeData
+	// port comment on the floppy instances above for why.
 	always @(posedge clk or negedge _reset) begin
-		if (_reset == 1'b0) begin		
+		if (_reset == 1'b0) begin
 			iwmMode <= 0;
-			writeData <= 0;
 		end
 		else if(cen) begin
 			if (_cpuRW == 0 && selectIWM == 1'b1 && _cpuLDS == 1'b0) begin
 				// writing to any IWM address modifies state as selected by Q7 and Q6
 				case ({q7Next,q6Next})
 					2'b11: begin
-						if (diskEnableExt | diskEnableInt)
-							writeData <= dataInLo;
-						else
+						if (~(diskEnableExt | diskEnableInt))
 							iwmMode <= dataInLo[4:0];
 					end
 				endcase
