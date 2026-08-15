@@ -90,6 +90,14 @@ Each phase ends at a gate that can be evaluated on its own. Phases 1 and 3 are t
 
 **Why first:** cheapest possible place to discover a misunderstanding of the 6:2 nibble scheme or the checksum chain.
 
+**STATUS: GATE PASSED (2026-08-15).** Icarus Verilog testbench (`sim/tb_floppy_track_encoder.v`) drives the real `rtl/floppy_track_encoder.v` for tracks 0/16/40/79 × both sides on a synthetic 800K image (`sim/gen_image.py`, geometry formulas cross-checked against the RTL's own `soff`/`spt`). A cycle-accurate Python port (`sim/encoder_model.py`) matches the RTL byte-for-byte across all 8 combos, and a reference decoder (`sim/decode_track.py`), the algebraic inverse of that model, recovers all 84 sectors byte-exact and correctly rejects three corruption cases (`sim/test_negative.py`).
+
+Two real bugs surfaced and got fixed along the way, both worth remembering for Phase 2:
+1. **Testbench reset race:** deasserting `rst` on the same clock edge as the DUT's own `if(rst)` check races the DUT — Icarus resolved it in the "wrong" order, corrupting the very first cycle. Fix: deassert `rst` on a `negedge`, clear of any `posedge`.
+2. **`ready` must be sparse, not continuous.** The encoder's `addr` register updates every `clk` cycle regardless of `ready`, and in real operation (`rtl/floppy.v`) `ready` only pulses once per ~128 clocks (`diskDataByteTimer`), giving `addr` ample idle time to settle before each fetch. An early testbench version held `ready` high every cycle, starving that settle time — the resulting artifact wasn't a crash, it silently produced a self-consistent but wrong byte stream (some source bytes read twice, others never read), which only surfaced as a checksum failure in the *decoder*, not in the encoder validation. Any Phase 2/3 testbench must pulse `ready` sparsely for the same reason.
+
+A third, purely algorithmic bug (not a timing issue) was in the decoder itself: nib_xor_0/1/2 are registers, so a group's four output bytes (cnt=0,1,2,3) encode the *previous* group's three bytes in full — not a lookahead split across two groups, as first assumed. Fixed by decoding with a one-group lookback instead.
+
 ---
 
 ### Phase 1 — Convert floppies to block devices (still read-only)

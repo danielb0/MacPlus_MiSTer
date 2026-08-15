@@ -1,0 +1,5 @@
+__pycache__/
+*.vvp
+image.bin
+image.hex
+out/
