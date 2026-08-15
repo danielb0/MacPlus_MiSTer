@@ -213,7 +213,9 @@ Fix (`rtl/floppy_track_decoder.v`): removed `S_DZRO`; `S_GRP` now decodes one co
 
 Verified three ways: `sim/gen_write_stream.py` builds real (non-zero-tag) GCR data fields as the direct algebraic inverse of the RTL's own `S_GRP` equations (cross-checked byte-exact by decoding its own output before ever touching Verilog); `sim/tb_floppy_write_stream.v` feeds those straight into `floppy_track_decoder.v` — both an all-zero tag and a real non-trivial tag recover the correct 512 bytes, tag correctly discarded, and the existing corrupt-byte/corrupt-checksum/truncation rejection cases still hold; and — the strongest check — `sim/tb_floppy_track_decoder.v`'s **original, unmodified** Phase 2 round-trip gate (RTL encoder → RTL decoder, all 8 track/side combos + all 3 negative cases) **still passes exactly as it did before this fix**, because the fixed decoder's 699-byte requirement is precisely what the encoder's all-zero-tag shortcut already produces (zero tag content, not a shorter format). `sim/tb_floppy_write_path.v` (full `floppy.v` write-path integration: byte-timer/busy handshake → decoder → committer → mocked SDRAM) re-pointed at a real-tag field from the new generator (the RTL encoder can never produce one — its `STATE_DZRO` is hardcoded to an all-zero tag) and passes end-to-end.
 
-**SIM GATE: PASS (2026-08-15).** Hardware gate not yet re-run.
+**SIM GATE: PASS (2026-08-15).**
+
+**HARDWARE GATE: PASS (2026-08-15, re-test after the tag-decode fix).** Full compile: 0 errors, 57 warnings, timing met (setup slack 0.617ns, hold slack 0.245ns); 29,189/41,910 ALMs (70%, up from 66% pre-fix — the tag-discard logic added a modest amount, the still-deferred `buf_mem` M10K-inference issue is unchanged). User confirmed: read and write both work on 400K and 800K diskettes, on both drives; compiled and ran a program from UCSD BASIC, i.e. a real write-then-execute round trip, not just a Finder save. **Phase 3 is done.**
 
 ---
 
