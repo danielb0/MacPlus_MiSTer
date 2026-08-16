@@ -30,7 +30,7 @@ assign USER_OUT = '1;
 assign {DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, DDRAM_RD, DDRAM_WE} = 0; 
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
-assign LED_USER  = dio_download || ldr_int_busy || ldr_ext_busy || (disk_act ^ |diskMotor);
+assign LED_USER  = dio_download || ldr_int_busy || ldr_ext_busy || wr_int_busy || wr_ext_busy || (disk_act ^ |diskMotor);
 assign LED_DISK  = 0;
 assign LED_POWER = 0;
 assign BUTTONS   = 0;
@@ -159,8 +159,9 @@ assign sd_lba[0] = scsi_sd_lba[0];
 assign sd_lba[1] = scsi_sd_lba[1];
 assign sd_buff_din[0] = scsi_sd_buff_din[0];
 assign sd_buff_din[1] = scsi_sd_buff_din[1];
-assign sd_buff_din[2] = 16'h0; // floppy loaders never sd_wr in Phase 1
-assign sd_buff_din[3] = 16'h0;
+// sd_buff_din[2]/[3] driven below by each drive's floppy_sd_writer (Phase 4) -
+// only ever consulted by hps_io during a sd_wr session for that slot, which
+// only the writer ever asserts, so no mux against the loader is needed here.
 
 wire        ioctl_write;
 reg         ioctl_wait = 0;
@@ -339,6 +340,14 @@ wire [21:0] wc_int_wr_addr, wc_ext_wr_addr;
 wire        wc_int_wr_req,  wc_ext_wr_req;
 wire        wc_int_wr_ack,  wc_ext_wr_ack;
 wire [15:0] wc_int_wr_data, wc_ext_wr_data;
+
+// SD persistence tap (Phase 4): mirrors each committed sector so
+// floppy_sd_writer can shadow it out to the mounted .dsk over sd_wr.
+wire        wc_int_commit_done,   wc_ext_commit_done;
+wire [21:0] wc_int_commit_addr,   wc_ext_commit_addr;
+wire        wc_int_commit_buf_wr, wc_ext_commit_buf_wr;
+wire [7:0]  wc_int_commit_buf_addr, wc_ext_commit_buf_addr;
+wire [15:0] wc_int_commit_buf_data, wc_ext_commit_buf_data;
 
 // per-side combined (loader-or-committer) request presented to
 // addrController_top.v; loader wins whenever it is requesting, since a
@@ -636,6 +645,17 @@ dataController_top #(SCSI_DEVS) dc0
 	.dskWriteReqExt(wc_ext_wr_req),
 	.dskWriteAckExt(wc_ext_wr_ack),
 
+	.dskCommitDoneInt(wc_int_commit_done),
+	.dskCommitAddrInt(wc_int_commit_addr),
+	.dskCommitBufWrInt(wc_int_commit_buf_wr),
+	.dskCommitBufAddrInt(wc_int_commit_buf_addr),
+	.dskCommitBufDataInt(wc_int_commit_buf_data),
+	.dskCommitDoneExt(wc_ext_commit_done),
+	.dskCommitAddrExt(wc_ext_commit_addr),
+	.dskCommitBufWrExt(wc_ext_commit_buf_wr),
+	.dskCommitBufAddrExt(wc_ext_commit_buf_addr),
+	.dskCommitBufDataExt(wc_ext_commit_buf_data),
+
 	// block device interface for scsi disk
 	.img_mounted(img_mounted[SCSI_DEVS-1:0]),
 	.img_size(img_size[40:9]),
@@ -651,12 +671,32 @@ dataController_top #(SCSI_DEVS) dc0
 );
 
 // sd_rd/sd_wr are consumer OUTPUTS -> hps_io INPUTS, so the SCSI 2-bit view
-// above and each floppy_loader's own scalar request must be combined into
-// the full VDNUM=4 vectors here. Floppies never sd_wr in Phase 1 (still
-// read-only).
+// above, each floppy_loader's own scalar sd_rd request (Phase 1), and each
+// floppy_sd_writer's own scalar sd_wr request (Phase 4) must be combined
+// into the full VDNUM=4 vectors here.
 wire ldr_int_sd_rd, ldr_ext_sd_rd;
+wire wr_int_sd_wr,  wr_ext_sd_wr;
 assign sd_rd = {ldr_ext_sd_rd, ldr_int_sd_rd, scsi_sd_rd};
-assign sd_wr = {1'b0, 1'b0, scsi_sd_wr};
+assign sd_wr = {wr_ext_sd_wr, wr_int_sd_wr, scsi_sd_wr};
+
+// sd_lba is likewise shared per slot between the loader (valid while it is
+// busy) and the writer (valid the rest of the time) - the writer itself
+// never starts while loader_busy is asserted (see floppy_sd_writer.v), so
+// this mux can never straddle a genuine simultaneous request.
+wire [31:0] ldr_int_sd_lba, ldr_ext_sd_lba;
+wire [31:0] wr_int_sd_lba, wr_ext_sd_lba;
+assign sd_lba[2] = ldr_int_busy ? ldr_int_sd_lba : wr_int_sd_lba;
+assign sd_lba[3] = ldr_ext_busy ? ldr_ext_sd_lba : wr_ext_sd_lba;
+
+wire [15:0] wr_int_sd_buff_din, wr_ext_sd_buff_din;
+assign sd_buff_din[2] = wr_int_sd_buff_din;
+assign sd_buff_din[3] = wr_ext_sd_buff_din;
+
+// wr_*_busy: queued-or-in-flight sd_wr against this slot (see
+// floppy_sd_writer.v) - folded into LED_USER below alongside the loader's
+// own busy, so the activity light also covers a pending SD flush after a
+// write, not just a mount-time load.
+wire wr_int_busy, wr_ext_busy;
 
 wire        ldr_int_done, ldr_ext_done;
 wire        ldr_int_busy, ldr_ext_busy;
@@ -672,7 +712,7 @@ floppy_loader ldr_int
 	.img_size(img_size),
 	.img_readonly(img_readonly),
 
-	.sd_lba(sd_lba[2]),
+	.sd_lba(ldr_int_sd_lba),
 	.sd_rd(ldr_int_sd_rd),
 	.sd_ack(sd_ack[2]),
 
@@ -700,7 +740,7 @@ floppy_loader ldr_ext
 	.img_size(img_size),
 	.img_readonly(img_readonly),
 
-	.sd_lba(sd_lba[3]),
+	.sd_lba(ldr_ext_sd_lba),
 	.sd_rd(ldr_ext_sd_rd),
 	.sd_ack(sd_ack[3]),
 
@@ -717,6 +757,58 @@ floppy_loader ldr_ext
 	.loaded_size(ldr_ext_size),
 	.readonly_latched(ldr_ext_readonly),
 	.busy(ldr_ext_busy)
+);
+
+floppy_sd_writer wr_int
+(
+	.clk(clk_sys),
+	.reset(!pll_locked),
+
+	.img_mounted(img_mounted[2]),
+
+	.commit_done(wc_int_commit_done),
+	.commit_addr(wc_int_commit_addr),
+	.commit_buf_wr(wc_int_commit_buf_wr),
+	.commit_buf_addr(wc_int_commit_buf_addr),
+	.commit_buf_data(wc_int_commit_buf_data),
+
+	.readonly(ldr_int_readonly),
+	.loader_busy(ldr_int_busy),
+
+	.sd_lba(wr_int_sd_lba),
+	.sd_wr(wr_int_sd_wr),
+	.sd_ack(sd_ack[2]),
+
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_din(wr_int_sd_buff_din),
+
+	.busy(wr_int_busy)
+);
+
+floppy_sd_writer wr_ext
+(
+	.clk(clk_sys),
+	.reset(!pll_locked),
+
+	.img_mounted(img_mounted[3]),
+
+	.commit_done(wc_ext_commit_done),
+	.commit_addr(wc_ext_commit_addr),
+	.commit_buf_wr(wc_ext_commit_buf_wr),
+	.commit_buf_addr(wc_ext_commit_buf_addr),
+	.commit_buf_data(wc_ext_commit_buf_data),
+
+	.readonly(ldr_ext_readonly),
+	.loader_busy(ldr_ext_busy),
+
+	.sd_lba(wr_ext_sd_lba),
+	.sd_wr(wr_ext_sd_wr),
+	.sd_ack(sd_ack[3]),
+
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_din(wr_ext_sd_buff_din),
+
+	.busy(wr_ext_busy)
 );
 
 // word written into SDRAM this cycle when dskLoadWrEn is high - selects

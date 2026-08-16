@@ -68,7 +68,19 @@ module iwm
 	output [21:0] dskWriteAddrExt,
 	output [15:0] dskWriteDataExt,
 	output        dskWriteReqExt,
-	input         dskWriteAckExt
+	input         dskWriteAckExt,
+
+	// SD persistence tap (Phase 4), per drive - see floppy.v's dskCommit* ports
+	output        dskCommitDoneInt,
+	output [21:0] dskCommitAddrInt,
+	output        dskCommitBufWrInt,
+	output [7:0]  dskCommitBufAddrInt,
+	output [15:0] dskCommitBufDataInt,
+	output        dskCommitDoneExt,
+	output [21:0] dskCommitAddrExt,
+	output        dskCommitBufWrExt,
+	output [7:0]  dskCommitBufAddrExt,
+	output [15:0] dskCommitBufDataExt
 );
 
 	wire [7:0] dataInLo = dataIn[7:0];
@@ -147,7 +159,13 @@ module iwm
 		.dskWriteAddr(dskWriteAddrInt),
 		.dskWriteData(dskWriteDataInt),
 		.dskWriteReq(dskWriteReqInt),
-		.dskWriteAck(dskWriteAckInt)
+		.dskWriteAck(dskWriteAckInt),
+
+		.dskCommitDone(dskCommitDoneInt),
+		.dskCommitAddr(dskCommitAddrInt),
+		.dskCommitBufWr(dskCommitBufWrInt),
+		.dskCommitBufAddr(dskCommitBufAddrInt),
+		.dskCommitBufData(dskCommitBufDataInt)
 	);
 
 	floppy floppyExt
@@ -185,7 +203,13 @@ module iwm
 		.dskWriteAddr(dskWriteAddrExt),
 		.dskWriteData(dskWriteDataExt),
 		.dskWriteReq(dskWriteReqExt),
-		.dskWriteAck(dskWriteAckExt)
+		.dskWriteAck(dskWriteAckExt),
+
+		.dskCommitDone(dskCommitDoneExt),
+		.dskCommitAddr(dskCommitAddrExt),
+		.dskCommitBufWr(dskCommitBufWrExt),
+		.dskCommitBufAddr(dskCommitBufAddrExt),
+		.dskCommitBufData(dskCommitBufDataExt)
 	);
 
 	wire [7:0] readData = selectExternalDrive ? readDataExt : readDataInt;

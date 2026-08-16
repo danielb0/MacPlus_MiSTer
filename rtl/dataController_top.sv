@@ -93,6 +93,18 @@ module dataController_top(
 	output        dskWriteReqExt,
 	input         dskWriteAckExt,
 
+	// SD persistence tap (Phase 4), per drive - see iwm.v's dskCommit* ports
+	output        dskCommitDoneInt,
+	output [21:0] dskCommitAddrInt,
+	output        dskCommitBufWrInt,
+	output [7:0]  dskCommitBufAddrInt,
+	output [15:0] dskCommitBufDataInt,
+	output        dskCommitDoneExt,
+	output [21:0] dskCommitAddrExt,
+	output        dskCommitBufWrExt,
+	output [7:0]  dskCommitBufAddrExt,
+	output [15:0] dskCommitBufDataExt,
+
 	// connections to io controller
 	input   [SCSI_DEVS-1:0] img_mounted,
 	input            [31:0] img_size,
@@ -475,7 +487,18 @@ module dataController_top(
 		.dskWriteAddrExt(dskWriteAddrExt),
 		.dskWriteDataExt(dskWriteDataExt),
 		.dskWriteReqExt(dskWriteReqExt),
-		.dskWriteAckExt(dskWriteAckExt)
+		.dskWriteAckExt(dskWriteAckExt),
+
+		.dskCommitDoneInt(dskCommitDoneInt),
+		.dskCommitAddrInt(dskCommitAddrInt),
+		.dskCommitBufWrInt(dskCommitBufWrInt),
+		.dskCommitBufAddrInt(dskCommitBufAddrInt),
+		.dskCommitBufDataInt(dskCommitBufDataInt),
+		.dskCommitDoneExt(dskCommitDoneExt),
+		.dskCommitAddrExt(dskCommitAddrExt),
+		.dskCommitBufWrExt(dskCommitBufWrExt),
+		.dskCommitBufAddrExt(dskCommitBufAddrExt),
+		.dskCommitBufDataExt(dskCommitBufDataExt)
 	);
 
 	// SCC

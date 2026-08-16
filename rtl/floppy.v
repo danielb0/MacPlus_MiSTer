@@ -96,7 +96,16 @@ module floppy
 	output [21:0] dskWriteAddr,
 	output [15:0] dskWriteData,
 	output        dskWriteReq,
-	input         dskWriteAck
+	input         dskWriteAck,
+
+	// SD persistence tap (Phase 4 of FLOPPY_WRITE_PLAN.md): mirrors the
+	// SDRAM commit above so a floppy_sd_writer instance outside this
+	// module can build a byte-exact shadow of the committed sector.
+	output        dskCommitDone,   // one clk pulse: sector fully committed to SDRAM
+	output [21:0] dskCommitAddr,   // image byte offset of sector byte 0, valid at dskCommitDone
+	output        dskCommitBufWr,
+	output [7:0]  dskCommitBufAddr,
+	output [15:0] dskCommitBufData
 );
 
 	assign motor = ~driveRegs[`DRIVE_REG_MOTORON];
@@ -271,7 +280,12 @@ module floppy
 		.wr_ack       ( dskWriteAck ),
 
 		.busy         (  ),
-		.done         (  )
+		.done         ( dskCommitDone ),
+		.committed_addr ( dskCommitAddr ),
+
+		.sd_buf_addr  ( dskCommitBufAddr ),
+		.sd_buf_data  ( dskCommitBufData ),
+		.sd_buf_wr    ( dskCommitBufWr )
 	);
 	
 	wire [3:0] driveReadAddr = {ca2,ca1,ca0,SEL};

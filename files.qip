@@ -7,6 +7,7 @@ set_global_assignment -name VERILOG_FILE rtl/floppy_track_encoder.v
 set_global_assignment -name VERILOG_FILE rtl/floppy_track_decoder.v
 set_global_assignment -name VERILOG_FILE rtl/floppy_write_committer.v
 set_global_assignment -name VERILOG_FILE rtl/floppy_loader.v
+set_global_assignment -name VERILOG_FILE rtl/floppy_sd_writer.v
 set_global_assignment -name VERILOG_FILE rtl/floppy.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ps2_kbd.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/adb.sv
