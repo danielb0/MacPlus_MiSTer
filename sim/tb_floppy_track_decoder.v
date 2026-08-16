@@ -74,15 +74,23 @@ module tb_floppy_track_decoder;
       .buf_addr(dec_buf_addr), .buf_data(dec_buf_data)
    );
 
-   // Icarus (this devel build) does not reliably hold a registered pulse
-   // output stable if a further blocking assignment to an unrelated signal
-   // (here, `ready`) executes in the same simulation timestep before the
-   // read - sampling immediately after @(posedge clk), before touching
-   // `ready` again, is what's reliable (confirmed against $strobe and a
-   // minimal repro during bring-up). So capture the pulse outputs into
-   // testbench regs right at the edge, and let callers read those instead
-   // of re-reading dut_dec's live signals after tick_normal/tick_corrupt
-   // returns.
+   // Every DUT input is driven, and every DUT output sampled, ONE DELTA
+   // AFTER the clock edge (#1), never at zero delay on the edge itself.
+   // This is the project's standing rule (FLOPPY_WRITE_PLAN.md Phase 0
+   // lesson, the Phase 4 sd_writer 50%-dropout bug, the Phase 5 eject
+   // strobe race) and it is load-bearing here: `ready = 0` at zero delay
+   // straight after @(posedge clk) is in the same timestep as the DUT's own
+   // sampling of `ready` at that edge, so which value the DUT sees is
+   // decided by Icarus' process ordering, not by the testbench. That
+   // ordering happens to depend on the DUT's sensitivity list, so this
+   // raced silently for as long as floppy_track_decoder used an async
+   // reset and flipped to "every byte dropped" the moment it became
+   // synchronous - a pass that was never actually proving anything.
+   //
+   // Reading the registered pulse outputs at +1 delta rather than at zero
+   // delay is also strictly more reliable than the original idiom this
+   // replaces, since the values are read after all of that edge's
+   // non-blocking updates have landed.
    reg last_sector_valid, last_reject;
    reg [3:0] last_sector;
    reg [21:0] last_addr;
@@ -91,15 +99,15 @@ module tb_floppy_track_decoder;
       begin
          corrupt_this_tick = 1'b0;
          ready = 0;
-         repeat (READY_GAP - 1) @(posedge clk);
+         repeat (READY_GAP - 1) begin @(posedge clk); #1; end
          ready = 1;
          @(posedge clk);
+         #1; // let this edge's NBAs settle before reading or re-driving
          last_sector_valid = dut_dec.sector_valid;
          last_reject       = dut_dec.reject;
          last_sector       = dut_dec.sector;
          last_addr         = dut_dec.addr;
          ready = 0;
-         #1;
       end
    endtask
 
@@ -107,15 +115,15 @@ module tb_floppy_track_decoder;
       begin
          corrupt_this_tick = 1'b1;
          ready = 0;
-         repeat (READY_GAP - 1) @(posedge clk);
+         repeat (READY_GAP - 1) begin @(posedge clk); #1; end
          ready = 1;
          @(posedge clk);
+         #1; // let this edge's NBAs settle before reading or re-driving
          last_sector_valid = dut_dec.sector_valid;
          last_reject       = dut_dec.reject;
          last_sector       = dut_dec.sector;
          last_addr         = dut_dec.addr;
          ready = 0;
-         #1;
          corrupt_this_tick = 1'b0;
       end
    endtask

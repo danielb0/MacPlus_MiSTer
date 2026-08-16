@@ -52,6 +52,7 @@ module tb_floppy_sd_writer;
 
       .readonly(readonly),
       .loader_busy(loader_busy),
+      .size_blocks(13'd1600), // 800K image; every LBA used below is well inside it
 
       .sd_lba(sd_lba),
       .sd_wr(sd_wr),
@@ -90,7 +91,7 @@ module tb_floppy_sd_writer;
    reg  loader_busy_to = 1'b0;
    wire [31:0] sd_lba_to;
    wire        sd_wr_to;
-   reg         sd_ack_to = 1'b0; // never asserted - this is the point of Test 5
+   reg         sd_ack_to = 1'b0; // withheld, then granted LATE - see Test 5
    reg  [7:0]  sd_buff_addr_to = 8'd0;
    wire [15:0] sd_buff_din_to;
    wire        busy_to;
@@ -102,6 +103,7 @@ module tb_floppy_sd_writer;
       .commit_buf_wr(commit_buf_wr_to), .commit_buf_addr(commit_buf_addr_to),
       .commit_buf_data(commit_buf_data_to),
       .readonly(readonly_to), .loader_busy(loader_busy_to),
+      .size_blocks(13'd1600),
       .sd_lba(sd_lba_to), .sd_wr(sd_wr_to), .sd_ack(sd_ack_to),
       .sd_buff_addr(sd_buff_addr_to), .sd_buff_din(sd_buff_din_to),
       .busy(busy_to)
@@ -348,44 +350,153 @@ module tb_floppy_sd_writer;
       end
 
       // =====================================================================
-      // Test 5 (Phase 5 item 2): P_WAIT_ACK has no bound otherwise - if
-      // sd_ack never arrives for this slot's sd_wr (framework quirk, a
-      // mount race, etc.) the module must recover on its own instead of
-      // wedging forever with busy stuck high. Uses dut_to (ACK_TIMEOUT_BITS
-      // = 6, i.e. 63 cycles) so the real 24-bit default doesn't make this
-      // test impractically slow.
+      // Test 5 (Phase 5 item 2, reworked by the Phase 5 code review):
+      // P_WAIT_ACK is bounded, but the timeout must RE-PRESENT the request,
+      // not retire it.
+      //
+      // hps_io captures sd_lba during its own poll command and raises
+      // sd_ack in a LATER, separate command, so the gap between the two is
+      // unbounded from the core's side. The first version of this timeout
+      // cleared valid[head] and flipped `head`, which meant a late sd_ack
+      // would stream the OTHER shadow buffer to the LBA the HPS had already
+      // captured - a full sector of unrelated data written at a valid
+      // offset in the .dsk. This test pins the corrected contract: after
+      // one or more timeouts, a LATE ack still transfers the ORIGINAL
+      // sector's data to the ORIGINAL LBA, and only then does busy drop.
+      //
+      // Uses dut_to (ACK_TIMEOUT_BITS = 6, i.e. 63 cycles) so the real
+      // 24-bit default doesn't make this test impractically slow.
       // =====================================================================
       do_reset_to;
       readonly_to    = 1'b0;
       loader_busy_to = 1'b0;
-      feed_commit_to(22'd0);
+      sd_ack_to      = 1'b0;
+      feed_commit_to(22'd8192); // byte offset 8192 -> LBA 16
 
       begin : test5
          integer waited;
-         waited = 0;
+         integer drops;
+         reg [31:0] lba_first;
+         reg ok5;
+         ok5 = 1;
+
          // capture (commit_done) and the P_IDLE->P_WAIT_ACK transition are
          // one cycle apart (mirrors drain_block's own wait(sd_wr) above) -
          // give it a bounded head start before checking.
          waited = 0;
          while (!sd_wr_to && waited < 10) begin
-            @(posedge clk);
+            @(posedge clk); #1;
             waited = waited + 1;
          end
          if (!sd_wr_to) begin
             $display("FAIL: test5 - expected sd_wr asserted (P_WAIT_ACK) before the timeout");
-            all_ok = 0;
+            ok5 = 0;
          end
+         lba_first = sd_lba_to;
+
+         // Watch for the timeout: sd_wr must drop, then come back at the
+         // SAME lba. busy must stay high throughout - the write is still
+         // owed, and nothing has been silently discarded.
+         drops  = 0;
          waited = 0;
-         while (sd_wr_to && waited < 200) begin
-            @(posedge clk);
+         while (drops < 2 && waited < 400) begin
+            @(posedge clk); #1;
+            waited = waited + 1;
+            if (!sd_wr_to) begin
+               if (!busy_to) begin
+                  $display("FAIL: test5 - busy dropped on timeout; the queued sector was retired, not retried");
+                  ok5 = 0;
+               end
+               // wait for the re-presented request
+               while (!sd_wr_to && waited < 400) begin
+                  @(posedge clk); #1;
+                  waited = waited + 1;
+               end
+               if (sd_wr_to) begin
+                  drops = drops + 1;
+                  if (sd_lba_to !== lba_first) begin
+                     $display("FAIL: test5 - retry changed sd_lba (%0d -> %0d)", lba_first, sd_lba_to);
+                     ok5 = 0;
+                  end
+               end
+            end
+         end
+         if (drops < 2) begin
+            $display("FAIL: test5 - sd_wr never timed out and re-presented (drops=%0d waited=%0d)", drops, waited);
+            ok5 = 0;
+         end
+
+         // Now grant the ack LATE, after those retries, and check the
+         // transfer is still byte-exact for the sector originally queued.
+         begin : late_ack
+            integer j;
+            integer mismatches;
+            mismatches = 0;
+            sd_ack_to = 1'b1;
+            sd_buff_addr_to = 8'd0;
+            @(posedge clk); #1;
+            for (j = 0; j < 256; j = j + 1) begin
+               if (sd_buff_din_to !== swap16(16'h6000 + j[15:0])) mismatches = mismatches + 1;
+               if (j < 255) sd_buff_addr_to = sd_buff_addr_to + 1'b1;
+               @(posedge clk); #1;
+            end
+            sd_ack_to = 1'b0;
+            sd_buff_addr_to = 8'd0;
+            if (mismatches != 0) begin
+               $display("FAIL: test5 - late ack drained the wrong buffer (%0d/256 words wrong)", mismatches);
+               ok5 = 0;
+            end
+            if (lba_first !== 32'd16) begin
+               $display("FAIL: test5 - late ack drained at LBA %0d, expected 16", lba_first);
+               ok5 = 0;
+            end
+         end
+
+         // and only now should it go idle
+         waited = 0;
+         while (busy_to && waited < 20) begin
+            @(posedge clk); #1;
             waited = waited + 1;
          end
-         @(posedge clk); #1;
-         if (!sd_wr_to && !busy_to && waited < 200) begin
-            $display("PASS: test5 - P_WAIT_ACK with no sd_ack timed out after %0d cycles and recovered (busy=0)", waited);
+         if (busy_to) begin
+            $display("FAIL: test5 - busy never dropped after the late ack completed");
+            ok5 = 0;
+         end
+
+         if (ok5)
+            $display("PASS: test5 - withheld sd_ack re-presents the same LBA/buffer; a late ack still lands byte-exact");
+         else
+            all_ok = 0;
+      end
+
+      // =====================================================================
+      // Test 6 (Phase 5 code review): a commit whose LBA falls outside the
+      // mounted image must be dropped, never handed to hps_io. The decoder
+      // bounds-checks the SECTOR against this track's spt, but nothing
+      // upstream checks the resulting LBA against the image's real length -
+      // driveTrack is free to reach 0x4F regardless of image size. This is
+      // the last place that can refuse.
+      // =====================================================================
+      do_reset_to;
+      readonly_to    = 1'b0;
+      loader_busy_to = 1'b0;
+      sd_ack_to      = 1'b0;
+      feed_commit_to(22'd819200); // LBA 1600 - one past the end of an 800K image
+
+      begin : test6
+         integer waited;
+         reg saw_wr;
+         saw_wr = 0;
+         waited = 0;
+         while (waited < 100) begin
+            @(posedge clk); #1;
+            if (sd_wr_to) saw_wr = 1;
+            waited = waited + 1;
+         end
+         if (!saw_wr && !busy_to) begin
+            $display("PASS: test6 - out-of-range LBA 1600 dropped, no sd_wr issued");
          end else begin
-            $display("FAIL: test5 - never recovered from a withheld sd_ack (sd_wr=%b busy=%b waited=%0d)",
-                      sd_wr_to, busy_to, waited);
+            $display("FAIL: test6 - out-of-range commit reached hps_io (saw_wr=%b busy=%b)", saw_wr, busy_to);
             all_ok = 0;
          end
       end

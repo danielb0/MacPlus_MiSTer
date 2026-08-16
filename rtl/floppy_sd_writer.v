@@ -57,6 +57,11 @@ module floppy_sd_writer #(
 	input             readonly,     // this drive's latched img_readonly - refuse persistence outright
 	input             loader_busy,  // don't start a new sd_wr while floppy_loader owns this slot
 
+	// Size of the mounted image in 512-byte blocks (floppy_loader's own
+	// loaded_size >> 9, latched at that slot's mount). Any commit landing
+	// at or beyond this is dropped rather than written - see P_IDLE.
+	input      [12:0] size_blocks,
+
 	output reg [31:0] sd_lba,
 	output reg        sd_wr,
 	input             sd_ack,
@@ -106,13 +111,14 @@ module floppy_sd_writer #(
 	// wedge in P_WAIT_ACK forever with busy stuck high (busy feeds
 	// LED_USER). ACK_TIMEOUT_BITS defaults to ~0.5s at clk_sys (~32MHz) -
 	// far longer than any real sd_ack latency, so it never fires in normal
-	// operation, but bounds the wedge instead of leaving it permanent.
-	// Abandons the same way a normal completion retires the entry
-	// (valid/head advance) - the commit is simply lost, same idealization
-	// class as the depth-2 queue's documented overflow case in the header
-	// above.
+	// operation. On expiry the request is dropped and re-presented, NOT
+	// retired - see P_WAIT_ACK below for why abandoning the queue entry
+	// here would be a data-corruption path rather than a recovery.
 	reg [ACK_TIMEOUT_BITS-1:0] ackTimer;
 	wire ackTimeout = &ackTimer;
+
+	wire [12:0] lba_head     = addr_q[head][21:9];
+	wire        lba_in_range = (size_blocks != 13'd0) && (lba_head < size_blocks);
 
 	assign busy = (pstate != P_IDLE) || valid[0] || valid[1];
 
@@ -155,24 +161,44 @@ module floppy_sd_writer #(
 
 			case (pstate)
 			P_IDLE: if (valid[head] && !loader_busy) begin
-				// byte offset -> LBA (512B/sector). commit_addr comes from
-				// floppy_track_decoder's own geometry math (soff/spt),
-				// already bounds-checked against the mounted image's own
-				// track/side/sector layout, so no separate range check is
-				// needed here against img_size.
-				sd_lba <= {19'd0, addr_q[head][21:9]};
-				sd_wr  <= 1'b1;
-				pstate <= P_WAIT_ACK;
+				// byte offset -> LBA (512B/sector). The decoder bounds-
+				// checks the SECTOR number against this track's spt, but
+				// nothing upstream checks the resulting LBA against the
+				// mounted image's actual length - `track` is free to reach
+				// 0x4F regardless of image size. This is the last place
+				// that can refuse, and it is cheap, so refuse here rather
+				// than hand hps_io an offset past the end of the file.
+				if (lba_in_range) begin
+					sd_lba <= {19'd0, lba_head};
+					sd_wr  <= 1'b1;
+					pstate <= P_WAIT_ACK;
+				end else begin
+					// out of range: retire without writing anything
+					valid[head] <= 1'b0;
+					head        <= ~head;
+				end
 			end
 
 			P_WAIT_ACK: if (sd_ack) begin
 				sd_wr  <= 1'b0; // mirrors scsi.v: io_wr drops as soon as io_ack rises
 				pstate <= P_WAIT_DONE;
 			end else if (ackTimeout) begin
-				sd_wr       <= 1'b0;
-				valid[head] <= 1'b0;
-				head        <= ~head;
-				pstate      <= P_IDLE;
+				// Drop the request and RE-PRESENT it - deliberately without
+				// clearing valid[head] or advancing `head`. Retiring the
+				// entry here is not safe: hps_io captures sd_lba during its
+				// own poll command and raises sd_ack in a LATER, separate
+				// command, so there is no bound on the gap between the two.
+				// If the entry were retired and `head` flipped, a late
+				// sd_ack would stream the OTHER buffer out to the LBA the
+				// HPS had already captured - a full sector of unrelated
+				// data written at a perfectly valid offset in the .dsk.
+				// Leaving head/valid/sd_lba alone makes the retry idempotent
+				// instead: however late the ack arrives, and whichever
+				// attempt it belongs to, it transfers the same buffer to the
+				// same LBA. `busy` stays high while a write is genuinely
+				// still owed, which is what the LED should show anyway.
+				sd_wr  <= 1'b0;
+				pstate <= P_IDLE;
 			end else
 				ackTimer <= ackTimer + 1'b1;
 

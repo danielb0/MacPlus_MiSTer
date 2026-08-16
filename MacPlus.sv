@@ -776,6 +776,10 @@ floppy_sd_writer wr_int
 
 	.readonly(ldr_int_readonly),
 	.loader_busy(ldr_int_busy),
+	// image length in 512-byte blocks; only 400K/800K images ever reach
+	// insertDisk (see dsk_int_ss/ds below), so 13 bits covers every case
+	// that can produce a commit - 1600 blocks for an 800K image.
+	.size_blocks(ldr_int_size[21:9]),
 
 	.sd_lba(wr_int_sd_lba),
 	.sd_wr(wr_int_sd_wr),
@@ -802,6 +806,7 @@ floppy_sd_writer wr_ext
 
 	.readonly(ldr_ext_readonly),
 	.loader_busy(ldr_ext_busy),
+	.size_blocks(ldr_ext_size[21:9]),
 
 	.sd_lba(wr_ext_sd_lba),
 	.sd_wr(wr_ext_sd_wr),

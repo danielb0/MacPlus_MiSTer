@@ -122,11 +122,24 @@ module floppy_track_decoder (
       (trackm1[6:4] == 3'd3)?(track_times_9 + 10'd48 + 10'd32 + 10'd16):
       (track_times_8 + 10'd64 + 10'd48 + 10'd32 + 10'd16);
 
-   wire [21:0] addr_base =
+   // Track/side part of the sector address. Deliberately does NOT include
+   // the sector term: the whole address is LATCHED in S_SECT (addr_latched
+   // below), at the same instant the bounds check passes, and the latched
+   // value is what S_DTRL finally publishes ~11ms later.
+   //
+   // Evaluating this live at S_DTRL instead would separate the check from
+   // the thing it protects by a whole field (699 payload bytes at 16us
+   // each). track/side/sides are live inputs over that window - driveSide
+   // in particular is driven straight off the CA lines with no read strobe
+   // (see floppy.v's own "we don't know if this is a true read" comment),
+   // so a side flip mid-field could add the `spt*512` term to a field that
+   // was validated as side 0 on a single-sided mount, landing the sector
+   // up to 6144 bytes away from where it belongs - past the end of a 400K
+   // image on the outer tracks. Latching makes validate-and-commit atomic.
+   wire [21:0] geom_base =
       { 3'b00, soff, 9'd0 } +
       (sides ? { 3'b00, soff, 9'd0 } : 22'd0) +
-      (side  ? { 9'd0, spt, 9'd0 }   : 22'd0) +
-      { 9'd0, sector_reg, 9'd0 };
+      (side  ? { 9'd0, spt, 9'd0 }   : 22'd0);
 
    // ------------------------------------------------------------------
    // reverse GCR table: disk byte -> 6-bit nibble, or invalid.
@@ -186,6 +199,7 @@ module floppy_track_decoder (
    reg [23:0] hist;
 
    reg [3:0]  sector_reg;
+   reg [21:0] addr_latched; // geom_base + sector term, captured in S_SECT
 
    reg [7:0]  group_index;   // 0..174
    reg [1:0]  byte_in_group; // 0..3
@@ -254,7 +268,16 @@ module floppy_track_decoder (
       end
    endtask
 
-   always @(posedge clk or posedge rst) begin
+   // Synchronous reset, matching floppy_write_committer.v (the other
+   // consumer of floppy.v's identical `!_reset || writePathReset` wire, and
+   // synchronous there since Phase 3). writePathReset is a DERIVED
+   // combinational pulse, not a true reset rail, so it must not sit on an
+   // asynchronous reset pin: a glitch of any width on that AND-tree would
+   // abandon the field in progress, and since the write path reports no
+   // error for an abandoned field, the Mac would believe a sector it wrote
+   // had landed when it never did. clk is free-running, so nothing is lost
+   // by waiting for the edge.
+   always @(posedge clk) begin
       if (rst) begin
          state        <= S_SCAN;
          hist         <= 24'd0;
@@ -307,13 +330,18 @@ module floppy_track_decoder (
                // this track's real spt (nib_cur is the full 6-bit nibble,
                // not the truncated 4 bits sector_reg keeps - an alias a
                // 4-bit compare would miss), and a side-1 field landing on
-               // a single-sided (sides==0) mount, where addr_base below
+               // a single-sided (sides==0) mount, where geom_base above
                // would otherwise still add the side offset and write
                // outside the image (FLOPPY_WRITE_PLAN.md Phase 5, holes A/B).
                if (!nib_valid) do_reject;
                else if (nib_cur >= spt || (side && !sides)) do_reject;
                else begin
                   sector_reg      <= nib_cur[3:0];
+                  // Capture the full address NOW, while the geometry that
+                  // was just bounds-checked is still the live geometry.
+                  // Uses nib_cur directly, not sector_reg - that register
+                  // is being assigned on this same edge.
+                  addr_latched    <= geom_base + { 9'd0, nib_cur[3:0], 9'd0 };
                   state           <= S_GRP;
                   group_index     <= 8'd0;
                   byte_in_group   <= 2'd0;
@@ -399,7 +427,7 @@ module floppy_track_decoder (
                   if (idata != 8'hAA) do_reject;
                   else begin
                      sector       <= sector_reg;
-                     addr         <= addr_base;
+                     addr         <= addr_latched; // captured in S_SECT, see geom_base
                      sector_valid <= 1'b1;
                      state        <= S_SCAN;
                      hist         <= 24'd0;

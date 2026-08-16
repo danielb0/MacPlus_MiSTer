@@ -63,6 +63,7 @@ module tb_loader_writer_roundtrip;
 
       .readonly(1'b0),
       .loader_busy(1'b0),
+      .size_blocks(13'd1600),
 
       .sd_lba(w_sd_lba),
       .sd_wr(w_sd_wr),

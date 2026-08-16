@@ -208,20 +208,44 @@ module floppy
 	// ldr_*_done and cleared only on eject/remount), not a one-shot mount
 	// pulse, so the actual "a new image just landed" event is its rising
 	// edge - same idiom as lstrbEdge just below.
-	// Seeded from the LIVE level while in reset (not forced to 0): a plain
-	// reset with a disk already mounted - the common case, e.g. a Mac
-	// "Reset & Apply" - must not manufacture a spurious edge the instant
-	// reset lifts, which would otherwise land on (and swallow) the very
-	// first legitimate write byte via the branch below.
+	// Reset to a CONSTANT 1, which happens to be exactly the "suppress the
+	// spurious edge" behaviour wanted here: a plain reset with a disk
+	// already mounted - the common case, e.g. a Mac "Reset & Apply" - must
+	// not manufacture an edge the instant reset lifts, which would
+	// otherwise land on (and swallow) the very first legitimate write byte
+	// via the branch below. With prev=1 and insertDisk=1 there is no edge;
+	// with no disk mounted insertDisk is 0 so there is no edge either, and
+	// prev tracks down to 0 on the first cep so a LATER real mount still
+	// produces a proper one.
+	//
+	// An earlier version seeded this from the live insertDisk level inside
+	// the reset branch. Verilog accepts that and Icarus simulates it, but
+	// an asynchronous reset must resolve to a constant: Quartus cannot
+	// build an async LOAD, so it split the register into a flop plus a
+	// transparent latch (Warning 13004/13310, both drive instances) and
+	// TimeQuest then reported the result as a combinational loop it was
+	// "analyzing as a latch" - i.e. untimed logic, powering up undefined,
+	// feeding writePathReset below. Do not reintroduce a non-constant here.
 	reg insertDiskPrev;
 	always @(posedge clk or negedge _reset)
-		if (!_reset)   insertDiskPrev <= insertDisk;
+		if (!_reset)   insertDiskPrev <= 1'b1;
 		else if (cep)  insertDiskPrev <= insertDisk;
 	wire insertDiskEdge = insertDisk && !insertDiskPrev;
+	wire insertDiskFall = !insertDisk && insertDiskPrev;
 
 	wire ejectPulse = cep && _enable == 1'b0 && lstrbEdge == 1'b1 &&
 	                   driveWriteAddr == `DRIVE_REG_EJECT && ca2 == 1'b1;
-	wire writePathReset = ejectPulse || (cep && insertDiskEdge);
+
+	// Both EDGES of insertDisk matter, not just the rising one. insertDisk
+	// drops at img_mounted (the loader starting to stream a new image into
+	// SDRAM) and only rises again at ldr_*_done. Resetting on the rising
+	// edge alone left the whole load window - hundreds of ms for an 800K
+	// image - with the departing disk's half-decoded field still sitting in
+	// dec, and a byte already in the 16us pacer could be the very DE/AA
+	// that completes it, committing the old disk's sector into the newly
+	// mounted image. The falling edge discards that field (and the in-
+	// flight byte) the moment the image starts changing underneath it.
+	wire writePathReset = ejectPulse || (cep && (insertDiskEdge || insertDiskFall));
 
 	always @(posedge clk or negedge _reset) begin
 		if (_reset == 1'b0) begin
@@ -259,8 +283,19 @@ module floppy
 			// SDRAM access, so it carries none of addrController_top.v's
 			// 4-phase RAS/CAS discipline). cen and cep never coincide, so
 			// this cannot race the block above.
+			//
+			// insertDisk is checked as well as CSTIN, and they are not
+			// redundant: CSTIN is only ever SET by an explicit OS eject
+			// strobe (see its own block below) and is never restored to
+			// "no disk" on an OSD remount, so through an entire image
+			// reload it still reads "disk present" while insertDisk is
+			// correctly low. Without this term the Mac could keep feeding
+			// write bytes all the way through a swap, and a field
+			// completing then would commit the departing disk's sector
+			// into the newly mounted image - in SDRAM and, via
+			// floppy_sd_writer, into the new .dsk on the SD card.
 			if (writeReq && _enable == 1'b0 && !writeProtect && !writeBusyReg &&
-			    !driveRegs[`DRIVE_REG_CSTIN]) begin
+			    !driveRegs[`DRIVE_REG_CSTIN] && insertDisk) begin
 				pendingWriteByte <= writeData;
 				writeBusyReg     <= 1'b1;
 				writeByteTimer   <= 7'd0;
