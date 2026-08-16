@@ -217,6 +217,16 @@ Verified three ways: `sim/gen_write_stream.py` builds real (non-zero-tag) GCR da
 
 **HARDWARE GATE: PASS (2026-08-15, re-test after the tag-decode fix).** Full compile: 0 errors, 57 warnings, timing met (setup slack 0.617ns, hold slack 0.245ns); 29,189/41,910 ALMs (70%, up from 66% pre-fix — the tag-discard logic added a modest amount, the still-deferred `buf_mem` M10K-inference issue is unchanged). User confirmed: read and write both work on 400K and 800K diskettes, on both drives; compiled and ran a program from UCSD BASIC, i.e. a real write-then-execute round trip, not just a Finder save. **Phase 3 is done.**
 
+### `buf_mem` M10K-inference follow-up — DONE (2026-08-16)
+
+The deferred resource item above is fixed. `floppy_track_decoder.v`'s `S_GRP` group-completion no longer writes up to three `buf_mem` addresses in one clock edge; it latches the (up to 3) pending writes into new `commit_v0/v1/v2`/`commit_a0/a1/a2`/`commit_d0/d1/d2` registers and hands off to a new state, `S_GRPC`, which drains them one write per cycle (3-step `commit_step` counter), then resumes `S_GRP` or `S_DSUM`. `S_GRPC` runs unconditionally every clock (not gated on `ready`), which is safe because `ready` pulses only once per ~128 `clk8` cycles (one incoming disk byte / 16 µs) — comfortably more than the fixed 3-cycle drain.
+
+All four existing testbenches (`tb_floppy_track_decoder.v`, `tb_floppy_write_stream.v`, `tb_floppy_write_path.v`, `tb_floppy_track_encoder.v`) pass **unmodified** — this is a synthesis-timing restructure, not a decode-logic change. `quartus_map --analysis_and_elaboration`: 0 errors, 20 warnings (same baseline).
+
+**Full compile confirms the fix**: 0 errors, 57 warnings (same set), timing met (setup 0.539ns, hold 0.200ns). **ALMs: 15,296/41,910 (36%), down from 29,189/41,910 (70%)** — back to essentially the Phase 1 baseline. `MacPlus.map.rpt` confirms `floppy_track_decoder:dec|altsyncram:buf_mem_rtl_0` is now a real `ALTSYNCRAM` (Simple Dual Port, 512×8) for both `floppyInt` and `floppyExt`.
+
+**HARDWARE RETEST: PASS (2026-08-16).** User confirmed read/write still work as before after reflashing — no regression from the timing restructure. Not yet committed.
+
 ---
 
 ### Phase 4 — Persistence to SD

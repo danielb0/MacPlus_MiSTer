@@ -83,6 +83,16 @@ module floppy_track_decoder (
    // it out of plain registers plus a 512:1 mux - roughly 6,500 ALMs per
    // drive instance, found only once this module was actually synthesized
    // for hardware in Phase 3 (Phase 2 was sim-only).
+   //
+   // The write side had the same problem for a different reason: a group
+   // completion could write up to three different buf_mem addresses
+   // (buf_mem[buf_idx0]/[buf_idx1]/[buf_idx2]) on the same clock edge, and
+   // no Cyclone V memory primitive offers three write ports, so Quartus
+   // silently fell back to registers there too (no diagnostic - inference
+   // just never triggered). Fixed by latching the up-to-three pending
+   // writes when a group completes (state S_GRPC below) and draining them
+   // one per cycle, so buf_mem's write side is now a single always-block
+   // driving at most one address per edge - the idiom Quartus requires.
    input      [8:0]  buf_addr,
    output reg [7:0]  buf_data
 );
@@ -162,6 +172,9 @@ module floppy_track_decoder (
    // ------------------------------------------------------------------
    localparam S_SCAN = 3'd0;  // hunting for D5 AA AD
    localparam S_SECT = 3'd1;  // 1 byte: sector number
+   localparam S_GRPC = 3'd2;  // draining up to 3 pending buf_mem writes
+                               // from the group that just completed, one
+                               // write per cycle - not gated on `ready`
    localparam S_GRP  = 3'd3;  // 699 bytes across 175 groups (last partial):
                                // recovers the 524-byte tag(12)+data(512)
                                // continuous payload directly, group g ->
@@ -185,6 +198,14 @@ module floppy_track_decoder (
    reg [5:0]  dsum0, dsum1, dsum2;
 
    reg        dtrl_idx;
+
+   // pending buf_mem writes latched at group completion, drained one per
+   // cycle in S_GRPC - see the buf_mem port comment above.
+   reg [1:0]  commit_step;             // 0,1,2: which of the 3 slots is next
+   reg        commit_v0, commit_v1, commit_v2;
+   reg [8:0]  commit_a0, commit_a1, commit_a2;
+   reg [7:0]  commit_d0, commit_d1, commit_d2;
+   reg [2:0]  commit_target;           // state to resume in once drained
 
    reg [7:0]  buf_mem [0:511];
    always @(posedge clk) buf_data <= buf_mem[buf_addr];
@@ -245,7 +266,31 @@ module floppy_track_decoder (
          sector_valid <= 1'b0;
          reject       <= 1'b0;
 
-         if (ready) begin
+         if (state == S_GRPC) begin
+            // Drain the up-to-3 pending buf_mem writes latched when the
+            // group completed, one write per cycle, never more - so
+            // buf_mem has a single write port and can map to a Cyclone V
+            // M10K. Not gated on `ready`: `ready` pulses roughly once per
+            // 128 clk8 cycles (one incoming disk byte / 16us, see the
+            // module header comment) and this drain is a fixed 3 cycles,
+            // so no incoming byte can arrive mid-drain.
+            case (commit_step)
+            2'd0: begin
+               if (commit_v0) buf_mem[commit_a0] <= commit_d0;
+               commit_step <= 2'd1;
+            end
+            2'd1: begin
+               if (commit_v1) buf_mem[commit_a1] <= commit_d1;
+               commit_step <= 2'd2;
+            end
+            default: begin
+               if (commit_v2) buf_mem[commit_a2] <= commit_d2;
+               state <= commit_target;
+               if (commit_target == S_DSUM)
+                  dsum_idx <= 2'd0;
+            end
+            endcase
+         end else if (ready) begin
             case (state)
 
             S_SCAN: begin
@@ -284,14 +329,21 @@ module floppy_track_decoder (
                      // bytes 0..11 are the Sony tag, which this core has
                      // nowhere to expose, so only bytes 12..523
                      // (recovered_count-12, i.e. buf index 0..511) are
-                     // actually committed to buf_mem.
-                     if (recovered_count >= 10'd12)
-                        buf_mem[buf_idx0[8:0]] <= nib_in_1;
-                     if (recovered_count + 10'd1 >= 10'd12)
-                        buf_mem[buf_idx1[8:0]] <= nib_in_2;
+                     // actually committed to buf_mem. Latch the (up to 3)
+                     // pending writes and hand off to S_GRPC to drain them
+                     // one per cycle instead of writing buf_mem directly
+                     // here - see the buf_mem port comment above.
+                     commit_v0 <= (recovered_count >= 10'd12);
+                     commit_v1 <= (recovered_count + 10'd1 >= 10'd12);
+                     commit_v2 <= has_s3 && (recovered_count + 10'd2 >= 10'd12);
+                     commit_a0 <= buf_idx0[8:0]; commit_d0 <= nib_in_1;
+                     commit_a1 <= buf_idx1[8:0]; commit_d1 <= nib_in_2;
+                     commit_a2 <= buf_idx2[8:0]; commit_d2 <= nib_in_3;
+                     commit_step   <= 2'd0;
+                     commit_target <= (group_index == 8'd174) ? S_DSUM : S_GRP;
+                     state         <= S_GRPC;
+
                      if (has_s3) begin
-                        if (recovered_count + 10'd2 >= 10'd12)
-                           buf_mem[buf_idx2[8:0]] <= nib_in_3;
                         recovered_count <= recovered_count + 10'd3;
                         c1 <= new_c1_full;
                      end else begin
@@ -302,10 +354,7 @@ module floppy_track_decoder (
                      c3 <= new_c3;
 
                      byte_in_group <= 2'd0;
-                     if (group_index == 8'd174) begin
-                        state    <= S_DSUM;
-                        dsum_idx <= 2'd0;
-                     end else
+                     if (group_index != 8'd174)
                         group_index <= group_index + 8'd1;
                   end else
                      byte_in_group <= byte_in_group + 2'd1;
