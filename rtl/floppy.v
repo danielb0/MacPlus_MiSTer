@@ -127,7 +127,7 @@ module floppy
 		1'b0, // RDDATA1
 		1'b0, // RDDATA0
 		driveRegs[`DRIVE_REG_TACH], // TACH: 60 pules for each rotation of the drive motor
-		1'b0, // disk switched?
+		diskSwitched, // disk switched?
 		~(driveTrack == 7'h00), // TK0: track 0 indicator
 		driveRegs[`DRIVE_REG_MOTORON], // motor on
 		~writeProtect, // WRTPRT: 0 = locked, 1 = write enabled
@@ -198,12 +198,43 @@ module floppy
 	assign writeBusy     = writeBusyReg;
 	assign writeUnderrun = writeUnderrunReg;
 
+	// Any disk change - an OS-driven eject or a fresh HPS/OSD mount - must
+	// not let a field the decoder/committer had half-decoded for the
+	// departing image be completed by bytes belonging to the next one
+	// (which would commit a mixed sector). ejectPulse mirrors the exact
+	// eject-detect condition the CSTIN write-register block below uses.
+	// insertDisk itself is a LEVEL held high for as long as a disk stays
+	// mounted (see MacPlus.sv: dsk_int_ins/dsk_ext_ins are registers set on
+	// ldr_*_done and cleared only on eject/remount), not a one-shot mount
+	// pulse, so the actual "a new image just landed" event is its rising
+	// edge - same idiom as lstrbEdge just below.
+	// Seeded from the LIVE level while in reset (not forced to 0): a plain
+	// reset with a disk already mounted - the common case, e.g. a Mac
+	// "Reset & Apply" - must not manufacture a spurious edge the instant
+	// reset lifts, which would otherwise land on (and swallow) the very
+	// first legitimate write byte via the branch below.
+	reg insertDiskPrev;
+	always @(posedge clk or negedge _reset)
+		if (!_reset)   insertDiskPrev <= insertDisk;
+		else if (cep)  insertDiskPrev <= insertDisk;
+	wire insertDiskEdge = insertDisk && !insertDiskPrev;
+
+	wire ejectPulse = cep && _enable == 1'b0 && lstrbEdge == 1'b1 &&
+	                   driveWriteAddr == `DRIVE_REG_EJECT && ca2 == 1'b1;
+	wire writePathReset = ejectPulse || (cep && insertDiskEdge);
+
 	always @(posedge clk or negedge _reset) begin
 		if (_reset == 1'b0) begin
 			writeBusyReg     <= 1'b0;
 			writeByteTimer   <= 7'd0;
 			pendingWriteByte <= 8'd0;
 			writeUnderrunReg <= 1'b0;
+			decReady         <= 1'b0;
+		end else if (writePathReset) begin
+			// abandon any in-flight write byte, same as the deselect path
+			// below, but triggered by the disk itself changing underneath it
+			writeBusyReg     <= 1'b0;
+			writeByteTimer   <= 7'd0;
 			decReady         <= 1'b0;
 		end else begin
 			decReady <= 1'b0; // default; pulsed for exactly one cep below
@@ -228,7 +259,8 @@ module floppy
 			// SDRAM access, so it carries none of addrController_top.v's
 			// 4-phase RAS/CAS discipline). cen and cep never coincide, so
 			// this cannot race the block above.
-			if (writeReq && _enable == 1'b0 && !writeProtect && !writeBusyReg) begin
+			if (writeReq && _enable == 1'b0 && !writeProtect && !writeBusyReg &&
+			    !driveRegs[`DRIVE_REG_CSTIN]) begin
 				pendingWriteByte <= writeData;
 				writeBusyReg     <= 1'b1;
 				writeByteTimer   <= 7'd0;
@@ -247,7 +279,7 @@ module floppy
 	(
 		.clk          ( clk ),
 		.ready        ( decReady ),
-		.rst          ( !_reset ),
+		.rst          ( !_reset || writePathReset ),
 
 		.side         ( driveSide ),
 		.sides        ( doubleSidedDisk ),
@@ -267,7 +299,7 @@ module floppy
 	floppy_write_committer wc
 	(
 		.clk          ( clk ),
-		.rst          ( !_reset ),
+		.rst          ( !_reset || writePathReset ),
 
 		.sector_valid ( secValid ),
 		.sector_addr  ( secAddr ),
@@ -398,8 +430,29 @@ module floppy
 					ejectIndicatorTimer <= ejectIndicatorTimer - 1'b1;
 			end
 		end
-	end									
-									
+	end
+
+	// SWITCHED (Phase 5 item 3): set on the same two disk-change events
+	// writePathReset above already reacts to (an OS eject, or a fresh
+	// mount's insertDisk edge), cleared only when the Mac explicitly writes
+	// the reset-disk-switched register (driveWriteAddr==`DRIVE_REG_CSTIN`,
+	// its write-side function per the header table: "writing 1 sets switch
+	// flag to 0"). Previously hardwired to 0 in driveRegsAsRead, and this
+	// write decode existed but was consumed by nothing.
+	reg diskSwitched;
+	always @(posedge clk or negedge _reset) begin
+		if (_reset == 1'b0) begin
+			diskSwitched <= 1'b0;
+		end
+		else if (ejectPulse || (cep && insertDiskEdge)) begin
+			diskSwitched <= 1'b1;
+		end
+		else if (cep && _enable == 1'b0 && lstrbEdge == 1'b1 &&
+		         driveWriteAddr == `DRIVE_REG_CSTIN && ca2 == 1'b1) begin
+			diskSwitched <= 1'b0;
+		end
+	end
+
 	//`define DRIVE_REG_STEP		2  /* R: drive head stepping (1 = complete) */
 												/* W: 0 = step drive head */
 	always @(posedge clk or negedge _reset) begin

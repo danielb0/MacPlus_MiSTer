@@ -73,6 +73,70 @@ module tb_floppy_sd_writer;
       end
    endtask
 
+   // ---- second instance, ACK_TIMEOUT_BITS shrunk to 6 (63 cycles) for
+   // Test 5 (P_WAIT_ACK timeout, Phase 5 item 2) - kept entirely separate
+   // from `dut` above so its short timeout can never interact with tests
+   // 1-4, which deliberately hold sd_wr asserted for long stretches
+   // (Test 4 withholds sd_ack for its own reasons) against the real
+   // 24-bit/~0.5s default.
+   reg  reset_to = 1;
+   reg  img_mounted_to = 1'b0;
+   reg  commit_done_to = 1'b0;
+   reg  [21:0] commit_addr_to = 22'd0;
+   reg  commit_buf_wr_to = 1'b0;
+   reg  [7:0]  commit_buf_addr_to = 8'd0;
+   reg  [15:0] commit_buf_data_to = 16'd0;
+   reg  readonly_to = 1'b0;
+   reg  loader_busy_to = 1'b0;
+   wire [31:0] sd_lba_to;
+   wire        sd_wr_to;
+   reg         sd_ack_to = 1'b0; // never asserted - this is the point of Test 5
+   reg  [7:0]  sd_buff_addr_to = 8'd0;
+   wire [15:0] sd_buff_din_to;
+   wire        busy_to;
+
+   floppy_sd_writer #( .ACK_TIMEOUT_BITS(6) ) dut_to (
+      .clk(clk), .reset(reset_to),
+      .img_mounted(img_mounted_to),
+      .commit_done(commit_done_to), .commit_addr(commit_addr_to),
+      .commit_buf_wr(commit_buf_wr_to), .commit_buf_addr(commit_buf_addr_to),
+      .commit_buf_data(commit_buf_data_to),
+      .readonly(readonly_to), .loader_busy(loader_busy_to),
+      .sd_lba(sd_lba_to), .sd_wr(sd_wr_to), .sd_ack(sd_ack_to),
+      .sd_buff_addr(sd_buff_addr_to), .sd_buff_din(sd_buff_din_to),
+      .busy(busy_to)
+   );
+
+   task do_reset_to;
+      begin
+         reset_to = 1'b1;
+         @(posedge clk);
+         @(negedge clk);
+         reset_to = 1'b0;
+         #1;
+      end
+   endtask
+
+   // mirrors feed_commit above, against dut_to's inputs.
+   task feed_commit_to;
+      input [21:0] addr;
+      integer i;
+      begin
+         commit_addr_to = addr;
+         for (i = 0; i < 256; i = i + 1) begin
+            @(posedge clk); #1;
+            commit_buf_addr_to = i[7:0];
+            commit_buf_data_to = 16'h6000 + i[15:0];
+            commit_buf_wr_to   = 1'b1;
+         end
+         @(posedge clk); #1;
+         commit_buf_wr_to = 1'b0;
+         commit_done_to   = 1'b1;
+         @(posedge clk); #1;
+         commit_done_to = 1'b0;
+      end
+   endtask
+
    // mimics floppy_write_committer's ASSERT-state tap: present each of the
    // 256 words for one clk, then pulse commit_done with commit_addr already
    // stable (matches committed_addr being valid continuously, not just at
@@ -279,6 +343,49 @@ module tb_floppy_sd_writer;
             $display("PASS: test4 - in-flight commit survived img_mounted, queued commit was dropped");
          end else begin
             $display("FAIL: test4 - queued commit B was not dropped (saw_second_wr=%b busy=%b)", saw_second_wr, busy);
+            all_ok = 0;
+         end
+      end
+
+      // =====================================================================
+      // Test 5 (Phase 5 item 2): P_WAIT_ACK has no bound otherwise - if
+      // sd_ack never arrives for this slot's sd_wr (framework quirk, a
+      // mount race, etc.) the module must recover on its own instead of
+      // wedging forever with busy stuck high. Uses dut_to (ACK_TIMEOUT_BITS
+      // = 6, i.e. 63 cycles) so the real 24-bit default doesn't make this
+      // test impractically slow.
+      // =====================================================================
+      do_reset_to;
+      readonly_to    = 1'b0;
+      loader_busy_to = 1'b0;
+      feed_commit_to(22'd0);
+
+      begin : test5
+         integer waited;
+         waited = 0;
+         // capture (commit_done) and the P_IDLE->P_WAIT_ACK transition are
+         // one cycle apart (mirrors drain_block's own wait(sd_wr) above) -
+         // give it a bounded head start before checking.
+         waited = 0;
+         while (!sd_wr_to && waited < 10) begin
+            @(posedge clk);
+            waited = waited + 1;
+         end
+         if (!sd_wr_to) begin
+            $display("FAIL: test5 - expected sd_wr asserted (P_WAIT_ACK) before the timeout");
+            all_ok = 0;
+         end
+         waited = 0;
+         while (sd_wr_to && waited < 200) begin
+            @(posedge clk);
+            waited = waited + 1;
+         end
+         @(posedge clk); #1;
+         if (!sd_wr_to && !busy_to && waited < 200) begin
+            $display("PASS: test5 - P_WAIT_ACK with no sd_ack timed out after %0d cycles and recovered (busy=0)", waited);
+         end else begin
+            $display("FAIL: test5 - never recovered from a withheld sd_ack (sd_wr=%b busy=%b waited=%0d)",
+                      sd_wr_to, busy_to, waited);
             all_ok = 0;
          end
       end

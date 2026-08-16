@@ -300,7 +300,18 @@ module floppy_track_decoder (
             end
 
             S_SECT: begin
+               // Reject before committing to a sector number the checksum
+               // chain never covers (it starts at zero right after this
+               // byte - see the module header). Two failure modes close
+               // here: a mis-synced field aliasing to a sector index past
+               // this track's real spt (nib_cur is the full 6-bit nibble,
+               // not the truncated 4 bits sector_reg keeps - an alias a
+               // 4-bit compare would miss), and a side-1 field landing on
+               // a single-sided (sides==0) mount, where addr_base below
+               // would otherwise still add the side offset and write
+               // outside the image (FLOPPY_WRITE_PLAN.md Phase 5, holes A/B).
                if (!nib_valid) do_reject;
+               else if (nib_cur >= spt || (side && !sides)) do_reject;
                else begin
                   sector_reg      <= nib_cur[3:0];
                   state           <= S_GRP;

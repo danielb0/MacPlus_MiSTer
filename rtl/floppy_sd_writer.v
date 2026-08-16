@@ -38,8 +38,9 @@
 // silently-corrupting one: capture and drain never touch the same buffer
 // under normal (non-overflowing) operation, so the failure mode is stale
 // data reaching one sd_wr, not a torn transfer.
-module floppy_sd_writer
-(
+module floppy_sd_writer #(
+	parameter ACK_TIMEOUT_BITS = 24 // ~0.5s at clk_sys (~32MHz); sim overrides this narrower
+) (
 	input         clk,
 	input         reset,
 
@@ -99,6 +100,20 @@ module floppy_sd_writer
 	           P_WAIT_DONE = 2'd2;
 	reg [1:0] pstate;
 
+	// P_WAIT_ACK has no bound otherwise: if this slot's sd_wr is ever
+	// asserted while HPS isn't servicing it (framework quirk, a mount race
+	// on the shared slot, etc.) sd_ack never rises and this module would
+	// wedge in P_WAIT_ACK forever with busy stuck high (busy feeds
+	// LED_USER). ACK_TIMEOUT_BITS defaults to ~0.5s at clk_sys (~32MHz) -
+	// far longer than any real sd_ack latency, so it never fires in normal
+	// operation, but bounds the wedge instead of leaving it permanent.
+	// Abandons the same way a normal completion retires the entry
+	// (valid/head advance) - the commit is simply lost, same idealization
+	// class as the depth-2 queue's documented overflow case in the header
+	// above.
+	reg [ACK_TIMEOUT_BITS-1:0] ackTimer;
+	wire ackTimeout = &ackTimer;
+
 	assign busy = (pstate != P_IDLE) || valid[0] || valid[1];
 
 	always @(posedge clk) begin
@@ -109,6 +124,7 @@ module floppy_sd_writer
 			valid  <= 2'b00;
 			head   <= 1'b0;
 			tail   <= 1'b0;
+			ackTimer <= 0;
 		end else begin
 			// capture side: independent of pstate, always ready to accept
 			// the next commit (see header re: the depth-2 queue's limit).
@@ -152,7 +168,13 @@ module floppy_sd_writer
 			P_WAIT_ACK: if (sd_ack) begin
 				sd_wr  <= 1'b0; // mirrors scsi.v: io_wr drops as soon as io_ack rises
 				pstate <= P_WAIT_DONE;
-			end
+			end else if (ackTimeout) begin
+				sd_wr       <= 1'b0;
+				valid[head] <= 1'b0;
+				head        <= ~head;
+				pstate      <= P_IDLE;
+			end else
+				ackTimer <= ackTimer + 1'b1;
 
 			P_WAIT_DONE: if (!sd_ack) begin
 				valid[head] <= 1'b0;
@@ -162,6 +184,8 @@ module floppy_sd_writer
 
 			default: pstate <= P_IDLE;
 			endcase
+
+			if (pstate != P_WAIT_ACK) ackTimer <= 0;
 		end
 	end
 

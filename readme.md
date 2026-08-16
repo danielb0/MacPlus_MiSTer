@@ -10,7 +10,7 @@ I've tried to optimize the code by converting to synchronous style and fixing so
 * Copy [boot0.rom & boot1.rom](https://github.com/MiSTer-devel/MacPlus_MiSTer/tree/master/releases) (Plus and SE ROM files) to MacPlus folder
 * Copy disk images in dsk format (e.g. Disk605.dsk) to MacPlus folder
 
-After a few seconds, the floppy disk icon should appear. Open the on-screen display using the F12 key and select the a disk image. The upload of the disk image will take a few seconds. If a bootable system is found on disk, a smiling Mac icon will appear. MacPlus will then begin booting into the desktop.
+After a few seconds, the floppy disk icon should appear. Open the on-screen display using the F12 key and select the a disk image. The disk image mounts as a block device and is available to the Mac almost immediately. If a bootable system is found on disk, a smiling Mac icon will appear. MacPlus will then begin booting into the desktop.
 
 ## Floppy disk support
 
@@ -18,11 +18,11 @@ Internal and external floppy disk drives are both supported. The first and secon
 
 Floppy disk images need to be in raw disk format (a.k.a. DiskDup format) with a .dsk extension. Single-sided 400k disk images must be exactly 409,600 bytes in size. Double-sided 800k disk images must be exactly 819,200 bytes in size.  Disk Copy 4.2 files are not currently supported. They are largely the same as raw disk format, but include an additional 84-byte header. A tool to convert DC42 format to dsk is available [here](https://www.bigmessowires.com/2013/12/16/macintosh-diskcopy-4-2-floppy-image-converter/).
 
-Currently, floppy disk images are not writable within the core.
+Floppy disk images are writable, gated by the "Floppy Write" entry in the on-screen display (defaults to Off/protected - writes must be explicitly enabled). A disk image that is itself marked read-only on the SD card is always honoured as write-protected, regardless of this setting. Writes commit back to the exact .dsk file on the SD card and survive eject/remount and a full power cycle.
 
-Floppy disk images cannot be loaded while the Mac accesses a floppy disk. Thus, it's recommended to wait for the desktop to appear until a second floppy can be inserted. Before loading a different disk image, it's recommended to eject the previously inserted disk image from within the OS. 
+Floppy disk images cannot be loaded while the Mac accesses a floppy disk. Thus, it's recommended to wait for the desktop to appear until a second floppy can be inserted. Before loading a different disk image, it's recommended to eject the previously inserted disk image from within the OS - this now matters for data integrity, not just stability, since an image can be actively written to.
 
-Note that the floppy disk drive will not be read when the CPU speed is set to 16 MHz.
+Floppy disks are readable at both 8 MHz and 16 MHz CPU speeds. (Earlier versions could not read a floppy at 16 MHz: the IWM's read-data latch was cleared on a fixed wall-clock interval while the driver's polling loop scaled with the CPU, so at 16 MHz the driver polled faster than the latch cleared and read every disk byte twice. The clear interval now scales with the selected CPU speed.)
 
 Official system disk images are available from an archived Apple support page [here](https://web.archive.org/web/20141025043714/http://www.info.apple.com/support/oldersoftwarelist.html). Under Linux these can be converted into the desired dsk format using [Linux StuffIt](http://web.archive.org/web/20060205025441/http://www.stuffit.com/downloads/files/stuffit520.611linux-i386.tar.gz), unar, and [dc2dsk](http://www.bigmessowires.com/dc2dsk.c), in that order. A shell script has been provided for convenience at [releases/bin2dsk.sh](releases/bin2dsk.sh). 
 

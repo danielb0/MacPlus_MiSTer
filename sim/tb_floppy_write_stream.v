@@ -156,6 +156,33 @@ module tb_floppy_write_stream;
       end
    endtask
 
+   // ---- negative tests (Phase 5 item 2, holes A/B): a bare D5 AA AD +
+   // sector-number byte, no full field behind it - do_reject fires (or
+   // doesn't) purely on the S_SECT check, before any GRP bytes are needed,
+   // so a handful of ticks is enough. Writes directly into wmem instead of
+   // via $readmemh - no fixture file needed for 4 synthetic bytes.
+   task run_bad_field;
+      input [7:0] sect_byte;
+      input       s_side;
+      input       s_sides;
+      begin
+         side  = s_side;
+         sides = s_sides;
+         track = 7'd0;
+         do_reset;
+         byte_idx = 0;
+         wmem[0] = 8'hD5; wmem[1] = 8'hAA; wmem[2] = 8'hAD; wmem[3] = sect_byte;
+         wmem[4] = 8'h00; wmem[5] = 8'h00; wmem[6] = 8'h00; wmem[7] = 8'h00;
+         got_valid  = 1'b0;
+         got_reject = 1'b0;
+         for (t2 = 0; t2 < 8; t2 = t2 + 1) begin
+            tick(1'b0);
+            if (last_sector_valid) got_valid  = 1'b1;
+            if (last_reject)       got_reject = 1'b1;
+         end
+      end
+   endtask
+
    initial begin
       $readmemh("sim/image.hex", mem);
       all_ok = 1;
@@ -196,6 +223,27 @@ module tb_floppy_write_stream;
          $display("PASS: truncated field never committed");
       end else begin
          $display("FAIL: truncated field asserted sector_valid");
+         all_ok = 0;
+      end
+
+      // out-of-range sector number: track 0 has spt=12, raw byte 0xAE
+      // decodes to nib_cur=6'h0C=12, i.e. exactly spt - the first invalid
+      // value (Phase 5 item 2, hole A).
+      run_bad_field(8'hAE, 1'b0, 1'b1);
+      if (!got_valid && got_reject) begin
+         $display("PASS: out-of-range sector number rejected before the checksum chain even starts");
+      end else begin
+         $display("FAIL: out-of-range sector number - valid=%b reject=%b (expected valid=0 reject=1)", got_valid, got_reject);
+         all_ok = 0;
+      end
+
+      // side==1 on a single-sided (sides==0) mount, otherwise-valid sector 0
+      // (raw 0x96, nib_cur=0) - Phase 5 item 2, hole B.
+      run_bad_field(8'h96, 1'b1, 1'b0);
+      if (!got_valid && got_reject) begin
+         $display("PASS: side 1 on a single-sided mount rejected");
+      end else begin
+         $display("FAIL: side 1 on a single-sided mount - valid=%b reject=%b (expected valid=0 reject=1)", got_valid, got_reject);
          all_ok = 0;
       end
 

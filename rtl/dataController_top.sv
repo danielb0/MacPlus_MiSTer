@@ -3,11 +3,13 @@ module dataController_top(
 	input clk32,					// 32.5 MHz pixel clock
 	input clk8_en_p,
 	input clk8_en_n,
+	input clk16_en_n,		// for the IWM read-latch clear only, see iwm.v
 	input E_rising,
 	input E_falling,
-	
+
 	// system control:
 	input machineType, // 0 - Mac Plus, 1 - Mac SE
+	input turbo,			// 16 MHz CPU; scales the IWM read-latch clear
 	input _systemReset,
 
 	// 68000 CPU control:
@@ -458,6 +460,8 @@ module dataController_top(
 		.clk(clk32),
 		.cep(clk8_en_p),
 		.cen(clk8_en_n),
+		.cen16(clk16_en_n),
+		.turbo(turbo),
 		._reset(_cpuReset),
 		.selectIWM(selectIWM),
 		._cpuRW(_cpuRW),

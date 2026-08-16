@@ -275,12 +275,60 @@ Both files stayed at their exact original size, and in both cases every changed 
 ---
 
 ### Phase 5 — Hardening and parity
+
+Original bullets (written before Phases 1–4 existed, so partly superseded):
 - Both drives at full parity (external drive is a second `floppy` instance).
 - 400K single-sided write path (different `sides` geometry through `soff`).
 - Correct behaviour on eject mid-write, and on write with no disk inserted.
-- `SWITCHED` / disk-switched flag, currently hardwired to `1'b0` ([`rtl/floppy.v:114`](rtl/floppy.v)).
+- `SWITCHED` / disk-switched flag, currently hardwired to `1'b0` (`driveRegsAsRead` in [`rtl/floppy.v`](rtl/floppy.v) — the plan originally cited line 114, the correct site is the `SWITCHED` bit of `driveRegsAsRead`).
 - Stress: copy a multi-megabyte set of files floppy→floppy and floppy→SCSI; System 6.0.8 installer writing to floppy; Finder duplicate/trash cycles.
 - Update `readme.md` (it currently states floppies are not writable) and re-check the 16 MHz caveat, which may interact badly with write timing.
+
+#### STATUS — RTL complete, all sim gates pass, elaboration clean. Not yet compiled or hardware-tested.
+
+**Bullets 1 and 2 were already satisfied by Phase 4's own hardware gate** and are demoted to regression checks, not work: `Paint_2.dsk` (the 400K image tested) exercises the single-sided path, and each image was written in one drive and read back in the other. `floppy_track_decoder.v` copies the encoder's `soff`/`spt` math verbatim, `sides` term included.
+
+**Item 1 — write refused with no disk, and the write path reset on any disk change** (`rtl/floppy.v`). The write-accept condition gained a ``!driveRegs[`DRIVE_REG_CSTIN]`` (disk-in-place) term, closing a path where a stray post-eject write could reach the real `.dsk` on SD — an OS eject only sets CSTIN and drops `dsk_*_ins`; the S-slot stays mounted and the file stays open, so `floppy_sd_writer`'s `img_mounted` interlock (OSD remount only) does not cover it. A new `writePathReset` (eject pulse, or the rising edge of `insertDisk`) now resets the decoder and committer and clears the byte-pacer, so a half-decoded field can never be completed by the next disk's bytes and committed as a mixed sector. No new ports.
+
+> `insertDisk` is a **level**, not a pulse — `MacPlus.sv` drives it from `dsk_*_ds || dsk_*_ss`, held high for as long as a disk is mounted. `writePathReset` therefore edge-detects it. Two bugs came out of this during bring-up: using the bare level reset the decoder on every single cycle, and once edge-detected, force-clearing `insertDiskPrev` during reset manufactured a spurious edge that silently swallowed the first write byte of the next field. `insertDiskPrev` is seeded from the live level while in reset for that reason.
+
+**Item 2 — decoder bounds checks and an SD-writer timeout.** `floppy_track_decoder.v`'s `S_SECT` now rejects a sector number `>= spt`, or a side-1 field on a single-sided mount. Both matter because the decoded sector number sits *outside* the checksum chain — the chain covers the 524-byte payload but not the number that decides where that payload lands, so without a bounds check a mis-synced field could alias to a different *valid* sector and commit a checksum-valid write at the wrong offset. The comparison uses all 6 bits, not the truncated 4, which is what catches the aliases. Separately, `floppy_sd_writer.v`'s `P_WAIT_ACK` had no timeout and would stall forever with `busy` high (wedging `LED_USER`) if `sd_wr` were asserted on a slot the framework was not serving; it now times out. The timeout width is a parameter (`ACK_TIMEOUT_BITS`, default 24 ≈ 0.5 s) purely so a testbench can override it small — the real instantiations in `MacPlus.sv` are unparameterized and keep the 24-bit default.
+
+**Item 3 — `SWITCHED` implemented.** A new `diskSwitched` register feeds `driveRegsAsRead` bit 6 (previously hardwired `1'b0`), set by the same two events `writePathReset` uses (eject, or a genuine `insertDisk` edge) and cleared only when the Mac explicitly writes the reset-disk-switched register. That write decode already existed in the RTL and was consumed by nothing. Note the dependency: single-drive floppy→floppy copying (a stress bullet below) *requires* `SWITCHED` for the disk-swap dance; two-drive copying does not.
+
+**Item 4 — 16 MHz floppy reads fixed** (`rtl/iwm.v`, threaded through `dataController_top.sv` and `MacPlus.sv`). Root cause: the IWM read-data latch clear interval is wall-clock but the driver that depends on it is cycle-counted, and only the CPU speed scales. `readLatchClearTimer` loads 13 and decrements once per `cen` (125 ns) regardless of turbo, clearing the latch a fixed **1.5 µs** after a valid read. The `.Sony` driver detects a new byte *only* by polling bit 7, and **every GCR disk byte has bit 7 set**, so a not-yet-cleared latch is indistinguishable from a fresh byte. Its poll loops are unrolled double reads ~16 CPU cycles apart (measured in `releases/boot1.rom` at `0x03552e`): **2.0 µs at 8 MHz** (clears in time, ~33% margin) but **1.0 µs at 16 MHz** (still latched → duplicate bytes → no checksum ever validates → "disk unreadable").
+
+> Fix: the timer decrements on `clk16_en_n` instead of `cen` when turbo is selected — 12 ticks = 0.75 µs, restoring the same ~33% margin. At 8 MHz the enable reduces to `cen` exactly, so that path is bit-identical to the hardware-proven behaviour. The disk byte rate (16 µs) is a property of the drive and deliberately does **not** scale.
+>
+> The clear itself had to move onto the same enable as the countdown. `clk16_en_n` is a superset of `clk8_en_n` (`busPhase[0]` vs `busPhase==2'b01`), so a timer ticking at the faster rate reaches its terminal count on a phase-11 tick that `cen` never observes — leaving the clear gated on `cen` would let the terminal count slip past and the latch would never clear at all. The 16 MHz test case exercises exactly that tick, so this is verified, not just reasoned.
+>
+> Two hypotheses were checked and **ruled out** — do not re-derive them: missed CPU strobes at `cen` (a 68000 holds `_cpuLDS` for 187.5 ns at 16 MHz, longer than `cen`'s 125 ns period, so at least one sample is always guaranteed), and a missed `lstrbEdge` (the ROM's strobe routine holds LSTRB ~1 µs even at 16 MHz = 8 `cep` edges). Overrun is also not involved: `advanceDriveHead` is inert because `floppy.v` hardwires `readyToAdvanceHead` to 1.
+>
+> Adjacent finding, now documented in a code comment: `iwmMode` is **dead** — written and read back, but no bit of it affects behaviour. Its `L` (latch mode) bit is precisely the real IWM control governing this timing; we always behave as `L=1` regardless of what the driver writes.
+
+**Item 5 — `readme.md` updated**: floppies described as writable and gated by the OSD "Floppy Write" toggle (`status[6]`, defaults Off) which was previously undocumented; the stale "upload takes a few seconds" wording replaced (floppies have been S-mounts since Phase 1, not `ioctl` uploads); eject-before-swap reframed as a data-integrity matter; and the 16 MHz caveat rewritten now that item 4 fixes it.
+
+**Sim gates — 10 testbenches, all passing, run from the repo root:**
+
+| Testbench | Covers |
+|---|---|
+| `tb_floppy_track_encoder` | Phase 0 ground truth |
+| `tb_floppy_track_decoder` | + 2 new negative tests: out-of-range sector, side 1 on a single-sided mount |
+| `tb_floppy_write_stream` | real non-zero-tag fields, plus the same two rejects at stream level |
+| `tb_floppy_write_path` | + 3 new tests: write refused with no disk; eject/remount mid-field leaves the decoder clean; `SWITCHED` set on eject and on remount, cleared only by the reset-register write |
+| `tb_floppy_sd_writer` | + 1 new test: `P_WAIT_ACK` times out and recovers with `busy` low |
+| `tb_loader_writer_roundtrip`, `tb_floppy_loader`, `tb_floppy_loader_ext`, `tb_floppy_loader_integrated` | unmodified, no regression |
+| `tb_iwm_latch` (**new**) | the 16 MHz root cause: fails at 16 MHz on the pre-fix RTL, passes at both speeds after |
+
+> `tb_iwm_latch.v` is a characterization test built against the *real* `iwm`/`floppy`/`floppy_track_encoder`, so the bytes under test are genuine encoder output rather than synthetic. It guards the pre-fix RTL too, via `-DIWM_HAS_TURBO`, so the before/after comparison runs identical stimulus.
+
+**Testbench lesson worth carrying forward (cost a session):** driving a DUT input at zero delay immediately after `@(posedge clk)` races the DUT's own sampling of that signal in the same timestep, and Icarus may order it either way. On a *held* signal this only costs a cycle; on an **edge-history register** it destroys the event outright. That is what made the `SWITCHED` eject test fail — `lstrbPrev` sampled the new value, so the 1→0 strobe never existed and `lstrbEdge` never fired. It also meant the pre-existing, untouched `CSTIN` eject path silently never fired in that test either, which in turn meant the earlier eject/remount test was passing on its remount edge alone and had never actually exercised eject. `tb_floppy_write_path.v` now routes every drive-register write through one `strobe_write` task with the `#1` discipline baked in, and both eject tests now assert `CSTIN` directly so a dead strobe cannot pass silently again.
+
+**Elaboration:** `quartus_map --analysis_and_elaboration MacPlus` — 0 errors, 20 warnings, the standing baseline.
+
+> Quartus-vs-Icarus gotcha hit during this phase: Quartus needs the literal `if(!_reset) ... else if(cep) ...` two-branch shape to recognize an async-reset register. A single merged condition (`if(!_reset || cep)`) elaborates fine in Icarus but makes Quartus infer a latch and throw Error (10200)/(10240).
+
+**Still open for Phase 5:** full Quartus compile, hardware testing (including a 16 MHz read test, which is the whole point of item 4), and the stress bullet. The stress work should target the three Phase-3/4 structures nothing has exercised yet: the depth-2 commit queue and its documented depth-3 limit (via a large Finder duplicate); shared extra-slot-3 arbitration (write to one drive while mounting the other); and write-then-immediate-OSD-remount (the in-flight-survives / queued-dropped split, sim-proven but never on hardware).
 
 ---
 
