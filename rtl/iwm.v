@@ -396,7 +396,20 @@ module iwm
 			// the conclusion of a valid CPU read from the IWM will start the timer to clear the latch.
 			// Ordered after the decrement so a reload still wins when both fire on the same edge,
 			// exactly as it did when both lived in one cen-gated block.
-			if (cen) begin
+			//
+			// The RELOAD must run on latchClearCe too, not cen. cen is one tick
+			// per CPU cycle at 8 MHz but only one per TWO CPU cycles at 16 MHz,
+			// so gating the reload on it snaps the start of the countdown to a
+			// 2-cycle grid while the countdown itself ticks every cycle - the
+			// hold then comes out 1 cycle longer or shorter depending on where
+			// the access landed in busPhase. That is not harmless jitter: a poll
+			// that reads a stale latch re-arms this very timer, so losing the
+			// race once pins the latch high for as long as the driver keeps
+			// polling. cpu_en_p/n derive from the same busPhase counter, so the
+			// alignment never drifts - it is fixed by the wait-stated accesses
+			// preceding the poll loop and then stays put, which is why the
+			// failure looks random between runs but sticks within one.
+			if (latchClearCe) begin
 				if (iwmRead && readDataLatch[7]) begin
 					readLatchClearTimer <= 4'hD; // clear latch 14 clocks after the conclusion of a valid read
 				end
