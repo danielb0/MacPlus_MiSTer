@@ -164,10 +164,53 @@ Plus core has it easier than the LC.
 
 ### Phase 0 — Simulation harness
 
-The LC has `verilator/scsi_bench`. Port or re-create it against our `sim/` layout
-(which is iverilog-based from the floppy work). Gate: a scripted initiator that can
-drive selection → CMD → DATA → STATUS → MSG against the target and diff byte
-streams.
+**iverilog, not verilator.** The LC's bench is `verilator/scsi_bench`, but this
+project has no verilator and `sim/` is already iverilog (Icarus 12.0, `tb_*.v`
+compiled to `sim/out/*.vvp`). We write the SCSI bench natively in that style rather
+than porting theirs — the LC bench is a reference for the initiator command
+sequences, not code to lift.
+
+`sim/tb_scsi_target.v`: a SCSI initiator model driving the target's REQ/ACK
+handshake through selection → CMD → DATA → STATUS → MSG, plus an hps_io block-device
+model serving `io_rd`/`io_wr`/`io_ack`/`sd_buff_*`.
+
+#### STATUS — DONE (2026-08-17). Gate passes: baseline green, both defects reproduced.
+
+```bash
+C:/iverilog/bin/iverilog.exe -g2005-sv -o sim/out/tb_scsi_target.vvp sim/tb_scsi_target.v rtl/scsi.v && C:/iverilog/bin/vvp.exe sim/out/tb_scsi_target.vvp
+```
+
+Four tests. Two baseline guards that must pass today (INQUIRY returns the SEAGATE
+identity; READ(6) returns 512 bytes byte-exact against an LBA-derived pattern — the
+regression guard for Phase 1's read-ring rewrite), and the two conformance defects,
+which currently fail *by design*:
+
+```
+BASELINE (must pass today):        PASS
+CONFORMANCE (Phase 1 target):      2 of 2 still failing
+PHASE 0 SCSI GATE: PASS - harness good, both defects reproduced
+```
+
+The gate reports PASS in exactly two states: baseline-green-with-both-defects (now),
+and baseline-green-with-zero-defects (Phase 1 complete). A broken baseline always
+reports FAIL, because then the harness is not trustworthy.
+
+#### Two RTL findings from building the harness
+
+**`io_rd`/`io_wr` have no reset.** Together with the internal `rd_pending`/
+`wr_pending`, they power up as X and never resolve, which makes `io_busy` — and
+therefore `req` — X forever in simulation. `io_ack` is the only thing that clears
+them, so the bench has to pulse it during reset to bring the DUT to a defined state.
+Harmless on real hardware (the fabric powers up at 0), but it should be a proper
+reset. Added to Phase 1.
+
+**`req` asserts ~2 cycles before `io_rd` on entering DATA_OUT.** `req_rd` is
+combinational off `phase`, but `io_rd` is registered behind `rd_pending`, so there is
+a two-cycle window where `io_busy` is still low and `req` is already high — an
+infinitely fast initiator can take a byte before the block fetch has even started.
+The bench hits this immediately and reads X. A 68000 pseudo-DMA turnaround is ~500ns
+against a 62ns window, so hardware never hits it, but the read-ring rework in Phase 1
+touches exactly this logic and should close it rather than inherit it.
 
 Must produce, before any RTL change, a **failing** test for each of the two
 conformance bugs in §1 — a REQUEST SENSE after a CHECK CONDITION, and a 12-byte CDB
@@ -193,6 +236,9 @@ Port the LC disk-path work into `rtl/scsi.v`:
    writes on the existing two-slot buffer, as the LC does — our write path is
    freshly validated and should not be disturbed.
 6. HPS byte-lane endianness handling (their `VERILATOR` vs real-HPS packing split).
+7. Reset `io_rd`/`io_wr`/`rd_pending`/`wr_pending` (Phase 0 finding).
+8. Close the `req`-before-`io_rd` startup window (Phase 0 finding) — the read-ring
+   rework rewrites this logic anyway, so fix it there rather than inherit it.
 
 Testable against existing HD images with no user-visible change. **Hardware-validate
 before starting Phase 2** — this phase touches the path every existing user depends
