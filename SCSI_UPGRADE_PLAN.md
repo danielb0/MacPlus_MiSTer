@@ -249,7 +249,6 @@ Merge order: `floppy-write` → `master` first, then rebase this branch.
 | CD-ROM unusable on a Plus in practice | Medium | 68000 at 8MHz, 1–4MB RAM, polled SCSI. Historically real, but slow. May be more demo than daily driver. |
 | LC's boot-attach CD hang reproduces here | Medium | Documented on their core, cause not established. Test with CD detached at boot. |
 | Audio signedness (§Phase 3) | Medium | May surface a pre-existing bug that is currently inaudible. |
-| Licensing | Medium | See §9. |
 | Fit / timing | **Low** | 475 M10K and 63% ALM free. The LC's constraints do not bind us. |
 
 ---
@@ -272,22 +271,13 @@ orthogonal to SCSI — separate evaluation if wanted), and their JTAG debug harn
 
 ---
 
-## 9. Licensing — resolve before merge
+## 9. Attribution
 
-**Neither repo carries a LICENSE or COPYING file.** Both descend from Plus Too
-(Steve Chamberlin) and minimigmac (Benjamin Herrenschmidt); MiSTer cores are
-conventionally GPL-family but nothing states it here.
-
-The LC author's forum reply ("Feel free to grab and update the MacPlus core") is a
-clear permission grant from the person who wrote the code, but it is not a formal
-license and does not resolve the upstream chain. Before merging to `master`:
-
-- Confirm with the LC author what license they consider the work to be under.
-- Preserve their authorship attribution in the ported file headers.
-- Consider whether this is the moment to add an explicit LICENSE to MacPlus_MiSTer.
-
-Same issue as the floppy-write plan's §"Licensing — resolve before copying any
-code"; it has simply not come due yet.
+Not a licensing question — both cores are publicly distributed, cross-porting is
+established practice in the MiSTer ecosystem, and the LC author invited this port
+directly. Carry their authorship attribution through in the ported file headers as
+normal courtesy, and credit the LC core in `readme.md` alongside the existing
+Plus Too / minimigmac credits.
 
 ---
 
