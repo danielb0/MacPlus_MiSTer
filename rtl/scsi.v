@@ -905,7 +905,13 @@ wire  cmd_ok = (CDROM != 0) ? cmd_ok_cd : cmd_ok_hd;
 wire  cd_needs_media = cmd_test_unit_ready || cmd_read || cmd_read_capacity ||
 		  cmd_cd_toc || cmd_cd_subq || cmd_cd_astat || cmd_cd_actl ||
 		  cmd_cd_toc43 || cmd_cd_subq43 || cmd_cd_hdr || cmd_cd_audio_nop;
-wire  cd_no_media = (CDROM != 0) && !mounted && cd_needs_media;
+// !toc_ready: the lead-out MSF conversion runs for ~150 cycles after a mount.
+// Serving media commands in that window returned the PREVIOUS disc's TOC, which
+// is the wrong answer after a disc swap. Report the drive as not-ready-yet
+// instead -- the correct SCSI answer for a drive still spinning up, and what the
+// driver's retry path already handles. (Quartus caught this: toc_ready was
+// assigned but never read, i.e. the readiness flag existed but gated nothing.)
+wire  cd_no_media = (CDROM != 0) && (!mounted || !toc_ready) && cd_needs_media;
 
 // READ HEADER in MSF form: rejected (see cd_hdr_byte).
 wire  cd_hdr_msf_rej = cmd_cd_hdr && cmd[1][1];

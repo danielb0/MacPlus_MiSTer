@@ -191,6 +191,26 @@ module tb_scsi_cdrom;
       end
    endtask
 
+   // Mount without waiting for the lead-out conversion, so a command can be
+   // issued inside the not-ready window on purpose.
+   task mount_image_nowait;
+      input [31:0] blocks;
+      begin
+         @(posedge clk); #1;
+         img_blocks  = blocks;
+         img_mounted = 1'b1;
+         @(posedge clk); #1;
+         img_mounted = 1'b0;
+      end
+   endtask
+
+   // Records whether the TOC conversion was actually still running while a
+   // command was in flight, so the test asserts on the real condition rather
+   // than racing it.
+   reg watch_toc    = 1'b0;
+   reg saw_toc_busy = 1'b0;
+   always @(posedge clk) if (watch_toc && !dut.toc_ready) saw_toc_busy <= 1'b1;
+
    reg       timed_out = 1'b0;
    reg [7:0] sampled   = 8'h00;
 
@@ -763,6 +783,41 @@ module tb_scsi_cdrom;
                            lba_ok, status_byte, buf_in[2], buf_in[12]);
       end
       report(ok, "cd20 - READ HEADER: LBA form served, MSF form rejected 5/24");
+
+      // ==================================================================
+      // Test 21: a command issued while the lead-out MSF conversion is still
+      // running must report NOT READY, not serve the PREVIOUS disc's TOC.
+      // Quartus caught this as "toc_ready assigned but never read" -- the
+      // readiness flag existed but gated nothing, so a disc swap could hand
+      // back the old disc's lead-out for ~150 cycles.
+      // ==================================================================
+      do_reset;
+      mount_image(IMG_BLOCKS);          // settle on a known disc first
+      saw_toc_busy = 1'b0;
+      watch_toc    = 1'b1;
+      mount_image_nowait(IMG_BLOCKS);   // ...then swap without waiting
+      select_target;
+      send_cdb(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00,0,0,0,0,0,0, 6);  // TEST UNIT READY
+      finish_command;
+      watch_toc = 1'b0;
+      begin : t21
+         reg [7:0] busy_status;
+         busy_status = status_byte;
+         // and once the conversion finishes, the drive is ready again
+         mount_image(IMG_BLOCKS);
+         select_target;
+         send_cdb(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00,0,0,0,0,0,0, 6);
+         finish_command;
+         if (!saw_toc_busy) begin
+            $display("       INCONCLUSIVE: never caught the conversion window");
+            ok = 0;
+         end else begin
+            ok = (busy_status == 8'h02) && (!timed_out) && (status_byte == 8'h00);
+         end
+         if (!ok) $display("       (busy_status=%02x ready_status=%02b saw_busy=%b)",
+                           busy_status, status_byte, saw_toc_busy);
+      end
+      report(ok, "cd21 - commands report NOT READY while the TOC is still converting");
 
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);

@@ -63,8 +63,14 @@ localparam CONF_STR = {
 	"-;",
 	"SC0,IMGVHD,Mount SCSI-6;",
 	"SC1,IMGVHD,Mount SCSI-5;",
-	"hI-;",
-	"hISC4,ISO,Mount CD-ROM;",
+	"-;",
+	// CD-ROM (SCSI ID 3). ISO only for now: the TOC is a synthesized single
+	// data track, so 2352-byte .bin and text .cue would be served wrong rather
+	// than merely incompletely (SCSI_UPGRADE_PLAN.md Phase 2).
+	// No conditional-visibility prefix here - MacLC_MiSTer declares its
+	// equivalent slot plainly, and an `h` prefix hid the item outright.
+	"SC4,ISO,Mount CD-ROM;",
+	"OI,CD-ROM Drive,Enabled,Disabled;",
 	"-;",
 	"O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
@@ -74,7 +80,6 @@ localparam CONF_STR = {
 	"O6,Floppy Write,Off,On;",
 	"ODE,CPU,68000,68010,68020;",
 	"O4,Memory,1MB,4MB;",
-	"OI,CD-ROM Drive,Enabled,Disabled;",
 	"-;",
 	//"OA,Serial,Off,On;",
 	//"-;",
