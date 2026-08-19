@@ -460,6 +460,165 @@ mixer on top of it, because a stereo signed mix will expose the difference loudl
 
 ---
 
+## 5.5 Build results and hardware validation (Phases 1 + 2)
+
+### Synthesis — Quartus 17.0.2, 5CSEBA6U23I7 (commit `0698fd1`)
+
+| | Baseline (pre-upgrade) | Phases 1 + 2 | Delta |
+|---|---|---|---|
+| Logic (ALMs) | 15,427 (37%) | **16,334 (39%)** | +907 |
+| Registers | 17,908 | 18,443 | +535 |
+| M10K blocks | 78 (14%) | **122 (22%)** | **+44** |
+| Block memory bits | 477,125 | 853,957 | +376,832 |
+
+Compile time ~13 minutes. **Timing passes with no failing paths — TNS 0.000 on
+every domain, in both builds compiled so far.**
+
+Per-domain setup slack is worth reading carefully, because it moves between runs
+in a way that is easy to misattribute:
+
+| Domain | Baseline | `d93c918` | `0698fd1` |
+|---|---|---|---|
+| `emu|pll general[0]` (core clock — where the SCSI logic lives) | 1.468 | 1.172 | **1.670** |
+| `pll_hdmi` (HDMI output — unrelated to SCSI) | 0.539 | 0.612 | **0.160** |
+
+The core clock got *better* in the latest build, not worse, so the read ring's
+wider comparator cone and the CD's widened `cmd_dout` mux are not squeezing the
+domain they live in. The `pll_hdmi` figure moving 0.612 -> 0.160 has no causal
+path to the SCSI work; a CONF_STR string-length change alters the hps_io ROM
+contents and perturbs global placement, so unrelated domains drift run to run.
+
+**Still, 0.160 ns is thin.** It is positive and TNS is zero, so this build is
+fine, but if a later compile pushes `pll_hdmi` negative, treat it as placement
+variance to be re-run and re-measured rather than a SCSI regression — check
+whether the core clock moved with it before concluding anything.
+
+**The M10K estimate in §4 was wrong.** It guessed ~26; the real figure is 44. Two
+compounding errors: it forgot the CD is a third target instance, and it divided
+by 10,240 bits per M10K rather than the 8,192 actually usable in x8 mode. Correct
+arithmetic: each ring buffer is 8192 x 8 = 65,536 bits = 8 blocks; 3 targets x 2
+buffers = 48, minus the 4 the old 512-deep buffers used = +44. The measured
+memory-bit delta matches that exactly (+376,832), so the model is now calibrated.
+The conclusion is unchanged — 431 blocks free, nowhere near constrained, and
+`RING_LOG=6` would cost another 48 and still fit at 170/553.
+
+### Two defects found only by building and running it
+
+Both are worth recording because neither simulation nor review caught them.
+
+**The "Mount CD-ROM" menu item never appeared.** The CONF_STR entry carried an
+`h` conditional-visibility prefix (`"hISC4,ISO,Mount CD-ROM;"`) meant to hide the
+slot only while the drive is disabled. That was an unverified assumption about
+Main_MiSTer's prefix polarity: with the drive Enabled (status[18] = 0) the item
+was hidden outright. Confirmed on hardware, where the unprefixed "CD-ROM Drive:
+Enabled" toggle *was* visible while the mount slot was not. MacLC_MiSTer, which
+has the same feature, declares its slot plainly with no prefix — matching it is
+the fix. The CD target itself was never affected: `cd_enable` was already 1, so
+it had been answering selection at ID 3 the whole time; only the UI was missing.
+
+**Quartus caught a readiness flag that gated nothing.** Warning 10036,
+"`toc_ready` assigned but never read", was correct: for the ~150 cycles the
+lead-out MSF conversion runs after a mount, media commands served the *previous*
+disc's TOC — wrong data after a disc swap rather than an error. `!toc_ready` now
+folds into `cd_no_media`, so those commands report NOT READY, which is the
+correct answer for a drive still spinning up and one the driver's retry path
+already handles. The bench had hit this as a mount race and it was "fixed" on the
+bench side; that was the wrong call — the bench was reporting a real RTL gap.
+`cd21` now covers it, asserting on whether the conversion was genuinely still
+running rather than racing it.
+
+---
+
+### Hardware validation checklist
+
+Neither phase has been validated on a DE10 yet. **Back up the test images first**
+— Phase 1 changed the write path, and that path had no test coverage at all
+before this work. Use a scratch image and keep the previous release `.rbf` to
+A/B against.
+
+#### Set up the two bisect levers first
+
+They turn a failure into a diagnosis instead of a mystery. Both are proven in sim.
+
+| Lever | How | Isolates |
+|---|---|---|
+| CD-ROM Drive -> Disabled | OSD, `status[18]` | Bus becomes bit-identical to a pre-CD build. A *disk* fault that vanishes here is Phase 2's. |
+| `RING_LOG` 5 -> 1 | `rtl/scsi.v`, one line + rebuild | Reproduces the old two-sector double buffer exactly. A *read* fault that vanishes here is the ring's. |
+
+#### Tier 1 — the read ring (highest risk; the failure is silent)
+
+The dangerous mode is not a hang, it is a stale ring slot returning
+plausible-looking data from earlier in the same transfer. Test **content**, not
+completion:
+
+- Place a large file of known checksum on the image from the PC beforehand.
+- Boot, copy it around on the Mac, read it back, verify byte-identical.
+- Launch several large applications; open a folder full of colour icons. The LC
+  found icon rendering and app loading were where ring staleness first showed.
+- Pull the image back to the PC and diff it.
+
+**Watch specifically:** the LC needed an extra look-ahead stall (`rd_ahead_blk`)
+because their 68020's *longword* pseudo-DMA captures bytes past the current one
+and can cross into a not-yet-filled ring block. That was deliberately not ported,
+on the grounds that the Plus is byte-wide (`dataController_top.sv:221-225`). If
+reads corrupt in a ring-boundary-periodic pattern, that omission is the first
+suspect — it is the judgment call in Phase 1 that hardware is best placed to
+disprove.
+
+#### Tier 2 — writes
+
+- Copy several MB onto the SCSI disk, reboot, verify every file; then diff the
+  image on the PC.
+- The LC's signature for the window closed with `wr_pending` was very specific: a
+  7.5 MB write perfect *except the first word of one 512-byte block*. A single
+  wrong word in an otherwise clean write is meaningful, not noise.
+
+#### Tier 3 — reset and arbitration
+
+- Hit reset repeatedly **during** heavy disk I/O; every reset should re-boot
+  cleanly. This exercises `sys_rst`, which now tears down the phase FSM — before,
+  a reset mid-command could leave a target holding BSY and the ROM's next boot
+  scan would find a busy bus.
+- Mount both SCSI disks and drive I/O against both. That is `bus_busy`.
+
+#### Tier 4 — CD-ROM
+
+Per the LC's own warning, **mount the ISO from the OSD after the desktop is up**,
+not attached at boot — they see an intermittent hang with a CD attached at boot
+and never root-caused it. Only try boot-attached once the rest is known good.
+
+- With no disc, the drive should still be *present* (System 6/7 with the Apple
+  CD-ROM driver + Foreign File Access).
+- Mount an **ISO** and verify file contents — this exercises the `<<2` scaling.
+- Eject from the Finder ("Put Away"), then remount. This tests the `0x1B`
+  START/STOP form, which is what the System 7 driver actually uses; if `mounted`
+  does not drop, the driver silently remounts the volume ~10 s later.
+- **Boot priority:** with a bootable HD at ID 6 and a CD mounted, the HD must
+  still win (the ROM scans 6 -> 0).
+
+#### Tier 5 — the error path
+
+REQUEST SENSE only matters when something fails, so provoke it: run SCSI Probe,
+Apple HD SC Setup, Lido or SilverLining. These issue opcodes we do not implement,
+which is exactly the CHECK CONDITION -> REQUEST SENSE recovery that previously
+wedged the bus forever.
+
+- The drive must still identify as **SEAGATE ST225N**. Phase 1 clamps INQUIRY to
+  36 bytes; a truncated or garbled identity points at that clamp.
+- The utility should complete rather than hang.
+
+#### Where the risk actually sits
+
+Ranked: **the read ring** (biggest change, silent failure, omitted look-ahead
+stall), then **REQ behaviour during block fetches** (the LC needed a separate
+bus-visible REQ because a driver polling CSR/BSR between pseudo-DMA chunks read
+a dropped REQ as a dead transfer and parked forever — the signature is a hang at
+a *consistent* point in boot, not a random one), then the **write path**. The CD
+is least likely to break anything you care about: it is additive and switchable
+off.
+
+---
+
 ## 6. Why this branch is based on `floppy-write`
 
 `master` lacks the floppy write feature. Two reasons not to base on it:
