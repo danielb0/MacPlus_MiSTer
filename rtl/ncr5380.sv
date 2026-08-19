@@ -72,9 +72,17 @@ module ncr5380
 	input        [7:0] sd_buff_addr,
 	input       [15:0] sd_buff_dout,
 	output      [15:0] sd_buff_din[DEVS],
-	input              sd_buff_wr
+	input              sd_buff_wr,
+
+	// CD-ROM drive present on the bus (see scsi.v's cd_enable). Only meaningful
+	// when CD_DEV is in range; low makes the bus identical to a disks-only build.
+	input              cd_enable
 );
 	parameter DEVS = 2;
+	// Index of the CD-ROM target within the DEVS arrays, or DEVS for "none".
+	// The disks keep indices 0..n at IDs 6,5,... exactly as before; the CD takes
+	// the last index at ID 3.
+	parameter CD_DEV = DEVS;
 
 	assign dreq = scsi_req & dma_en;
 
@@ -264,7 +272,12 @@ module ncr5380
 		genvar i;
 		for (i = 0; i < DEVS; i = i + 1) begin : target
 			// connect a target
-			scsi #(.ID(3'd6 - i[2:0])) target
+			// SCSI IDs: disks descend from 6 (6, 5, ...); the CD sits at 3.
+			// The Plus ROM scans IDs 6 -> 0, so a bootable hard disk is always
+			// found before the CD, while a bootable CD still works when no disk
+			// is bootable. ID 3 is also the AppleCD SC factory default.
+			scsi #(.ID((i == CD_DEV) ? 3'd3 : (3'd6 - i[2:0])),
+			       .CDROM((i == CD_DEV) ? 1 : 0)) target
 			(
 				.clk    ( clk ),
 				.rst    ( scsi_rst ),
@@ -274,6 +287,7 @@ module ncr5380
 				// harmless -- this target is in IDLE (bsy=0) whenever the test
 				// is evaluated.
 				.bus_busy( |target_bsy ),
+				.cd_enable( (i == CD_DEV) ? cd_enable : 1'b0 ),
 				.sel    ( scsi_sel ),
 				.atn    ( scsi_atn ),
 

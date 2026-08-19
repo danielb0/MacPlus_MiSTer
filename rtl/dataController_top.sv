@@ -110,6 +110,7 @@ module dataController_top(
 	// connections to io controller
 	input   [SCSI_DEVS-1:0] img_mounted,
 	input            [31:0] img_size,
+	input                   cd_enable,
 	output           [31:0] io_lba[SCSI_DEVS],
 	output  [SCSI_DEVS-1:0] io_rd,
 	output  [SCSI_DEVS-1:0] io_wr,
@@ -121,6 +122,8 @@ module dataController_top(
 );
 	
 	parameter SCSI_DEVS = 2;
+	// Index of the CD-ROM target inside the SCSI arrays, or SCSI_DEVS for none.
+	parameter SCSI_CD_DEV = SCSI_DEVS;
 	
 	// Volume: snd_vol[2:0] is a 3-bit binary level (0=mute, 7=max).
 	// The original code summed scaled copies (x1+x2+x4) which is mathematically
@@ -213,7 +216,7 @@ module dataController_top(
 	assign memoryDataOut = cpuDataIn;
 
 	// SCSI
-	ncr5380 #(SCSI_DEVS) scsi(
+	ncr5380 #(.DEVS(SCSI_DEVS), .CD_DEV(SCSI_CD_DEV)) scsi(
 		.clk(clk32),
 		.reset(!_cpuReset),
 		.bus_cs(selectSCSI),
@@ -227,6 +230,7 @@ module dataController_top(
 		// connections to io controller
 		.img_mounted( img_mounted ),
 		.img_size( img_size ),
+		.cd_enable( cd_enable ),
 		.io_lba ( io_lba ),
 		.io_rd ( io_rd ),
 		.io_wr ( io_wr ),

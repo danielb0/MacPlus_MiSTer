@@ -322,6 +322,15 @@ the correct flush count. Left in place: it is a harmless safety net if the
 `data_complete`/phase timing ever shifts, and removing it would be an untestable
 change to the write path.
 
+#### Follow-up logged during Phase 2
+
+`READ CAPACITY` on the **disk** path still returns `img_blocks`, not
+`img_blocks - 1`. The command is defined to return the last LBA, so this is a
+pre-existing off-by-one that the LC fixed on its disk path. It was deliberately
+left alone: Phase 2 is meant to be purely additive, and changing it alters what
+every existing user's driver sees. The CD path uses the correct value. Worth
+fixing with Phase 1's hardware validation, not before it.
+
 #### Deliberately *not* done in Phase 1
 
 The other SCSI-1 commands listed in §1 — REZERO UNIT (0x01), SEEK(6/10)
@@ -333,13 +342,104 @@ issues them. Revisit after Phase 1 hardware validation.
 
 ### Phase 2 — CD-ROM target
 
+#### STATUS — RTL COMPLETE, SIM GREEN (2026-08-19). Hardware validation outstanding.
+
+```
+PHASE 2 CD-ROM: 0 of 20 failing
+PHASE 2 CD GATE: PASS - AppleCD target behaves
+```
+
 Third `scsi` instance, `#(.ID(3), .CDROM(1))`. AppleCD personality, 2048-byte
 logical blocks served as 4 consecutive 512-byte HPS blocks (lba/tlen <<2), READ TOC
 (both standard 0x43 and Apple vendor 0xC1), sub-channel, START/STOP eject,
 PREVENT/ALLOW, no-disc sense (`SK_NOT_READY` + vendor ASC 0xB0 — the LC notes 0x3A
 makes MacOS "hammer the drive asking the user to format it").
 
-New hps_io slot, `sd_buff_addr` widening, CONF_STR entries, `cd_enable` toggle.
+Implemented: SONY CDU-8004 identity (the Apple CD-ROM extension binds only to
+drives it recognises, so the identity *is* the compatibility), READ CAPACITY in
+2048-byte units, CD MODE SENSE with the page 0x30 Apple magic page and the
+write-protect bit, both READ TOC dialects, both READ SUB-CHANNEL dialects, AUDIO
+STATUS, READ HEADER, PREVENT/ALLOW, both eject forms, SET CD SPEED, and
+accept-noop audio transport. WRITE / FORMAT / VERIFY are deliberately absent from
+the CD command set, so they CHECK with ILLEGAL REQUEST as a real AppleCD does.
+
+**`sd_buff_addr` did NOT need widening.** This plan assumed whole-CD-frame bursts
+would force `[7:0]` to `[12:0]`. Scaling lba/tlen by 4 at latch time instead means
+the CD reuses the existing 512-byte block plumbing unchanged — no `hps_io`
+declaration change, no new byte-lane concern, and one less thing that could
+regress the disks. The `<<2` line is the single most load-bearing line in the CD
+data path and has two dedicated tests.
+
+#### Scope decision: single-track TOC, and therefore ISO only
+
+The LC's TOC comes from `cd_audio.sv`, which parses a real multi-track table.
+Phase 2 has no audio engine, so the TOC here is **synthesized as one data track
+spanning the disc** — correct for data CDs, which is what Phase 2 is for. The
+lead-out address is the only non-constant part; it needs an LBA to MSF conversion,
+done by a small iterative subtract at mount time (two passes, ~150 cycles against
+a mount event, so no divider).
+
+The two TOC planes disagree on purpose and this is easy to get wrong: the Apple
+0xC1 plane is raw LBA-derived MSF in **BCD**, the standard 0x43 plane is MSF **+150**
+(the two-second pre-gap) in **binary**. Both are pinned by tests, and the test
+image is chosen so minutes, seconds and frames are all non-trivial (40:33:17) —
+an evenly-dividing LBA would pass with a broken divider.
+
+Consequence: the CONF_STR slot offers **`ISO` only**, not the `CUEBINCHD` this plan
+originally listed. A `.bin` from a CUE/BIN pair is usually 2352-byte raw sectors,
+not 2048, and a `.cue` is a text file; serving either as linear 2048-byte logical
+blocks would be wrong, not merely incomplete. Those formats arrive in Phase 3
+along with the real TOC.
+
+#### Core wiring
+
+- `SCSI_DEVS` 2 to 3, `SCSI_CD_DEV` = 2. One generate loop still builds every
+  target; index 2 gets `ID(3)` and `CDROM(1)`. Verified by elaborating the
+  hierarchy and reading the parameters back: `ID=6/CDROM=0`, `ID=5/CDROM=0`,
+  `ID=3/CDROM=1`.
+- `VDNUM` 4 to 5. The CD is hps_io **slot 4**, deliberately not contiguous with the
+  disks at slots 0/1 because 2/3 belong to the floppies, so every SCSI vector is
+  assembled by hand rather than sliced.
+- CONF_STR gains `SC4,ISO,Mount CD-ROM;` and `OI,CD-ROM Drive,Enabled,Disabled;`.
+  The mount slot is hidden while the drive is disabled.
+- `cd_enable = ~status[18]`, so the drive is **enabled by default** as this plan
+  specified. Note this does change the bus for existing users on upgrade: a new
+  target answers selection at ID 3. It cannot preempt booting (the ROM scans 6 to 0),
+  and flipping the default is a one-character change if hardware testing wants it.
+
+#### Verification
+
+`sim/tb_scsi_cdrom.v`, 20 tests — a separate bench from the disk one so that "the
+disk still works" and "the CD works" stay independently meaningful answers. It
+covers the no-disc drive-present model, the no-disc sense, `cd_enable` invisibility,
+identity, capacity, both READ forms with the <<2 scaling, all three Apple TOC
+operations, the standard TOC, allocation-length serving, the Apple magic page,
+read-only rejection, the 12-byte SET CD SPEED, PREVENT-blocked eject, the
+START/STOP eject form, remount, both sub-channel dialects, and READ HEADER
+including the rejected MSF form.
+
+Mutations verified to fail the right tests: removing the `<<2` scaling (cd6, cd7),
+dropping the +150 pre-gap (cd11), serving the 0xC1 lead-out in binary instead of
+BCD (cd9), using ASC 0x3A instead of 0xB0 for no-disc (cd2), and giving the CD the
+disk command set so it accepts WRITE (11 tests).
+
+The disk gate was re-run after every step and stayed green throughout — with all
+CD code present, `CDROM == 0` folds it away.
+
+#### One real bug this phase surfaced, worth remembering
+
+Every CD response initially had a **corrupt first byte** — and only the first byte.
+The cause is that a continuous assignment calling a function takes its sensitivity
+from the call's *arguments*, so a module signal read inside the function body does
+not retrigger it; `cmd_dout` was only re-evaluated when `data_cnt` incremented, and
+byte 0 therefore carried the previous command's decode. The fix is to pass every
+dependency in as a function argument, which is correct by construction. Three
+apparently unrelated failures (TOC operation select, TOC BCD, MODE SENSE page
+select) were all this one cause.
+
+Note this would likely have *worked* in Quartus and failed only in simulation —
+which is precisely why it had to be fixed rather than tolerated: RTL that only
+behaves because the synthesizer is smarter than the simulator is untestable.
 
 Guest-side requirement: System 6/7 with the Apple CD-ROM driver + Foreign File
 Access. **The LC's own docs warn that CD-image-attached-at-boot causes an

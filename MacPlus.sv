@@ -63,6 +63,8 @@ localparam CONF_STR = {
 	"-;",
 	"SC0,IMGVHD,Mount SCSI-6;",
 	"SC1,IMGVHD,Mount SCSI-5;",
+	"hI-;",
+	"hISC4,ISO,Mount CD-ROM;",
 	"-;",
 	"O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
@@ -72,6 +74,7 @@ localparam CONF_STR = {
 	"O6,Floppy Write,Off,On;",
 	"ODE,CPU,68000,68010,68020;",
 	"O4,Memory,1MB,4MB;",
+	"OI,CD-ROM Drive,Enabled,Disabled;",
 	"-;",
 	//"OA,Serial,Off,On;",
 	//"-;",
@@ -124,13 +127,17 @@ end
 
 ///////////////////////////////////////////////////
 
-localparam SCSI_DEVS = 2;
-// VDNUM: slots 0/1 = SCSI (unchanged), slots 2/3 = the two floppies
+// SCSI targets: index 0/1 are the disks at IDs 6/5, index 2 is the CD-ROM at
+// ID 3 (SCSI_UPGRADE_PLAN.md Phase 2). The index order here is the ncr5380's
+// internal device order, NOT the hps_io slot order - see the slot mapping below.
+localparam SCSI_DEVS   = 3;
+localparam SCSI_CD_DEV = 2;
+// VDNUM: slots 0/1 = SCSI disks (unchanged), slots 2/3 = the two floppies
 // (Phase 1: converted from ioctl_download F1/F2 to real S-type block-device
-// mounts - see FLOPPY_WRITE_PLAN.md section 3). The per-slot
+// mounts - see FLOPPY_WRITE_PLAN.md section 3), slot 4 = CD-ROM. The per-slot
 // latch-at-own-mount-pulse pattern below mirrors the UK101 core's
 // four-drive support (VDNUM=5 there).
-localparam VDNUM = 4;
+localparam VDNUM = 5;
 
 // the status register is controlled by the on screen display (OSD)
 wire [31:0] status;
@@ -152,13 +159,25 @@ wire                  img_readonly;
 // below gets scalar per-slot ports instead of an array (the same pattern
 // UK101.sv uses per-drive: each consumer indexes the shared array itself,
 // no consumer declares its own sub-array port).
+// SCSI device index -> hps_io slot: 0 -> 0 (disk, ID 6), 1 -> 1 (disk, ID 5),
+// 2 -> 4 (CD-ROM, ID 3). Slots 2/3 belong to the floppies, so the CD's slot is
+// deliberately not contiguous with the disks' and every SCSI vector has to be
+// assembled by hand rather than sliced.
 wire [31:0] scsi_sd_lba[SCSI_DEVS];
 wire [15:0] scsi_sd_buff_din[SCSI_DEVS];
 wire [SCSI_DEVS-1:0] scsi_sd_rd, scsi_sd_wr;
 assign sd_lba[0] = scsi_sd_lba[0];
 assign sd_lba[1] = scsi_sd_lba[1];
+assign sd_lba[4] = scsi_sd_lba[SCSI_CD_DEV];
 assign sd_buff_din[0] = scsi_sd_buff_din[0];
 assign sd_buff_din[1] = scsi_sd_buff_din[1];
+assign sd_buff_din[4] = scsi_sd_buff_din[SCSI_CD_DEV];
+
+// CD-ROM drive present on the bus. Disabled (status[18] set) makes the CD
+// target never answer selection, so the SCSI bus is bit-identical to a
+// pre-CD build - both the period-purist switch and the A/B lever if the new
+// target misbehaves on hardware.
+wire cd_enable = ~status[18];
 // sd_buff_din[2]/[3] driven below by each drive's floppy_sd_writer (Phase 4) -
 // only ever consulted by hps_io during a sd_wr session for that slot, which
 // only the writer ever asserts, so no mux against the loader is needed here.
@@ -566,7 +585,7 @@ addrController_top ac0
 wire [1:0] diskEject;
 wire [1:0] diskMotor, diskAct;
 
-dataController_top #(SCSI_DEVS) dc0
+dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 (
 	.clk32(clk_sys), 
 	.clk8_en_p(clk8_en_p),
@@ -659,12 +678,13 @@ dataController_top #(SCSI_DEVS) dc0
 	.dskCommitBufDataExt(wc_ext_commit_buf_data),
 
 	// block device interface for scsi disk
-	.img_mounted(img_mounted[SCSI_DEVS-1:0]),
+	.img_mounted({img_mounted[4], img_mounted[1:0]}),
 	.img_size(img_size[40:9]),
+	.cd_enable(cd_enable),
 	.io_lba(scsi_sd_lba),
 	.io_rd(scsi_sd_rd),
 	.io_wr(scsi_sd_wr),
-	.io_ack(sd_ack[SCSI_DEVS-1:0]),
+	.io_ack({sd_ack[4], sd_ack[1:0]}),
 
 	.sd_buff_addr(sd_buff_addr),
 	.sd_buff_dout(sd_buff_dout),
@@ -678,8 +698,8 @@ dataController_top #(SCSI_DEVS) dc0
 // into the full VDNUM=4 vectors here.
 wire ldr_int_sd_rd, ldr_ext_sd_rd;
 wire wr_int_sd_wr,  wr_ext_sd_wr;
-assign sd_rd = {ldr_ext_sd_rd, ldr_int_sd_rd, scsi_sd_rd};
-assign sd_wr = {wr_ext_sd_wr, wr_int_sd_wr, scsi_sd_wr};
+assign sd_rd = {scsi_sd_rd[SCSI_CD_DEV], ldr_ext_sd_rd, ldr_int_sd_rd, scsi_sd_rd[1:0]};
+assign sd_wr = {scsi_sd_wr[SCSI_CD_DEV], wr_ext_sd_wr, wr_int_sd_wr, scsi_sd_wr[1:0]};
 
 // sd_lba is likewise shared per slot between the loader (valid while it is
 // busy) and the writer (valid the rest of the time) - the writer itself
