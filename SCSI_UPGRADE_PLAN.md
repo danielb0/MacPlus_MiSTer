@@ -218,31 +218,118 @@ conformance bugs in §1 — a REQUEST SENSE after a CHECK CONDITION, and a 12-by
 
 ### Phase 1 — SCSI-1 conformance (no CONF_STR change, no new slots)
 
+#### STATUS — RTL COMPLETE, SIM GREEN (2026-08-19). Hardware validation outstanding.
+
+```
+BASELINE (must pass today):        PASS
+CONFORMANCE (Phase 1 target):      0 of 2 still failing
+PHASE 1 BEHAVIOUR:                 0 of 8 failing
+PHASE 1 SCSI GATE: PASS - conformance gaps CLOSED, behaviour tests green
+```
+
 Port the LC disk-path work into `rtl/scsi.v`:
 
-1. REQUEST SENSE (0x03). **Note:** the LC's disk path returns a *static all-zeros
-   "NO SENSE" block* — the real per-error sense keys (`cd_sense_key`/`cd_sense_asc`,
-   ILLEGAL REQUEST / NOT READY / ASC codes) are gated on `CDROM != 0`, CD target
-   only. So the LC gets "the recovery handshake completes", not "the drive reports
-   why it failed." **Decide during this phase** whether to port their static block
-   or promote the CD sense machinery to the disk path too. The latter is more
-   correct and probably cheap once the CD code is in tree; it may be better
-   sequenced *after* Phase 2.
+1. REQUEST SENSE (0x03). ✅ **Decision: real sense keys on the disk path, not the
+   LC's static all-zeros block.** The LC gates `cd_sense_key`/`cd_sense_asc` on
+   `CDROM != 0`, so its disk path answers "NO SENSE" — *nothing is wrong* — to the
+   question "why did you CHECK?", which is self-contradictory and leaves a driver's
+   retry logic nothing to act on. Promoting it cost ~12 lines rather than the LC's
+   CD state machine, because the disk path has exactly **one** failure mode
+   (`!cmd_ok` → ILLEGAL REQUEST / ASC 0x20 invalid operation code). Sequencing it
+   before Phase 2 rather than after means the CD target *extends* one sense latch
+   instead of un-gating a path written on the assumption that disks have no sense.
+   Regression risk was nil: sense is only reachable through 0x03, which did not
+   previously exist.
 2. Group-5 (12-byte) CDB completion, so an unknown opcode CHECKs and releases the
-   bus instead of wedging it.
-3. `bus_busy` — don't answer selection while another target holds BSY.
-4. `sys_rst` separate from bus `rst`.
-5. Read prefetch ring (`RING_LOG`), replacing the two-sector double buffer. Keep
-   writes on the existing two-slot buffer, as the LC does — our write path is
-   freshly validated and should not be disturbed.
-6. HPS byte-lane endianness handling (their `VERILATOR` vs real-HPS packing split).
-7. Reset `io_rd`/`io_wr`/`rd_pending`/`wr_pending` (Phase 0 finding).
-8. Close the `req`-before-`io_rd` startup window (Phase 0 finding) — the read-ring
-   rework rewrites this logic anyway, so fix it there rather than inherit it.
+   bus instead of wedging it. ✅
+3. `bus_busy` — don't answer selection while another target holds BSY. ✅
+   Wired in `ncr5380.sv` as `|target_bsy`.
+4. `sys_rst` separate from bus `rst`. ✅ Wired to ncr5380's `reset`. Both feed
+   `any_rst`, which now clears the phase FSM, the IO engine and the sense latch —
+   so a core reset landing mid-command can no longer leave a target holding BSY
+   with the ROM's next boot scan finding a busy bus.
+5. Read prefetch ring (`RING_LOG` = 5, 32 sectors / 16KB), replacing the two-sector
+   double buffer. Writes stay on the two-slot buffer. ✅ `RING_LOG=1` is verified
+   to still build and pass the whole suite, i.e. it does reproduce the old double
+   buffer, so the depth is a one-line rollback if hardware disagrees.
+6. HPS byte-lane endianness handling. ✅ **No change needed** — our existing lane
+   mapping is already byte-identical to the LC's real-HPS (`else`) branch. Their
+   second mapping exists only for their Verilator bench, which packs big-endian;
+   we have no such bench, so there is nothing to switch on. Documented in place so
+   this is not re-derived later.
+7. Reset `io_rd`/`io_wr`/`rd_pending`/`wr_pending` (Phase 0 finding). ✅ The bench's
+   reset-time `io_ack` pulse workaround has been removed, so the suite now fails
+   outright if this regresses.
+8. Close the `req`-before-`io_rd` startup window (Phase 0 finding). ✅ Falls out of
+   the ring stall: `rd_cur_blk >= rd_hps_blk` is true at `data_cnt == 0`, so REQ is
+   held down until the first sector has actually landed rather than depending on
+   `io_rd` having had time to rise. The bench's turnaround delay has been removed
+   too — it is now a maximally impatient initiator, which is what would expose the
+   race if it came back.
 
-Testable against existing HD images with no user-visible change. **Hardware-validate
-before starting Phase 2** — this phase touches the path every existing user depends
-on, and is the one most likely to regress a working setup.
+Two items were added beyond the original list, both LC-validated:
+
+9. **Allocation-length clamping.** `tlen6`'s 0 → 256 mapping is the READ/WRITE(6)
+   *block-count* convention and does not apply to allocation lengths: for INQUIRY
+   an allocation of 0 means "no data", for REQUEST SENSE it means 4 bytes. Without
+   this a REQUEST SENSE with allocation 0 would serve 256 bytes into an initiator
+   expecting 4 — a wedge on the very recovery path item 1 exists to fix. Responses
+   are also capped at their real size (INQUIRY 36, REQUEST SENSE 18).
+10. **Zero-length data phases.** A consequence of 9: a phase with `data_len == 0`
+    never sees an ACK edge, so `data_complete` never asserts and REQ would be held
+    forever. `data_done` treats "no data expected" as complete on entry.
+
+#### Verification
+
+`sim/tb_scsi_target.v` grew from 4 tests to 12: the two Phase 0 baseline guards,
+the two Phase 0 conformance defects, and eight new Phase 1 behaviour tests —
+multi-sector read with a prefetch-depth watermark assertion, sense contents, sense
+lifetime, bus usability after a rejected 12-byte CDB, `bus_busy` arbitration, and
+**three write-path regression guards** (single-sector, multi-sector, ring wrap).
+
+The write guards matter disproportionately: Phase 0 had **no SCSI write coverage at
+all**, and Phase 1 changed `req_wr`, the flush engine and `io_busy`'s DATA_IN clause.
+The bench's HPS model now reads the flushed sector back out of the target's buffer,
+so writes are checked to the block device byte-exact, at the right LBA, in the right
+byte lanes.
+
+Every fix was mutation-tested — reverted one at a time to confirm the matching test
+actually fails. Static NO SENSE → test 6 fails; no `bus_busy` → test 9; an
+off-by-one in the ring stall → tests 2/5/8/12 and the baseline; unreset IO engine →
+everything wedges on X; `req_wr` tied off or byte lanes swapped → tests 10/11.
+
+**Hardware-validate before starting Phase 2** — this phase touches the path every
+existing user depends on, and is the one most likely to regress a working setup.
+Two things to watch that simulation cannot answer:
+
+- **M10K usage.** `RING_LOG=5` is ~26 M10K across the two targets by hand estimate
+  (8192 × 8 bits × 2 buffers × 2 targets), against ~475 free. Not verified — no
+  Quartus compile has been run.
+- **REQ during block-boundary fetches.** The LC eventually needed a separate
+  bus-visible REQ (`req_bus`) because a driver polling CSR/BSR between pseudo-DMA
+  chunks read our dropped REQ as a dead transfer. The Plus polls SCSI and the ring
+  makes mid-transfer stalls rarer than before, so this is strictly better than
+  today's behaviour — but it is the known failure mode if reads misbehave on real
+  hardware.
+
+#### One incidental finding
+
+The `PHASE_STATUS_OUT` clause in `req_wr` is **dead code for block writes**, in both
+this core and the LC's. `data_cnt` reaches n×512 while still in `PHASE_DATA_IN`, so
+the DATA_IN clause already flushes every sector including the last — verified by
+deleting the STATUS_OUT clause and watching all three write tests still pass with
+the correct flush count. Left in place: it is a harmless safety net if the
+`data_complete`/phase timing ever shifts, and removing it would be an untestable
+change to the write path.
+
+#### Deliberately *not* done in Phase 1
+
+The other SCSI-1 commands listed in §1 — REZERO UNIT (0x01), SEEK(6/10)
+(0x0B/0x2B), START/STOP UNIT (0x1B), PREVENT/ALLOW (0x1E), RESERVE/RELEASE
+(0x16/0x17), REASSIGN BLOCKS (0x07). Accepting them is ~6 lines, but it changes
+what a driver sees on the path every user depends on (GOOD instead of CHECK), the
+LC has not validated them on the disk path, and none is needed by anything we know
+issues them. Revisit after Phase 1 hardware validation.
 
 ### Phase 2 — CD-ROM target
 

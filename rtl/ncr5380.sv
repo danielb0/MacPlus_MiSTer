@@ -268,6 +268,12 @@ module ncr5380
 			(
 				.clk    ( clk ),
 				.rst    ( scsi_rst ),
+				.sys_rst( reset ),
+				// SCSI arbitration: a target must not answer selection while
+				// another one holds the bus. Own BSY is included and is
+				// harmless -- this target is in IDLE (bsy=0) whenever the test
+				// is evaluated.
+				.bus_busy( |target_bsy ),
 				.sel    ( scsi_sel ),
 				.atn    ( scsi_atn ),
 

@@ -8,7 +8,9 @@ module scsi
 	input      clk,
 
 	// scsi interface
-	input 	  rst, // bus reset from initiator
+	input 	  rst, // bus reset from initiator (ICR RST)
+	input 	  sys_rst, // system/core reset, independent of the bus reset
+	input 	  bus_busy, // another target on the bus currently holds BSY
 	input 	  sel,
 	input 	  atn, // initiator requests to send a message
 	output 	  bsy, // target holds bus
@@ -40,6 +42,23 @@ module scsi
 // SCSI device id
 parameter [2:0] ID = 0;
 
+// Read-prefetch ring depth (number of 512-byte sectors held for reads). A real
+// drive streams continuously off a spinning platter; the original two-sector
+// double buffer stalled at every 512-byte boundary while the next block was
+// fetched from the HPS. The ring keeps RING_BLOCKS sectors fetched AHEAD of the
+// Mac so that latency is hidden. RING_LOG=1 reproduces the old double buffer
+// exactly. WRITES are unchanged -- they stay on the two-slot buffer (slots 0/1).
+// Ported from MacLC_MiSTer rtl/scsi.v, which uses the same value; we have ~475
+// M10K free (§4 of SCSI_UPGRADE_PLAN.md) so the depth is not fit-constrained.
+parameter  RING_LOG    = 5;             // log2(sectors); 5 => 32 sectors / 16KB
+localparam RING_BLOCKS = 1 << RING_LOG; // sectors buffered for reads
+localparam BUF_AW      = 8 + RING_LOG;  // dpram word-address width (256 words/sector)
+
+// A core reset must tear the target down as thoroughly as a bus reset: without
+// it a reset landing mid-command leaves this target holding BSY (the phase FSM
+// is not otherwise cleared) and the ROM's next boot scan finds a busy bus.
+wire any_rst = rst | sys_rst;
+
 localparam PHASE_IDLE        = 3'd0;
 localparam PHASE_CMD_IN      = 3'd1;
 localparam PHASE_DATA_OUT    = 3'd2;
@@ -49,36 +68,61 @@ localparam PHASE_MESSAGE_OUT = 3'd5;
 reg [2:0]  phase;
 
 // ------------ sector buffer IO controller read/write -----------------------
-// the buffer itself. Can hold two sectors
-reg sd_buff_sel;
+// the buffer itself. Holds RING_BLOCKS sectors for reads; writes use slots 0/1.
+reg sd_buff_sel;         // WRITE double-buffer half (unchanged path)
+reg [22:0] rd_hps_blk;   // READ ring: # of sectors the HPS has delivered this command
+
+// HPS sector-buffer byte order. buffer0 always holds the byte the Mac reads
+// FIRST (even byte) and buffer1 the odd byte. The real MiSTer HPS packs WIDE
+// words LITTLE-endian (disk byte0 -> sd_buff_dout[7:0]), which is what the lane
+// mapping below assumes -- and what sim/tb_scsi_target.v's block-device model
+// reproduces. The LC carries a second `ifdef VERILATOR mapping for its own
+// bench, which packs big-endian; we have no such bench, so there is nothing to
+// switch on and the lanes stay as they always were.
+
+// Buffer addressing. READS span the whole RING_BLOCKS-sector ring; WRITES stay
+// on the original two-slot double buffer so the freshly-validated write path is
+// byte-for-byte unchanged. A command is either a read or a write, so the two
+// schemes never collide on a port. The two-slot addresses are zero-extended to
+// BUF_AW by assignment, so RING_LOG=1 still compiles and exactly reproduces the
+// original double buffer.
+wire [22:0] rd_cur_blk = data_cnt[31:9];                       // sector the Mac is reading
+wire [RING_LOG-1:0] rd_hps_slot = rd_hps_blk[RING_LOG-1:0];
+wire [BUF_AW-1:0] hps_addr_wr = {sd_buff_sel, sd_buff_addr};   // write flush: slot 0/1
+wire [BUF_AW-1:0] mac_addr_wr = data_cnt[9:1];                 // Mac write: slot 0/1
+// HPS side (port A): read fills target the ring fetch-slot; write flushes keep
+// the original sd_buff_sel half.
+wire [BUF_AW-1:0] hps_addr = cmd_write ? hps_addr_wr : {rd_hps_slot, sd_buff_addr};
+// Mac side (port B): reads address the full ring; writes the 2-slot half.
+wire [BUF_AW-1:0] mac_addr = (phase == PHASE_DATA_IN) ? mac_addr_wr : data_cnt[BUF_AW:1];
 
 wire [7:0] buffer0_dout;
-scsi_dpram buffer0
+scsi_dpram #(.ADDRWIDTH(BUF_AW)) buffer0
 (
 	.clock(clk),
 
-	.address_a({sd_buff_sel, sd_buff_addr}),
+	.address_a(hps_addr),
 	.data_a(sd_buff_dout[7:0]),
 	.wren_a(sd_buff_wr),
 	.q_a(sd_buff_din[7:0]),
 
-	.address_b(data_cnt[9:1]),
+	.address_b(mac_addr),
 	.data_b(din),
 	.wren_b(buffer0_wr),
 	.q_b(buffer0_dout)
 );
 
 wire [7:0] buffer1_dout;
-scsi_dpram buffer1
+scsi_dpram #(.ADDRWIDTH(BUF_AW)) buffer1
 (
 	.clock(clk),
 
-	.address_a({sd_buff_sel, sd_buff_addr}),
+	.address_a(hps_addr),
 	.data_a(sd_buff_dout[15:8]),
 	.wren_a(sd_buff_wr),
 	.q_a(sd_buff_din[15:8]),
 
-	.address_b(data_cnt[9:1]),
+	.address_b(mac_addr),
 	.data_b(din),
 	.wren_b(buffer1_wr),
 	.q_b(buffer1_dout)
@@ -91,6 +135,15 @@ always @(posedge clk) begin
 		sd_buff_sel <= 0;
 	else
 		if (old_io_ack & ~io_ack) sd_buff_sel <= !sd_buff_sel;
+
+	// READ ring fetch counter: # of sectors the HPS has delivered this command.
+	// Reset alongside data_cnt (any non-transfer phase); bump on each io_ack
+	// falling edge during a read. Writes never touch it (they use sd_buff_sel).
+	if (phase != PHASE_DATA_OUT && phase != PHASE_DATA_IN &&
+	    phase != PHASE_STATUS_OUT && phase != PHASE_MESSAGE_OUT)
+		rd_hps_blk <= 23'd0;
+	else if (old_io_ack & ~io_ack & cmd_read)
+		rd_hps_blk <= rd_hps_blk + 23'd1;
 end
 
 // -----------------------------------------------------------
@@ -108,10 +161,39 @@ assign msg = (phase == PHASE_MESSAGE_OUT);
 assign cd = (phase == PHASE_CMD_IN) || (phase == PHASE_STATUS_OUT) || (phase == PHASE_MESSAGE_OUT);
 assign io = (phase == PHASE_DATA_OUT) || (phase == PHASE_STATUS_OUT) || (phase == PHASE_MESSAGE_OUT);
 
-wire   io_busy = (phase == PHASE_DATA_OUT && (io_rd | io_ack) && data_cnt[9] == sd_buff_sel) ||
-                 (phase == PHASE_DATA_IN  && (io_wr | io_ack) && data_cnt[9] == sd_buff_sel) ||
-                 (phase != PHASE_DATA_OUT && phase != PHASE_DATA_IN && (io_rd | io_wr | io_ack));
-assign req = (phase != PHASE_IDLE) && !ack && !io_busy;
+// READ stall: for a block READ, the sector the Mac wants (rd_cur_blk) has not
+// been fetched yet -- only sectors [0, rd_hps_blk) are in the ring. Gated on
+// cmd_read because INQUIRY / READ CAPACITY / MODE SENSE / REQUEST SENSE also use
+// DATA_OUT but serve data combinationally with no HPS fetch (rd_hps_blk stays
+// 0), so they must NOT take this stall. Depth-independent; replaces the old
+// two-slot "half being filled" test.
+//
+// This also closes the Phase 0 finding "req asserts ~2 cycles before io_rd on
+// entering DATA_OUT": at data_cnt=0 both counters are 0, so rd_cur_blk >=
+// rd_hps_blk holds and REQ is suppressed until the first sector has actually
+// landed -- rather than depending on io_rd having had time to rise.
+//
+// `mounted` in the read clause: media loss mid-READ stops the ring refill, and
+// holding the CPU on data that will never arrive wedges the guest. With the
+// medium gone the read completes with stale bytes and the driver gets its error
+// through the normal status path instead (MacLC finding, HW 2026-07-17).
+//
+// wr_pending is included in the write/non-data clauses: between a block's
+// req_wr edge and the flush actually issuing, neither io_wr nor io_ack is high,
+// so the old term dropped the busy indication for that window and one extra
+// byte could land in the slot the flush had not read yet.
+wire   rd_cur_unfilled = (rd_cur_blk >= rd_hps_blk);
+wire   io_busy = (phase == PHASE_DATA_OUT && cmd_read && mounted && rd_cur_unfilled) ||
+                 (phase == PHASE_DATA_IN  && (io_wr | wr_pending | io_ack) && data_cnt[9] == sd_buff_sel) ||
+                 (phase != PHASE_DATA_OUT && phase != PHASE_DATA_IN && (io_rd | io_wr | wr_pending | io_ack));
+
+// A zero-length data phase (allocation length 0) never sees an ACK edge, so
+// data_complete -- which only sets on one -- would never assert and REQ would be
+// held forever. Treat "no data expected" as done on entry.
+wire   data_done = data_complete || (data_len == 32'd0);
+wire   data_phase_complete = ((phase == PHASE_DATA_OUT) || (phase == PHASE_DATA_IN)) && data_done;
+
+assign req = (phase != PHASE_IDLE) && !ack && !io_busy && !data_phase_complete;
 
 assign bsy = (phase != PHASE_IDLE);
 
@@ -126,6 +208,25 @@ wire [7:0] cmd_dout =
 		cmd_inquiry?inquiry_dout:
 		cmd_read_capacity?read_capacity_dout:
 		cmd_mode_sense?mode_sense_dout:
+		cmd_request_sense?request_sense_dout:
+		8'h00;
+
+// REQUEST SENSE (0x03) response: fixed-format sense data, 18 bytes.
+//   byte 0  = 0x70  current error, no valid information field
+//   byte 2  = sense key
+//   byte 7  = 0x0a  additional sense length (10 => 18 total)
+//   byte 12 = additional sense code (ASC)
+// Unlike the LC -- whose disk path serves a static all-zeros NO SENSE block and
+// keeps real keys for the CD target only -- this reports the actual reason the
+// last command failed. Answering "NO SENSE" to the question "why did you CHECK?"
+// is self-contradictory and gives a driver's retry logic nothing to act on. On
+// the disk path there is exactly one error class, so the machinery is a register
+// pair rather than the LC's CD state machine (see the sense latch below).
+wire [7:0] request_sense_dout =
+		(data_cnt == 32'd0 )?8'h70:
+		(data_cnt == 32'd2 )?{4'd0, sense_key}:
+		(data_cnt == 32'd7 )?8'h0a:
+		(data_cnt == 32'd12)?sense_asc:
 		8'h00;
 
 // output of inquiry command, identify as "SEAGATE ST225N"
@@ -187,36 +288,63 @@ reg [7:0]  cmd [9:0];
 
 assign io_lba = lba;
 
-// generate an io_rd signal whenever the first byte of a 512 byte block is required
-// start fetching the next sector when the 20th byte is read, and it's not the last sector
-wire req_rd = ((phase == PHASE_DATA_OUT) && cmd_read && (data_cnt == 0 || (data_cnt[8:0] == 9'd20 && data_cnt[31:9] != ({7'd0, tlen} - 1'd1))) && !data_complete);
+// READ prefetch (ring): keep issuing sequential sector fetches while sectors
+// remain (rd_hps_blk < tlen) and the ring has space (fetched no more than
+// RING_BLOCKS ahead of the Mac). This is a LEVEL signal -- the fetch engine
+// below pumps one sector per io_ack until the ring is full, hiding per-sector
+// HPS latency, versus the old 1-deep "fetch the next one at byte 20" which
+// stalled the CPU at every 512-byte boundary. rd_hps_blk >= rd_cur_blk is
+// invariant (the Mac stalls via io_busy before it can pass the fetch frontier),
+// so the subtraction never underflows.
+wire [22:0] rd_blk_total  = {7'd0, tlen};
+wire        rd_blk_remain = (rd_hps_blk < rd_blk_total);
+wire        rd_ring_space = ((rd_hps_blk - rd_cur_blk) < RING_BLOCKS);
+wire req_rd = (phase == PHASE_DATA_OUT) && cmd_read && (data_len != 32'd0) &&
+              !data_complete && rd_blk_remain && rd_ring_space;
 
 // generate an io_wr signal whenever a 512 byte block has been received or when the status
-// phase of a write command has been reached
-wire req_wr = ((((phase == PHASE_DATA_IN) && (data_cnt[8:0] == 0) && (data_cnt != 0)) || (phase == PHASE_STATUS_OUT)) && cmd_write);
+// phase of a write command has been reached.
+// data_len != 0 guard: a zero-length WRITE reaches STATUS_OUT with no data phase;
+// without the guard the STATUS_OUT clause would flush a stale sector-buffer block
+// (the previous READ's data) to the command's LBA.
+wire req_wr = ((((phase == PHASE_DATA_IN) && (data_cnt[8:0] == 0) && (data_cnt != 0)) || (phase == PHASE_STATUS_OUT)) && cmd_write && (data_len != 32'd0));
+
+// wr_pending lives at module scope because io_busy must include it (see there).
+reg wr_pending;
 
 always @(posedge clk) begin
-	reg old_rd, old_wr;
-	reg wr_pending, rd_pending;
+	reg old_wr;
+	reg rd_busy;   // a read-prefetch sector fetch is outstanding
 
-	old_rd <= req_rd;
-	old_wr <= req_wr;
-	if(~old_rd & req_rd) rd_pending <= 1;
-	if(~old_wr & req_wr) wr_pending <= 1;
-
-	if(io_ack) begin
-		io_rd <= 1'b0;
-		io_wr <= 1'b0;
+	// A reset aborts any in-flight/queued disk IO. Without this, io_rd/io_wr and
+	// the pending latches survive it; if the Mac re-selects before a stale io_rd
+	// clears via io_ack, the next CMD_IN sees io_busy=1 (phase!=DATA && io_rd),
+	// REQ is suppressed, the command never transfers, the Mac times out and
+	// resets again -- an intermittent reset/re-scan loop. It is also the Phase 0
+	// finding that these registers have no reset at all and power up as X in
+	// simulation, which made io_busy (and therefore req) X forever.
+	if(any_rst) begin
+		io_rd      <= 1'b0;
+		io_wr      <= 1'b0;
+		wr_pending <= 1'b0;
+		old_wr     <= 1'b0;
+		rd_busy    <= 1'b0;
 	end else begin
-		if (rd_pending && !io_rd) begin
-			io_rd <= 1;
-			rd_pending <= 0;
-		end
+		old_wr <= req_wr;
+		if(~old_wr & req_wr) wr_pending <= 1;
 
-		if (wr_pending && !io_wr) begin
-			io_wr <= 1;
-			wr_pending <= 0;
-		end
+		// READ prefetch engine: while req_rd (sectors remain AND ring has space),
+		// issue back-to-back sector fetches -- one per io_ack -- to keep the ring
+		// filled ahead of the Mac. rd_busy holds across a fetch until rd_hps_blk
+		// advances on the io_ack falling edge, so exactly one fetch is issued per
+		// sector and the next can start immediately after.
+		if(io_ack) io_rd <= 1'b0;
+		else if(req_rd && !io_rd && !rd_busy) begin io_rd <= 1'b1; rd_busy <= 1'b1; end
+		if(old_io_ack & ~io_ack) rd_busy <= 1'b0;
+
+		// WRITE flush engine -- unchanged two-slot double-buffer behavior.
+		if(io_ack) io_wr <= 1'b0;
+		else if(wr_pending && !io_wr) begin io_wr <= 1'b1; wr_pending <= 0; end
 	end
 end
 
@@ -261,11 +389,25 @@ reg        data_complete;
 // And some have a fixed length idependent from any header field.
 // The data transfer has finished once the data counter reaches this
 // number.
+//
+// Allocation-length clamping. tlen6's 0 -> 256 mapping is the READ/WRITE(6)
+// BLOCK-COUNT convention and does not apply to allocation lengths: for INQUIRY
+// an allocation of 0 means "no data", and for REQUEST SENSE it means 4 bytes
+// (the pre-SCSI-2 convention). Undo it for those, and never serve more than the
+// response actually is -- over-serving leaves the initiator counting bytes that
+// carry no meaning, under-serving leaves it armed for a transfer that never
+// finishes. (MacLC root-caused a data-corruption class to exactly this.)
+wire [31:0] alloc_len = (tlen == 16'd256) ? 32'd0 : {16'd0, tlen};
+wire [31:0] sense_len = (tlen == 16'd256) ? 32'd4 : {16'd0, tlen};
+localparam [31:0] INQUIRY_LEN = 32'd36;  // 5 + additional-length(31), the standard size
+
 wire [31:0] data_len =
 		 cmd_read_capacity?32'd8:
 		 cmd_read?{ 7'd0, tlen, 9'd0 }:   // read command length is in 512 bytes blocks
 		 cmd_write?{ 7'd0, tlen, 9'd0 }:  // write command length is in 512 bytes blocks
-		 { 16'd0, tlen };                 // inquiry etc have length in bytes
+		 cmd_inquiry?((alloc_len < INQUIRY_LEN) ? alloc_len : INQUIRY_LEN):
+		 cmd_request_sense?((sense_len < 32'd18) ? sense_len : 32'd18):
+		 { 16'd0, tlen };                 // mode sense etc have length in bytes
 
 always @(posedge clk) begin
 	if((phase != PHASE_DATA_OUT) && (phase != PHASE_DATA_IN) && (phase != PHASE_STATUS_OUT) && (phase != PHASE_MESSAGE_OUT)) begin
@@ -301,9 +443,17 @@ wire [7:0] op_code = cmd[0];
 wire [2:0] cmd_group = op_code[7:5];
 
 // check if a complete command has been received
-wire       cmd_cpl = cmd6_cpl || cmd10_cpl;
+wire       cmd_cpl = cmd6_cpl || cmd10_cpl || cmd12_cpl;
 wire       cmd6_cpl = (cmd_group == 3'b000) && (cmd_cnt == 6);
 wire       cmd10_cpl = ((cmd_group == 3'b010) || (cmd_group == 3'b001)) && (cmd_cnt == 10);
+// Group 5 (0xA0-0xBF) = 12-byte CDBs, defined in SCSI-1. Nothing completed them
+// before: the target sat in PHASE_CMD_IN forever, holding BSY, so any 12-byte
+// command from any initiator wedged the bus until a reset -- a latent hang, never
+// hit in practice only because MacOS sends none. Completing them makes an unknown
+// group-5 opcode CHECK with invalid-op and release the bus, which is what a real
+// drive does. Only cmd[0..9] are stored (the array is 10 deep and out-of-range
+// writes are discarded); bytes 10-11 of a group-5 CDB are reserved + CONTROL.
+wire       cmd12_cpl = (cmd_group == 3'b101) && (cmd_cnt == 12);
 
 // https://en.wikipedia.org/wiki/SCSI_command
 wire       cmd_read = cmd_read6 || cmd_read10;
@@ -322,11 +472,49 @@ wire       cmd_read_buffer = (op_code == 8'h3b);  // fake
 wire       cmd_write_buffer = (op_code == 8'h3c); // fake
 wire       cmd_verify6 = (op_code == 8'h13); // fake
 wire       cmd_verify10 = (op_code == 8'h2f); // fake
+// REQUEST SENSE (0x03) is MANDATORY in SCSI-1 for direct-access devices: after
+// any CHECK CONDITION the initiator issues it to recover the sense data. The
+// target previously rejected it (cmd_ok=0 -> CHECK CONDITION), so on hardware --
+// where a transient error triggers the recovery path -- the Mac could never
+// clear the condition and wedged.
+wire       cmd_request_sense = (op_code == 8'h03);
 
 // valid command in buffer? TODO: check for valid command parameters
-wire  cmd_ok = cmd_read || cmd_write || cmd_inquiry || cmd_test_unit_ready || 
+wire  cmd_ok = cmd_read || cmd_write || cmd_inquiry || cmd_test_unit_ready ||
 		  cmd_read_capacity || cmd_mode_select || cmd_format || cmd_mode_sense ||
-		  cmd_read_buffer || cmd_write_buffer || cmd_verify6 || cmd_verify10;
+		  cmd_read_buffer || cmd_write_buffer || cmd_verify6 || cmd_verify10 ||
+		  cmd_request_sense;
+
+// ----- REQUEST SENSE state -------------------------------------------------
+// Key/ASC latched when a command CHECKs, cleared by the next successful
+// non-REQUEST-SENSE command (SCSI-1 semantics: sense persists until the next
+// command from the same initiator, and REQUEST SENSE itself must not clear it
+// before it has been served). The disk path has exactly one failure mode --
+// an opcode we do not implement -- so the whole thing is these two registers.
+// Phase 2's CD target extends this latch with its media/audio conditions rather
+// than adding a parallel CDROM-only path.
+reg [3:0] sense_key = 4'd0;
+reg [7:0] sense_asc = 8'd0;
+
+// New-command strobe: one clk on the CDB completing.
+reg  cmd_cpl_d = 1'b0;
+always @(posedge clk) cmd_cpl_d <= (phase == PHASE_CMD_IN) && cmd_cpl;
+wire new_cmd = (phase == PHASE_CMD_IN) && cmd_cpl && !cmd_cpl_d;
+
+always @(posedge clk) begin
+	if (any_rst) begin
+		sense_key <= 4'd0;
+		sense_asc <= 8'd0;
+	end else if (new_cmd) begin
+		if (!cmd_ok) begin
+			sense_key <= 4'h5;  // ILLEGAL REQUEST
+			sense_asc <= 8'h20; // invalid command operation code
+		end else if (!cmd_request_sense) begin
+			sense_key <= 4'd0;  // NO SENSE
+			sense_asc <= 8'd0;
+		end
+	end
+end
 
 // latch parameters once command is complete
 reg [31:0] lba;
@@ -353,11 +541,16 @@ wire [15:0] tlen10 = { cmd[7], cmd[8] };
 // the 5380 changes phase in the falling edge, thus we monitor it
 // on the rising edge
 always @(posedge clk) begin
-	if(rst) begin
+	if(any_rst) begin
 		phase <= PHASE_IDLE;
 	end else begin
 		if(phase == PHASE_IDLE) begin
-			if(sel && din[ID] && mounted)  // own id on bus during selection?
+			// Only answer selection on a FREE bus (SEL asserted, no BSY). While
+			// another target holds BSY its dout is wired-ORed onto the data bus,
+			// so a stray bit in that byte could otherwise "select" this target
+			// mid-dialog and two targets would then consume the shared ACK stream
+			// in parallel -- command/LBA corruption, and misdirected writes.
+			if(sel && din[ID] && mounted && !bus_busy)  // own id on bus during selection?
 				phase <= PHASE_CMD_IN;
 		end
 
@@ -373,7 +566,7 @@ always @(posedge clk) begin
 					// continue according to command
 
 					// these commands return data
-					if(cmd_read || cmd_inquiry || cmd_read_capacity || cmd_mode_sense || cmd_read_buffer) phase <= PHASE_DATA_OUT;
+					if(cmd_read || cmd_inquiry || cmd_read_capacity || cmd_mode_sense || cmd_read_buffer || cmd_request_sense) phase <= PHASE_DATA_OUT;
 					// these commands receive dataa
 					else if(cmd_write || cmd_mode_select || cmd_write_buffer) phase <= PHASE_DATA_IN;
 					// and all other valid commands are just "ok"
@@ -386,12 +579,14 @@ always @(posedge clk) begin
 			end
 		end
 
+		// data_done, not data_complete: a zero-length data phase never sees an
+		// ACK edge, so data_complete would never assert and the phase would hang.
 		else if(phase == PHASE_DATA_OUT) begin
-			if(data_complete) phase <= PHASE_STATUS_OUT;
+			if(data_done) phase <= PHASE_STATUS_OUT;
 		end
 
 		else if(phase == PHASE_DATA_IN) begin
-			if(data_complete) phase <= PHASE_STATUS_OUT;
+			if(data_done) phase <= PHASE_STATUS_OUT;
 		end
 
 		else if(phase == PHASE_STATUS_OUT) begin

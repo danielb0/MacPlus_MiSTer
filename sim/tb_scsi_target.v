@@ -25,7 +25,9 @@ module tb_scsi_target;
    always #5 clk = ~clk;
 
    // ---- target bus ------------------------------------------------------
-   reg        rst  = 1'b1;
+   reg        rst      = 1'b1;
+   reg        sys_rst  = 1'b0;
+   reg        bus_busy = 1'b0;
    reg        sel  = 1'b0;
    reg        atn  = 1'b0;
    reg        ack  = 1'b0;
@@ -54,6 +56,8 @@ module tb_scsi_target;
       .clk(clk),
 
       .rst(rst),
+      .sys_rst(sys_rst),
+      .bus_busy(bus_busy),
       .sel(sel),
       .atn(atn),
       .bsy(bsy),
@@ -82,7 +86,9 @@ module tb_scsi_target;
    );
 
    integer all_ok = 1;      // baseline regression guards (must pass today)
-   integer conform_fail = 0; // known conformance gaps (expected to fail until Phase 1)
+   integer conform_fail = 0; // the two Phase 0 conformance gaps (tests 3 and 4)
+   integer p1_fail = 0;     // Phase 1 behaviour tests (tests 5..9)
+   integer p1_total = 0;
 
    // Phase decode from the target's msg/cd/io lines, so tests can assert on
    // where the target actually is rather than peeking inside it.
@@ -114,14 +120,31 @@ module tb_scsi_target;
    integer io_rd_count = 0;
    integer io_wr_count = 0;
 
+   // Last sector the target flushed to us, and the LBA it went to. Lets the
+   // WRITE tests check that the bytes the initiator sent actually reached the
+   // block device, at the right address, in the right byte lanes.
+   reg [7:0]  hps_wr_data [0:511];
+   reg [31:0] hps_wr_lba = 32'hffffffff;
+
+   // Prefetch-depth watermark: how far the ring ever ran AHEAD of the Mac.
+   // A value > 1 proves the read-prefetch ring is actually prefetching rather
+   // than having degenerated into the old one-sector-at-a-time fetch.
+   integer   ring_depth_max = 0;
+   reg       ring_watch = 1'b0;
+   always @(posedge clk) begin
+      if (ring_watch && (dut.rd_hps_blk > dut.rd_cur_blk))
+         if ((dut.rd_hps_blk - dut.rd_cur_blk) > ring_depth_max)
+            ring_depth_max = dut.rd_hps_blk - dut.rd_cur_blk;
+   end
+
    always @(posedge clk) begin : hps_model
       integer w;
       reg [7:0] even_b, odd_b;
       if (hps_enable && (io_rd || io_wr)) begin
          if (io_rd) io_rd_count = io_rd_count + 1;
          if (io_wr) io_wr_count = io_wr_count + 1;
-         $display("       [hps] serving %s lba=%0d (rd#%0d)",
-                  io_rd ? "READ" : "WRITE", io_lba, io_rd_count);
+         $display("       [hps] serving %s lba=%0d (rd#%0d wr#%0d)",
+                  io_rd ? "READ" : "WRITE", io_lba, io_rd_count, io_wr_count);
          // a little latency before the block starts moving
          repeat (8) @(posedge clk);
          if (io_rd) begin
@@ -135,6 +158,18 @@ module tb_scsi_target;
                @(posedge clk);
             end
             sd_buff_wr <= 1'b0;
+         end else begin
+            // WRITE flush: read the sector back out of the target's buffer the
+            // way the real HPS does. scsi_dpram's q_a is registered, so the data
+            // for an address is valid two edges after presenting it.
+            hps_wr_lba = io_lba;
+            for (w = 0; w < 256; w = w + 1) begin
+               sd_buff_addr <= w[7:0];
+               @(posedge clk); #1;
+               @(posedge clk); #1;
+               hps_wr_data[w*2]     = sd_buff_din[7:0];   // even byte
+               hps_wr_data[w*2 + 1] = sd_buff_din[15:8];  // odd byte
+            end
          end
          @(posedge clk);
          io_ack <= 1'b1;
@@ -148,19 +183,16 @@ module tb_scsi_target;
    // Initiator model
    // ======================================================================
 
-   // NOTE: scsi.v's io_rd/io_wr (and its internal rd_pending/wr_pending) have no
-   // reset, so they power up as X in simulation and never resolve -- which makes
-   // io_busy, and therefore req, X forever. io_ack is the only thing that clears
-   // io_rd/io_wr, so pulse it during reset to bring the DUT to a defined state.
-   // Phase 1 should give those registers a proper reset; see SCSI_UPGRADE_PLAN.md.
+   // Plain bus reset -- no io_ack pulse. Phase 0 had to pulse io_ack here because
+   // io_rd/io_wr (and the internal rd/wr pending latches) had no reset at all and
+   // powered up as X, which made io_busy -- and therefore req -- X forever. Phase 1
+   // resets them properly, so a bus reset alone must now be enough to bring the
+   // DUT to a defined state. If that regresses, every test below wedges.
    task do_reset;
       begin
          rst  = 1'b1; sel = 1'b0; ack = 1'b0; din = 8'h00;
          hps_enable = 1'b0;
-         repeat (4) @(posedge clk);
-         io_ack = 1'b1;
-         repeat (4) @(posedge clk);
-         io_ack = 1'b0;
+         repeat (8) @(posedge clk);
          rst  = 1'b0;
          repeat (4) @(posedge clk);
          hps_enable = 1'b1;
@@ -262,7 +294,7 @@ module tb_scsi_target;
    endtask
 
    // Drain the target->initiator data phase into `buf_in`.
-   reg [7:0] buf_in [0:1023];
+   reg [7:0] buf_in [0:4095];
    integer   buf_len;
    task read_data_phase;
       input integer maxbytes;
@@ -279,12 +311,13 @@ module tb_scsi_target;
             @(posedge clk); #1;
             guard = guard + 1;
          end
-         // Real-initiator turnaround. On entering DATA_OUT the target asserts
-         // req ~2 cycles BEFORE io_rd goes high, so a zero-latency initiator can
-         // take a byte before the block fetch has even started (see
-         // SCSI_UPGRADE_PLAN.md "req/io_rd startup race"). A 68000 pseudo-DMA
-         // read cannot turn around in 62ns, so model that minimum latency here.
-         repeat (8) begin @(posedge clk); #1; end
+         // Phase 0 had to insert a turnaround delay here: on entering DATA_OUT
+         // the target asserted req ~2 cycles BEFORE io_rd went high, so a
+         // zero-latency initiator could take a byte before the block fetch had
+         // even started. Phase 1's ring stall (rd_cur_blk >= rd_hps_blk) holds
+         // req down until the sector has actually landed, so the delay is gone
+         // and this bench is now a maximally impatient initiator -- which is
+         // exactly what would expose the race if it came back.
          while (!timed_out && n < maxbytes &&
                 phase_of(msg, cd, io) == P_DATA_OUT) begin
             xfer_byte(8'h00);
@@ -294,6 +327,68 @@ module tb_scsi_target;
             end
          end
          buf_len = n;
+      end
+   endtask
+
+   // Drive the initiator->target data phase. Byte n of sector s is
+   // (base + s) ^ n, the same shape the read model uses, so a write followed by
+   // an inspection of hps_wr_data checks the whole path end to end.
+   task write_data_phase;
+      input [7:0] base;
+      input integer nbytes;
+      begin : wdp
+         integer n, guard, sec;
+         n = 0;
+         guard = 0;
+         while (!timed_out && guard < 2000 &&
+                phase_of(msg, cd, io) != P_DATA_IN &&
+                phase_of(msg, cd, io) != P_STATUS) begin
+            @(posedge clk); #1;
+            guard = guard + 1;
+         end
+         while (!timed_out && n < nbytes &&
+                phase_of(msg, cd, io) == P_DATA_IN) begin
+            sec = n / 512;
+            xfer_byte((base + sec) ^ (n % 512));
+            if (!timed_out) n = n + 1;
+         end
+         buf_len = n;
+      end
+   endtask
+
+   // Streaming read check: verify the LBA-derived pattern byte by byte without
+   // buffering the whole transfer, so a read can be longer than buf_in.
+   // Reports the number of bytes taken and the number that did not match.
+   integer stream_len, stream_bad;
+   reg [31:0] stream_first_bad;
+   task read_check_phase;
+      input [31:0] start_lba;
+      input integer nbytes;
+      begin : rcp
+         integer n, guard, sec;
+         reg [7:0] want;
+         n = 0; stream_bad = 0; stream_first_bad = 32'hffffffff;
+         guard = 0;
+         while (!timed_out && guard < 2000 &&
+                phase_of(msg, cd, io) != P_DATA_OUT &&
+                phase_of(msg, cd, io) != P_STATUS) begin
+            @(posedge clk); #1;
+            guard = guard + 1;
+         end
+         while (!timed_out && n < nbytes &&
+                phase_of(msg, cd, io) == P_DATA_OUT) begin
+            xfer_byte(8'h00);
+            if (!timed_out) begin
+               sec  = n / 512;
+               want = (start_lba[7:0] + sec) ^ (n % 512);
+               if (sampled !== want) begin
+                  if (stream_bad == 0) stream_first_bad = n;
+                  stream_bad = stream_bad + 1;
+               end
+               n = n + 1;
+            end
+         end
+         stream_len = n;
       end
    endtask
 
@@ -467,16 +562,318 @@ module tb_scsi_target;
          end
       end
 
+      // ==================================================================
+      // Test 5 (Phase 1): multi-sector READ(6). The read-prefetch ring
+      // replaced the two-sector double buffer, so the case that actually
+      // exercises it is a transfer that crosses several 512-byte boundaries
+      // -- test 2 only ever reads one sector and never leaves slot 0.
+      // ==================================================================
+      do_reset;
+      mount_image(32'd40960);
+      select_target;
+      ring_watch = 1'b1;
+      ring_depth_max = 0;
+      // READ(6) lba=10 len=4
+      send_cdb(8'h08,8'h00,8'h00,8'h0a,8'h04,8'h00,0,0,0,0,0,0, 6);
+      read_data_phase(2048);
+      finish_command;
+      ring_watch = 1'b0;
+
+      begin : test5
+         reg ok;
+         integer blk;
+         p1_total = p1_total + 1;
+         ok = (!timed_out) && (buf_len == 2048) && (status_byte == 8'h00);
+         if (ok)
+            for (i = 0; i < 2048; i = i + 1) begin
+               blk = 10 + (i / 512);
+               expect_byte = blk[7:0] ^ (i % 512);
+               if (buf_in[i] !== expect_byte) begin
+                  if (ok) $display("       first mismatch at byte %0d (sector %0d): got %02x want %02x",
+                                   i, blk, buf_in[i], expect_byte);
+                  ok = 0;
+               end
+            end
+         // The ring is only doing its job if the HPS ran AHEAD of the Mac. A
+         // watermark of 1 means it degenerated into the old fetch-per-boundary
+         // behaviour and the stall would be back.
+         if (ok && (ring_depth_max < 2)) begin
+            $display("       ring never ran ahead (watermark=%0d) - prefetch is not working",
+                     ring_depth_max);
+            ok = 0;
+         end
+         if (ok) begin
+            $display("PASS: test5 - 4-sector READ(6) byte-exact, ring prefetched %0d sectors ahead",
+                     ring_depth_max);
+         end else begin
+            $display("FAIL: test5 - multi-sector READ bad (timeout=%b len=%0d status=%02x depth=%0d)",
+                     timed_out, buf_len, status_byte, ring_depth_max);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      // ==================================================================
+      // Test 6 (Phase 1): the sense block actually says why the command
+      // failed. This is decision #1 in SCSI_UPGRADE_PLAN.md -- the LC's
+      // disk path returns a static all-zeros NO SENSE, which answers
+      // "nothing is wrong" to "why did you CHECK?". We report the real key.
+      // ==================================================================
+      do_reset;
+      mount_image(32'd40960);
+      select_target;
+      send_cdb(8'h1d,8'h00,8'h00,8'h00,8'h00,8'h00,0,0,0,0,0,0, 6); // SEND DIAGNOSTIC, unsupported
+      finish_command;
+      select_target;
+      send_cdb(8'h03,8'h00,8'h00,8'h00,8'h12,8'h00,0,0,0,0,0,0, 6);
+      read_data_phase(32);
+      finish_command;
+
+      begin : test6
+         reg ok;
+         p1_total = p1_total + 1;
+         ok = (!timed_out) && (buf_len == 18) && (status_byte == 8'h00)
+              && (buf_in[0]  === 8'h70)   // current error, fixed format
+              && (buf_in[2]  === 8'h05)   // ILLEGAL REQUEST
+              && (buf_in[7]  === 8'h0a)   // additional sense length
+              && (buf_in[12] === 8'h20);  // invalid command operation code
+         if (ok) begin
+            $display("PASS: test6 - sense block reports ILLEGAL REQUEST / ASC 20");
+         end else begin
+            $display("FAIL: test6 - sense block wrong (len=%0d b0=%02x key=%02x b7=%02x asc=%02x timeout=%b)",
+                     buf_len, buf_in[0], buf_in[2], buf_in[7], buf_in[12], timed_out);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      // ==================================================================
+      // Test 7 (Phase 1): SCSI-1 sense lifetime. A successful command
+      // clears the pending sense, so the next REQUEST SENSE reports NO
+      // SENSE. Without this the condition would look permanently latched.
+      // ==================================================================
+      select_target;
+      send_cdb(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00,0,0,0,0,0,0, 6); // TEST UNIT READY, succeeds
+      finish_command;
+
+      begin : test7
+         reg ok;
+         reg [7:0] tur_status;
+         p1_total = p1_total + 1;
+         tur_status = status_byte;
+         select_target;
+         send_cdb(8'h03,8'h00,8'h00,8'h00,8'h12,8'h00,0,0,0,0,0,0, 6);
+         read_data_phase(32);
+         finish_command;
+         ok = (!timed_out) && (tur_status == 8'h00) && (status_byte == 8'h00)
+              && (buf_in[2] === 8'h00) && (buf_in[12] === 8'h00);
+         if (ok) begin
+            $display("PASS: test7 - sense cleared by the next successful command");
+         end else begin
+            $display("FAIL: test7 - sense not cleared (tur=%02x key=%02x asc=%02x timeout=%b)",
+                     tur_status, buf_in[2], buf_in[12], timed_out);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      // ==================================================================
+      // Test 8 (Phase 1): the bus is genuinely usable after a 12-byte CDB.
+      // Test 4 only checks that BSY dropped; this proves the target still
+      // serves a normal command afterwards rather than being left wedged in
+      // some half-state.
+      // ==================================================================
+      do_reset;
+      mount_image(32'd40960);
+      select_target;
+      send_cdb(8'ha8,8'h00,8'h00,8'h00,8'h00,8'h01,8'h00,8'h00,8'h00,8'h00,8'h00,8'h00, 12);
+      finish_command;
+
+      begin : test8
+         reg ok;
+         reg [7:0] rej_status;
+         p1_total = p1_total + 1;
+         rej_status = status_byte;
+         select_target;
+         send_cdb(8'h08,8'h00,8'h00,8'h07,8'h01,8'h00,0,0,0,0,0,0, 6); // READ(6) lba=7
+         read_data_phase(512);
+         finish_command;
+         ok = (!timed_out) && (rej_status == 8'h02) && (status_byte == 8'h00)
+              && (buf_len == 512);
+         if (ok)
+            for (i = 0; i < 512; i = i + 1)
+               if (buf_in[i] !== (8'd7 ^ i[7:0])) ok = 0;
+         if (ok) begin
+            $display("PASS: test8 - bus fully usable after a rejected 12-byte CDB");
+         end else begin
+            $display("FAIL: test8 - target not usable after 12-byte CDB (rej=%02x status=%02x len=%0d timeout=%b)",
+                     rej_status, status_byte, buf_len, timed_out);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      // ==================================================================
+      // Test 9 (Phase 1): bus arbitration. While another target holds BSY,
+      // this one must not answer selection -- otherwise two targets consume
+      // the same ACK stream and corrupt each other's commands.
+      // ==================================================================
+      do_reset;
+      mount_image(32'd40960);
+
+      begin : test9
+         reg ok;
+         reg selected_while_busy;
+         integer guard;
+         p1_total = p1_total + 1;
+
+         bus_busy = 1'b1;
+         din = (8'd1 << TARGET_ID);
+         sel = 1'b1;
+         guard = 0;
+         while (!bsy && guard < 200) begin
+            @(posedge clk); #1;
+            guard = guard + 1;
+         end
+         selected_while_busy = bsy;
+         sel = 1'b0; din = 8'h00;
+         bus_busy = 1'b0;
+         repeat (4) @(posedge clk);
+
+         // and it must still select normally once the bus is free
+         select_target;
+         send_cdb(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00,0,0,0,0,0,0, 6);
+         finish_command;
+
+         ok = (!selected_while_busy) && (!timed_out) && (status_byte == 8'h00);
+         if (ok) begin
+            $display("PASS: test9 - selection refused while the bus is busy, accepted when free");
+         end else begin
+            $display("FAIL: test9 - bus_busy arbitration wrong (sel_while_busy=%b status=%02x timeout=%b)",
+                     selected_while_busy, status_byte, timed_out);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      // ==================================================================
+      // Test 10 (Phase 1 REGRESSION GUARD): single-sector WRITE(6). The
+      // write path was untested by Phase 0, and Phase 1 changed req_wr (the
+      // data_len!=0 guard), the flush engine (reset + restructure) and
+      // io_busy's DATA_IN clause (wr_pending). Check the bytes the initiator
+      // sent actually reach the block device, at the right LBA, in the right
+      // byte lanes.
+      // ==================================================================
+      do_reset;
+      mount_image(32'd40960);
+      hps_wr_lba = 32'hffffffff;
+      select_target;
+      // WRITE(6) lba=17 len=1
+      send_cdb(8'h0a,8'h00,8'h00,8'h11,8'h01,8'h00,0,0,0,0,0,0, 6);
+      write_data_phase(8'd17, 512);
+      finish_command;
+
+      begin : test10
+         reg ok;
+         p1_total = p1_total + 1;
+         ok = (!timed_out) && (buf_len == 512) && (status_byte == 8'h00)
+              && (hps_wr_lba == 32'd17);
+         if (ok)
+            for (i = 0; i < 512; i = i + 1) begin
+               expect_byte = 8'd17 ^ i[7:0];
+               if (hps_wr_data[i] !== expect_byte) begin
+                  if (ok) $display("       first mismatch at byte %0d: flushed %02x want %02x",
+                                   i, hps_wr_data[i], expect_byte);
+                  ok = 0;
+               end
+            end
+         if (ok) begin
+            $display("PASS: test10 - WRITE(6) reaches the block device byte-exact at lba 17");
+         end else begin
+            $display("FAIL: test10 - WRITE(6) bad (timeout=%b len=%0d status=%02x lba=%0d)",
+                     timed_out, buf_len, status_byte, hps_wr_lba);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      // ==================================================================
+      // Test 11 (Phase 1 REGRESSION GUARD): 3-sector WRITE(6). Exercises the
+      // two-slot double-buffer alternation and the mid-transfer flush, which
+      // is where the wr_pending window in io_busy matters -- a single-sector
+      // write only flushes once, at STATUS.
+      // ==================================================================
+      do_reset;
+      mount_image(32'd40960);
+      hps_wr_lba = 32'hffffffff;
+      io_wr_count = 0;
+      select_target;
+      // WRITE(6) lba=30 len=3
+      send_cdb(8'h0a,8'h00,8'h00,8'h1e,8'h03,8'h00,0,0,0,0,0,0, 6);
+      write_data_phase(8'd30, 1536);
+      finish_command;
+
+      begin : test11
+         reg ok;
+         p1_total = p1_total + 1;
+         // The last flush is the third sector, so hps_wr_data/lba hold sector 2.
+         ok = (!timed_out) && (buf_len == 1536) && (status_byte == 8'h00)
+              && (io_wr_count == 3) && (hps_wr_lba == 32'd32);
+         if (ok)
+            for (i = 0; i < 512; i = i + 1) begin
+               expect_byte = 8'd32 ^ i[7:0];
+               if (hps_wr_data[i] !== expect_byte) begin
+                  if (ok) $display("       last-sector mismatch at byte %0d: flushed %02x want %02x",
+                                   i, hps_wr_data[i], expect_byte);
+                  ok = 0;
+               end
+            end
+         if (ok) begin
+            $display("PASS: test11 - 3-sector WRITE(6): 3 flushes, final sector exact at lba 32");
+         end else begin
+            $display("FAIL: test11 - multi-sector WRITE bad (timeout=%b len=%0d status=%02x flushes=%0d lba=%0d)",
+                     timed_out, buf_len, status_byte, io_wr_count, hps_wr_lba);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      // ==================================================================
+      // Test 12 (Phase 1): a READ longer than the ring, so the ring WRAPS.
+      // This is the case a stale-slot bug shows up in -- a slot served at or
+      // past the fill frontier returns its previous occupant silently, which
+      // is exactly the corruption class the LC chased for weeks. RING_BLOCKS
+      // is 32, so 40 sectors wraps by 8.
+      // ==================================================================
+      do_reset;
+      mount_image(32'd40960);
+      select_target;
+      // READ(6) lba=64 len=40
+      send_cdb(8'h08,8'h00,8'h00,8'h40,8'd40,8'h00,0,0,0,0,0,0, 6);
+      read_check_phase(32'd64, 40*512);
+      finish_command;
+
+      begin : test12
+         reg ok;
+         p1_total = p1_total + 1;
+         ok = (!timed_out) && (stream_len == 40*512) && (status_byte == 8'h00)
+              && (stream_bad == 0);
+         if (ok) begin
+            $display("PASS: test12 - 40-sector READ(6) exact across a ring wrap (%0d bytes)", stream_len);
+         end else begin
+            $display("FAIL: test12 - ring wrap corrupted the read (timeout=%b len=%0d status=%02x bad=%0d first_bad=%0d)",
+                     timed_out, stream_len, status_byte, stream_bad, stream_first_bad);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
       $display("");
       $display("BASELINE (must pass today):        %s", all_ok ? "PASS" : "FAIL");
       $display("CONFORMANCE (Phase 1 target):      %0d of 2 still failing", conform_fail);
+      $display("PHASE 1 BEHAVIOUR:                 %0d of %0d failing", p1_fail, p1_total);
       $display("");
-      if (all_ok && conform_fail == 2)
+      if (all_ok && conform_fail == 2 && p1_fail == p1_total)
          $display("PHASE 0 SCSI GATE: PASS - harness good, both defects reproduced");
-      else if (all_ok && conform_fail == 0)
-         $display("PHASE 0 SCSI GATE: PASS - conformance gaps CLOSED (Phase 1 done)");
+      else if (all_ok && conform_fail == 0 && p1_fail == 0)
+         $display("PHASE 1 SCSI GATE: PASS - conformance gaps CLOSED, behaviour tests green");
+      else if (!all_ok)
+         $display("SCSI GATE: FAIL - baseline broken, harness not trustworthy");
       else
-         $display("PHASE 0 SCSI GATE: FAIL - baseline broken, harness not trustworthy");
+         $display("SCSI GATE: FAIL - conformance %0d/2, behaviour %0d/%0d",
+                  conform_fail, p1_fail, p1_total);
       $finish;
    end
 
