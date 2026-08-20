@@ -568,8 +568,12 @@ function [7:0] cd_toc_byte;
 		endcase
 	end
 endfunction
-// ops 00/01 are a fixed 4 bytes; op 10 streams whole 4-byte descriptors
-wire [31:0] cd_toc_len = (c1_op_r == 2'b10) ? {16'd0, tlen[15:2], 2'b00} : 32'd4;
+// Serve EXACTLY the allocation, zero-filled past the real payload (the serve
+// functions already return 0 past their payload). A fixed-size response that
+// ignores a larger allocation strands a blind host exactly like the page 0x0E
+// under-serve did. Op 10 streams whole 4-byte descriptors.
+wire [31:0] cd_toc_len = (c1_op_r == 2'b10) ? {cd_alloc10_r[31:2], 2'b00}
+                       : ((cd_alloc10_r < 32'd64) ? cd_alloc10_r : 32'd64);
 
 // ---- standard READ TOC (0x43), format 0, MSF form ------------------------
 // 20 bytes: 4-byte header, track 1 descriptor, lead-out (0xAA) descriptor.
@@ -798,8 +802,8 @@ wire [31:0] data_len =
 		 cmd_cd_toc?cd_toc_len:
 		 cmd_cd_toc43?((cd_alloc10_r < 32'd512) ? cd_alloc10_r : 32'd512):
 		 cmd_cd_subq43?((cd_alloc10_r < 32'd64) ? cd_alloc10_r : 32'd64):
-		 cmd_cd_subq?32'd9:               // READ Q SUBCODE: fixed 9 bytes
-		 cmd_cd_astat?32'd6:              // AUDIO STATUS: fixed 6 bytes
+		 cmd_cd_subq?((cd_alloc10_r < 32'd64) ? cd_alloc10_r : 32'd64):   // READ Q SUBCODE (9 real)
+		 cmd_cd_astat?((cd_alloc10_r < 32'd64) ? cd_alloc10_r : 32'd64):  // AUDIO STATUS (6 real)
 		 cmd_cd_hdr?((cd_alloc10_r < 32'd16) ? cd_alloc10_r : 32'd16):
 		 cmd_cd_actl?{24'd0, cd_alloc10_r[7:0]}:  // AUDIO CONTROL: DataOut, discarded
 		 ((CDROM != 0) && cmd_mode_select)?alloc_len:  // alloc 0 = no data (not 256)

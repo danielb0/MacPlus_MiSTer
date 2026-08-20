@@ -915,6 +915,84 @@ module tb_scsi_cdrom;
       end
       report(ok, "cd24 - every MODE SENSE page satisfies a blind transfer of its real size");
 
+      // ==================================================================
+      // Test 25: THE FULL BLIND-TRANSFER GUARD. Every CD command that returns
+      // data must deliver exactly the number of bytes the initiator armed for.
+      // The Mac's pseudo-DMA is blind: it pumps for the full allocation and
+      // wedges if the target stops short. MODE SENSE page 0x0E cost a hardware
+      // cycle proving that; this sweeps the rest of the command set, including
+      // OVER-armed allocations, where a fixed-size response would strand the
+      // host the same way.
+      // ==================================================================
+      do_reset; mount_image(IMG_BLOCKS);
+      begin : t25
+         integer bad;
+         bad = 0;
+
+         // --- 6-byte CDBs: allocation in CDB[4]
+         // INQUIRY at the full CD response size, and over-armed
+         select_target; send_cdb(8'h12,0,0,0,8'd54,0,0,0,0,0,0,0, 6);
+         read_blind(54); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       INQUIRY(54): got %0d", blind_got); end
+
+         // REQUEST SENSE
+         select_target; send_cdb(8'h03,0,0,0,8'd18,0,0,0,0,0,0,0, 6);
+         read_blind(18); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       REQUEST SENSE(18): got %0d", blind_got); end
+
+         // --- 10-byte CDBs: allocation in CDB[7:8]
+         // READ CAPACITY (fixed 8, no allocation field)
+         select_target; send_cdb(8'h25,0,0,0,0,0,0,0,0,0,0,0, 10);
+         read_blind(8); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       READ CAPACITY(8): got %0d", blind_got); end
+
+         // Apple READ TOC, all three ops, armed EXACTLY
+         select_target; send_cdb(8'hc1,0,0,0,0,0,0,8'h00,8'd4,8'h00,0,0, 10);
+         read_blind(4); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       C1 op00(4): got %0d", blind_got); end
+         select_target; send_cdb(8'hc1,0,0,0,0,0,0,8'h00,8'd4,8'h40,0,0, 10);
+         read_blind(4); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       C1 op01(4): got %0d", blind_got); end
+         select_target; send_cdb(8'hc1,0,0,0,0,8'h01,0,8'h00,8'd8,8'h80,0,0, 10);
+         read_blind(8); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       C1 op10(8): got %0d", blind_got); end
+
+         // Apple READ TOC OVER-ARMED -- the case a fixed 4-byte response strands
+         select_target; send_cdb(8'hc1,0,0,0,0,0,0,8'h00,8'd32,8'h00,0,0, 10);
+         read_blind(32); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       C1 op00 OVER-ARMED(32): got %0d", blind_got); end
+
+         // READ Q SUBCODE, exact and over-armed
+         select_target; send_cdb(8'hc2,0,0,0,0,0,0,8'h00,8'd9,8'h00,0,0, 10);
+         read_blind(9); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       C2(9): got %0d", blind_got); end
+         select_target; send_cdb(8'hc2,0,0,0,0,0,0,8'h00,8'd24,8'h00,0,0, 10);
+         read_blind(24); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       C2 OVER-ARMED(24): got %0d", blind_got); end
+
+         // AUDIO STATUS, exact and over-armed
+         select_target; send_cdb(8'hcc,0,0,0,0,0,0,8'h00,8'd6,8'h00,0,0, 10);
+         read_blind(6); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       CC(6): got %0d", blind_got); end
+         select_target; send_cdb(8'hcc,0,0,0,0,0,0,8'h00,8'd16,8'h00,0,0, 10);
+         read_blind(16); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       CC OVER-ARMED(16): got %0d", blind_got); end
+
+         // standard READ TOC / READ SUB-CHANNEL / READ HEADER
+         select_target; send_cdb(8'h43,0,0,0,0,0,0,8'h00,8'd20,8'h00,0,0, 10);
+         read_blind(20); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       43(20): got %0d", blind_got); end
+         select_target; send_cdb(8'h42,8'h02,8'h40,8'h01,0,0,0,8'h00,8'd16,8'h00,0,0, 10);
+         read_blind(16); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       42(16): got %0d", blind_got); end
+         select_target; send_cdb(8'h44,0,0,0,8'h12,8'h34,0,8'h00,8'd8,8'h00,0,0, 10);
+         read_blind(8); finish_command;
+         if (blind_short) begin bad=bad+1; $display("       44(8): got %0d", blind_got); end
+
+         ok = (bad == 0);
+      end
+      report(ok, "cd25 - every CD data command satisfies a blind transfer, incl. over-armed");
+
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);
       $display("");
