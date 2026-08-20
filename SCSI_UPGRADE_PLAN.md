@@ -479,8 +479,20 @@ in a way that is easy to misattribute:
 
 | Domain | Baseline | `d93c918` | `0698fd1` |
 |---|---|---|---|
-| `emu|pll general[0]` (core clock — where the SCSI logic lives) | 1.468 | 1.172 | **1.670** |
-| `pll_hdmi` (HDMI output — unrelated to SCSI) | 0.539 | 0.612 | **0.160** |
+| `emu|pll general[1]` — **32.5 MHz, the SCSI domain** (period 30.763 ns) | 4.245 | 4.247 | 4.199 |
+| `emu|pll general[0]` — 65 MHz SDRAM, NOT the SCSI domain | 1.468 | 1.172 | 1.670 |
+| `pll_hdmi` — HDMI output, unrelated to SCSI | 0.539 | 0.612 | 0.160 |
+
+**Correction:** earlier revisions of this section called `general[0]` "the core
+clock where the SCSI logic lives". That is wrong. `dataController_top` — and
+therefore ncr5380 and every scsi.v instance — is clocked by `clk_sys`, which is
+`outclk_1` = **`general[1]` at 32.5 MHz**. `general[0]` is `clk_mem`, the 65 MHz
+SDRAM clock, and its slack movements have nothing to do with this work.
+
+At commit `9377279` (the CD allocation fixes) the SCSI domain sits at **3.530 ns
+of 30.763 ns, 11.5% margin** — down from ~4.25, which is real and consistent with
+the added MODE SENSE serve logic and the widened data_len mux. Comfortable, but
+it is the number Phase 3 should watch, not `general[0]`.
 
 The core clock got *better* in the latest build, not worse, so the read ring's
 wider comparator cone and the CD's widened `cmd_dout` mux are not squeezing the
