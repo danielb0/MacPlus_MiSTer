@@ -983,6 +983,14 @@ always @(posedge clk) begin
 		sense_key  <= 4'd0;
 		sense_asc  <= 8'd0;
 		cd_prevent <= 1'b0;
+	end else if (wdog_abort) begin
+		// ABORTED COMMAND. The ASC deliberately carries the OPCODE that stalled
+		// rather than a standard additional-sense code: if this ever fires we
+		// need to know what stranded us, and a REQUEST SENSE is the only channel
+		// out of the target. Non-standard, and worth it -- this is an error path
+		// that would otherwise have been an unrecoverable hang.
+		sense_key <= 4'hB;
+		sense_asc <= op_code;
 	end else if (new_cmd) begin
 		if (!cmd_ok) begin
 			sense_key <= 4'h5;  // ILLEGAL REQUEST
@@ -1051,11 +1059,51 @@ wire [8:0]  tlen6 = (cmd[4] == 0)?9'd256:{1'b0,cmd[4]};
 wire [15:0] tlen10 = { cmd[7], cmd[8] };
 
 
+// ---- bus watchdog --------------------------------------------------------
+// A target that stops making progress must never hold BSY indefinitely: because
+// bus_busy gates every other target, one stuck target takes the WHOLE bus down
+// and the machine freezes -- boot disk included.
+//
+// We can be driven into that state by any CDB whose length we do not know.
+// Lengths are defined for groups 0/1/2/5 and the Apple 0xC0-0xCF range; groups
+// 3, 4, 7 and 0xD0-0xDF are not, so cmd_cpl never asserts and the target sits in
+// COMMAND phase forever. The sources also disagree about 0xC0 EJECT (MAME: a
+// 10-byte CDB; BlueSCSI: 6), so even a "known" opcode can strand us.
+//
+// A real drive fails a malformed command and releases the bus. So: if no ACK
+// edge arrives for ~129 ms while we are not legitimately waiting on the HPS,
+// abort with CHECK CONDITION and let go. That is well inside the Mac's own
+// ~250 ms SCSI timeout, so the host sees an ordinary failed command rather than
+// a dead bus. In normal operation this can never fire -- the initiator answers
+// in microseconds -- so it is inert unless something is already broken.
+// WDOG_LOG is overridden down to a few thousand cycles by the testbenches so the
+// recovery can be exercised in reasonable sim time. The timeout VALUE is not the
+// thing under test -- the recovery behaviour is.
+parameter WDOG_LOG = 22;               // 2^22 clks @32.5MHz = ~129 ms
+reg [WDOG_LOG-1:0] wdog = 0;
+wire wdog_expired = &wdog;
+wire wdog_abort   = wdog_expired && (phase != PHASE_IDLE);
+
+always @(posedge clk) begin
+	if (any_rst || (phase == PHASE_IDLE) || stb_ack || stb_adv || io_busy || wdog_abort)
+		wdog <= 0;
+	else if (!wdog_expired)
+		wdog <= wdog + 1'd1;
+end
+
 // the 5380 changes phase in the falling edge, thus we monitor it
 // on the rising edge
 always @(posedge clk) begin
 	if(any_rst) begin
 		phase <= PHASE_IDLE;
+	end else if (wdog_abort) begin
+		// Give up and release the bus rather than wedge it.
+		if ((phase == PHASE_STATUS_OUT) || (phase == PHASE_MESSAGE_OUT))
+			phase <= PHASE_IDLE;
+		else begin
+			status <= `STATUS_CHECK_CONDITION;
+			phase  <= PHASE_STATUS_OUT;
+		end
 	end else begin
 		if(phase == PHASE_IDLE) begin
 			// Only answer selection on a FREE bus (SEL asserted, no BSY). While

@@ -56,7 +56,7 @@ module tb_scsi_cdrom;
 
    localparam [2:0] TARGET_ID = 3'd3;   // AppleCD SC factory default
 
-   scsi #(.ID(TARGET_ID), .CDROM(1)) dut
+   scsi #(.ID(TARGET_ID), .CDROM(1), .WDOG_LOG(11)) dut   // ~20us watchdog for sim (bench guards are 4000 clks)
    (
       .clk(clk),
 
@@ -992,6 +992,59 @@ module tb_scsi_cdrom;
          ok = (bad == 0);
       end
       report(ok, "cd25 - every CD data command satisfies a blind transfer, incl. over-armed");
+
+      // ==================================================================
+      // Test 26: NO CDB MAY WEDGE THE BUS. Lengths are defined for groups
+      // 0/1/2/5 and 0xC0-0xCF; groups 3, 4, 7 and 0xD0-0xDF are not, so
+      // cmd_cpl can never assert for them and the target would sit in COMMAND
+      // phase holding BSY forever -- which, because bus_busy gates every other
+      // target, freezes the whole machine including the boot disk. That is the
+      // 2026-08-20 hang at "Welcome to Macintosh".
+      //
+      // Also covers the disputed 0xC0 EJECT length: MAME says 10 bytes,
+      // BlueSCSI says 6. If the driver sends 6 and we wait for 10, same wedge.
+      // The watchdog must turn every one of these into a released bus.
+      // ==================================================================
+      do_reset; mount_image(IMG_BLOCKS);
+      begin : t26
+         integer k, bad;
+         reg [7:0] ops [0:5];
+         integer   lens [0:5];
+         ops[0]=8'h60; lens[0]=6;    // group 3, undefined length
+         ops[1]=8'h80; lens[1]=6;    // group 4, undefined length
+         ops[2]=8'hd0; lens[2]=6;    // group 6 outside the Apple range
+         ops[3]=8'he0; lens[3]=6;    // group 7, vendor
+         ops[4]=8'hc0; lens[4]=6;    // EJECT sent as 6 bytes, not 10
+         ops[5]=8'h28; lens[5]=6;    // a 10-byte opcode truncated to 6
+         bad = 0;
+         for (k = 0; k < 6; k = k + 1) begin
+            select_target;
+            send_cdb(ops[k],0,0,0,0,0,0,0,0,0,0,0, lens[k]);
+            finish_command;
+            if (timed_out || bsy) begin
+               $display("       op %02h (%0d-byte CDB): WEDGED (timeout=%b bsy=%b)",
+                        ops[k], lens[k], timed_out, bsy);
+               bad = bad + 1;
+               do_reset; mount_image(IMG_BLOCKS);
+            end
+         end
+         ok = (bad == 0);
+      end
+      report(ok, "cd26 - no CDB of any group can wedge the bus (watchdog recovers)");
+
+      // ==================================================================
+      // Test 27: and the abort is diagnosable -- the sense block reports
+      // ABORTED COMMAND with the stalling opcode in the ASC byte, which is
+      // the only channel out of the target when this happens on hardware.
+      // ==================================================================
+      do_reset; mount_image(IMG_BLOCKS);
+      select_target;
+      send_cdb(8'he0,0,0,0,0,0,0,0,0,0,0,0, 6);
+      finish_command;
+      get_sense;
+      ok = (!timed_out) && (buf_in[2] === 8'h0b) && (buf_in[12] === 8'he0);
+      report(ok, "cd27 - aborted command reports ABORTED COMMAND + the opcode");
+      if (!ok) $display("       (key=%02x asc=%02x want 0b/e0)", buf_in[2], buf_in[12]);
 
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);
