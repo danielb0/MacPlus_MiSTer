@@ -18,6 +18,12 @@ module scsi
 	// bit-identical to a pre-CD build -- the period-purist switch and the A/B
 	// lever if the new target misbehaves on hardware. Ignored when CDROM == 0.
 	input 	  cd_enable,
+	// CD-ROM command-set debug ladder (CDROM targets only). 0 = normal. 1..6
+	// progressively re-enable commands so the OSD can bisect which one the
+	// driver chokes on WITHOUT a rebuild; 7 = everything, same as 0. Every
+	// command outside the enabled set answers CHECK CONDITION, which is a
+	// legitimate SCSI response, so the bus stays healthy at every level.
+	input [2:0] cd_dbg,
 	input 	  sel,
 	input 	  atn, // initiator requests to send a message
 	output 	  bsy, // target holds bus
@@ -938,7 +944,18 @@ wire  cmd_ok_cd = cmd_read || cmd_inquiry || cmd_test_unit_ready ||
 		  cmd_cd_toc43 || cmd_cd_subq43 || cmd_cd_hdr ||
 		  cmd_cd_prevent || cmd_cd_startstop || cmd_cd_setspeed;
 
-wire  cmd_ok = (CDROM != 0) ? cmd_ok_cd : cmd_ok_hd;
+// Debug ladder. Each level adds one command class on top of the previous.
+//   1 INQUIRY   2 +TEST UNIT READY   3 +REQUEST SENSE
+//   4 +READ CAPACITY   5 +MODE SENSE   6 +READ
+wire  cmd_ok_cd_dbg = cmd_inquiry
+                   || ((cd_dbg >= 3'd2) && cmd_test_unit_ready)
+                   || ((cd_dbg >= 3'd3) && cmd_request_sense)
+                   || ((cd_dbg >= 3'd4) && cmd_read_capacity)
+                   || ((cd_dbg >= 3'd5) && cmd_mode_sense)
+                   || ((cd_dbg >= 3'd6) && cmd_read);
+
+wire  cmd_ok_cd_sel = ((cd_dbg == 3'd0) || (cd_dbg == 3'd7)) ? cmd_ok_cd : cmd_ok_cd_dbg;
+wire  cmd_ok = (CDROM != 0) ? cmd_ok_cd_sel : cmd_ok_hd;
 
 // Media-dependent commands fail with the AppleCD no-disc sense while no image
 // is mounted. MAME's return_no_cd uses SK_NOT_READY + the vendor ASC 0xB0 --

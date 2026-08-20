@@ -71,6 +71,7 @@ localparam CONF_STR = {
 	// equivalent slot plainly, and an `h` prefix hid the item outright.
 	"SC4,ISO,Mount CD-ROM;",
 	"OI,CD-ROM Drive,Enabled,Disabled;",
+	"OJL,CD Debug,Off,INQ,+TUR,+SENSE,+CAP,+MODE,+READ,All;",
 	"-;",
 	"O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
@@ -183,6 +184,11 @@ assign sd_buff_din[4] = scsi_sd_buff_din[SCSI_CD_DEV];
 // pre-CD build - both the period-purist switch and the A/B lever if the new
 // target misbehaves on hardware.
 wire cd_enable = ~status[18];
+
+// CD command-set debug ladder - see scsi.v. Off (0) is normal operation; the
+// intermediate levels let the CD command set be bisected from the OSD without
+// rebuilding, to find which command a guest driver chokes on.
+wire [2:0] cd_dbg = status[21:19];
 // sd_buff_din[2]/[3] driven below by each drive's floppy_sd_writer (Phase 4) -
 // only ever consulted by hps_io during a sd_wr session for that slot, which
 // only the writer ever asserts, so no mux against the loader is needed here.
@@ -686,6 +692,7 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.img_mounted({img_mounted[4], img_mounted[1:0]}),
 	.img_size(img_size[40:9]),
 	.cd_enable(cd_enable),
+	.cd_dbg(cd_dbg),
 	.io_lba(scsi_sd_lba),
 	.io_rd(scsi_sd_rd),
 	.io_wr(scsi_sd_wr),

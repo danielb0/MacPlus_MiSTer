@@ -76,7 +76,8 @@ module ncr5380
 
 	// CD-ROM drive present on the bus (see scsi.v's cd_enable). Only meaningful
 	// when CD_DEV is in range; low makes the bus identical to a disks-only build.
-	input              cd_enable
+	input              cd_enable,
+	input        [2:0] cd_dbg
 );
 	parameter DEVS = 2;
 	// Index of the CD-ROM target within the DEVS arrays, or DEVS for "none".
@@ -288,6 +289,7 @@ module ncr5380
 				// is evaluated.
 				.bus_busy( |target_bsy ),
 				.cd_enable( (i == CD_DEV) ? cd_enable : 1'b0 ),
+				.cd_dbg   ( cd_dbg ),
 				.sel    ( scsi_sel ),
 				.atn    ( scsi_atn ),
 
