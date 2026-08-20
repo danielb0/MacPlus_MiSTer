@@ -300,6 +300,35 @@ module tb_scsi_cdrom;
       end
    endtask
 
+   // BLIND transfer, the way the Mac's pseudo-DMA primitive actually works: it
+   // arms for the FULL allocation length and pumps for exactly that many bytes.
+   // read_data_phase() above is adaptive -- it follows the target's phase -- so
+   // it silently tolerates a target that ends the data phase early. Real
+   // hardware does not: the host sits armed for bytes that never arrive, takes
+   // BERR beats, the SCSI Manager retries, and the machine wedges. That is the
+   // 2026-08-20 boot hang (MODE SENSE page 0x0E served 12 bytes for a 28-byte
+   // page), and the adaptive model is exactly why the bench missed it.
+   integer blind_got;
+   reg     blind_short;
+   task read_blind;
+      input integer want;
+      begin : rb
+         integer n, guard;
+         n = 0; guard = 0;
+         while (!timed_out && guard < 2000 &&
+                phase_of(msg, cd, io) != P_DATA_OUT &&
+                phase_of(msg, cd, io) != P_STATUS) begin
+            @(posedge clk); #1; guard = guard + 1;
+         end
+         while (!timed_out && n < want && phase_of(msg, cd, io) == P_DATA_OUT) begin
+            xfer_byte(8'h00);
+            if (!timed_out) begin buf_in[n] = sampled; n = n + 1; end
+         end
+         blind_got   = n;
+         blind_short = (n < want);   // target went early -> real Mac deadlocks
+      end
+   endtask
+
    reg [7:0] status_byte;
    task finish_command;
       begin : fc
@@ -818,6 +847,73 @@ module tb_scsi_cdrom;
                            busy_status, status_byte, saw_toc_busy);
       end
       report(ok, "cd21 - commands report NOT READY while the TOC is still converting");
+
+      // ==================================================================
+      // Test 22: MODE SENSE page 0x0E (CD Audio Control). The AppleCD driver
+      // asks for this page directly at startup. Serving the bare 12-byte
+      // header instead of the full 28 is what hung the Mac on hardware.
+      // ==================================================================
+      do_reset; mount_image(IMG_BLOCKS);
+      select_target;
+      send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd28,8'h00,0,0,0,0,0,0, 6);
+      read_blind(28);
+      finish_command;
+      ok = (!timed_out) && (!blind_short) && (blind_got == 28)
+           && (buf_in[0]  === 8'd27)   // mode data length = 28-1
+           && (buf_in[12] === 8'h0e)   // page code
+           && (buf_in[13] === 8'h0e);  // page length = 14
+      report(ok, "cd22 - MODE SENSE page 0E serves all 28 bytes (the boot-hang page)");
+      if (!ok) $display("       (got=%0d short=%b b0=%02x b12=%02x b13=%02x)",
+                        blind_got, blind_short, buf_in[0], buf_in[12], buf_in[13]);
+
+      // ==================================================================
+      // Test 23: MODE SENSE page 0x2A (MM Capabilities), 38 bytes.
+      // ==================================================================
+      select_target;
+      send_cdb(8'h1a,8'h00,8'h2a,8'h00,8'd38,8'h00,0,0,0,0,0,0, 6);
+      read_blind(38);
+      finish_command;
+      ok = (!timed_out) && (!blind_short) && (blind_got == 38)
+           && (buf_in[0]  === 8'd37)
+           && (buf_in[12] === 8'h2a)
+           && (buf_in[13] === 8'h18);
+      report(ok, "cd23 - MODE SENSE page 2A serves all 38 bytes");
+      if (!ok) $display("       (got=%0d short=%b b0=%02x b12=%02x b13=%02x)",
+                        blind_got, blind_short, buf_in[0], buf_in[12], buf_in[13]);
+
+      // ==================================================================
+      // Test 24: THE GENERAL GUARD. For every MODE SENSE page the driver may
+      // ask for, arm a blind transfer for that page's real size and require
+      // the target to deliver all of it. This is the invariant that was
+      // missing: an under-served page is invisible to an adaptive initiator
+      // and fatal to a real one.
+      // ==================================================================
+      begin : t24
+         integer k, want, bad;
+         reg [7:0] pages [0:4];
+         integer   lens  [0:4];
+         pages[0]=8'h01; lens[0]=12;   // unsupported page -> header only
+         pages[1]=8'h0e; lens[1]=28;
+         pages[2]=8'h2a; lens[2]=38;
+         pages[3]=8'h30; lens[3]=36;
+         pages[4]=8'h3f; lens[4]=12;   // "all pages" -> header only
+         bad = 0;
+         for (k = 0; k < 5; k = k + 1) begin
+            want = lens[k];
+            select_target;
+            send_cdb(8'h1a,8'h00,pages[k],8'h00,want[7:0],8'h00,0,0,0,0,0,0, 6);
+            read_blind(want);
+            finish_command;
+            // byte 0 must also agree with what was actually served
+            if (blind_short || (blind_got != want) || (buf_in[0] !== (want-1))) begin
+               $display("       page %02x: armed %0d got %0d short=%b b0=%02x",
+                        pages[k], want, blind_got, blind_short, buf_in[0]);
+               bad = bad + 1;
+            end
+         end
+         ok = (bad == 0);
+      end
+      report(ok, "cd24 - every MODE SENSE page satisfies a blind transfer of its real size");
 
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);

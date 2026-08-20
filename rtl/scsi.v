@@ -372,36 +372,75 @@ wire [7:0] read_capacity_dout =
 // other argument changes. That showed up as byte 0 (and only byte 0) of every
 // CD response being stale, because data_cnt incrementing is what re-evaluated
 // the assignment. Passing them in is correct by construction.
+// Page 0x0E (CD Audio Control) and 0x2A (MM Capabilities) are NOT optional:
+// the AppleCD driver asks for 0x0E directly during startup. Serving the bare
+// 12-byte header for a page the driver armed a longer blind transfer for leaves
+// the host waiting for bytes that never come -- BERR beats, SCSI Manager retry,
+// boot wedge. That is the hang seen on hardware 2026-08-20 with the drive
+// enabled. Lengths and payloads follow MacLC_MiSTer, which is known to work
+// with this driver.
 function [7:0] cd_mode_sense_byte;
 	input [31:0] cnt;
-	input        ms30;
+	input [5:0]  page;
 	input [31:0] cap;
 	begin
 		cd_mode_sense_byte =
-			(cnt == 32'd0 )?(ms30 ? 8'd35 : 8'd11):  // mode data length = total-1
+			// ---- common header + block descriptor (bytes 0..11)
+			(cnt == 32'd0 )?((page == 6'h30) ? 8'd35 :   // mode data length = total-1
+			                 (page == 6'h0E) ? 8'd27 :
+			                 (page == 6'h2A) ? 8'd37 : 8'd11):
 			(cnt == 32'd2 )?8'h80:                      // WP (read-only medium)
 			(cnt == 32'd3 )?8'd8:                       // block descriptor length
 			(cnt == 32'd5 )?cap[23:16]:
 			(cnt == 32'd6 )?cap[15:8]:
 			(cnt == 32'd7 )?cap[7:0]:
 			(cnt == 32'd10)?8'h08:                      // block length 0x000800 = 2048
-			(cnt == 32'd12)?8'h30:                      // page code (0x30 request only)
-			(cnt == 32'd14)?"A":(cnt == 32'd15)?"P":
-			(cnt == 32'd16)?"P":(cnt == 32'd17)?"L":
-			(cnt == 32'd18)?"E":(cnt == 32'd19)?" ":
-			(cnt == 32'd20)?"C":(cnt == 32'd21)?"O":
-			(cnt == 32'd22)?"M":(cnt == 32'd23)?"P":
-			(cnt == 32'd24)?"U":(cnt == 32'd25)?"T":
-			(cnt == 32'd26)?"E":(cnt == 32'd27)?"R":
-			(cnt == 32'd28)?",":(cnt == 32'd29)?" ":
-			(cnt == 32'd30)?"I":(cnt == 32'd31)?"N":
-			(cnt == 32'd32)?"C":
-			((cnt >= 32'd33) && (cnt <= 32'd35))?" ":
+			// ---- page 0x30: the "magic Apple page" (24 bytes, total 36)
+			(page == 6'h30)?(
+			   (cnt == 32'd12)?8'h30:
+			   (cnt == 32'd14)?"A":(cnt == 32'd15)?"P":
+			   (cnt == 32'd16)?"P":(cnt == 32'd17)?"L":
+			   (cnt == 32'd18)?"E":(cnt == 32'd19)?" ":
+			   (cnt == 32'd20)?"C":(cnt == 32'd21)?"O":
+			   (cnt == 32'd22)?"M":(cnt == 32'd23)?"P":
+			   (cnt == 32'd24)?"U":(cnt == 32'd25)?"T":
+			   (cnt == 32'd26)?"E":(cnt == 32'd27)?"R":
+			   (cnt == 32'd28)?",":(cnt == 32'd29)?" ":
+			   (cnt == 32'd30)?"I":(cnt == 32'd31)?"N":
+			   (cnt == 32'd32)?"C":
+			   ((cnt >= 32'd33) && (cnt <= 32'd35))?" ":8'h00):
+			// ---- page 0x0E: CD Audio Control (16 bytes, total 28)
+			// Port/volume bytes are static here; Phase 3's audio engine makes
+			// them the live MODE SELECT-writable state.
+			(page == 6'h0E)?(
+			   (cnt == 32'd12)?8'h0E:                   // page code
+			   (cnt == 32'd13)?8'h0E:                   // page length = 14
+			   (cnt == 32'd14)?8'h04:                   // IMMED=1, SOTC=0
+			   (cnt == 32'd18)?8'd75:
+			   (cnt == 32'd19)?8'd75:
+			   (cnt == 32'd20)?8'h01:(cnt == 32'd21)?8'hff:  // port 0 -> ch1, full
+			   (cnt == 32'd22)?8'h02:(cnt == 32'd23)?8'hff:  // port 1 -> ch2, full
+			   8'h00):
+			// ---- page 0x2A: MM Capabilities & Mechanical Status (26 B, total 38)
+			(page == 6'h2A)?(
+			   (cnt == 32'd12)?8'h2A:                   // page code
+			   (cnt == 32'd13)?8'h18:                   // page length = 24
+			   (cnt == 32'd16)?8'h71:  // multi-session | Mode 2 F2 | F1 | audio
+			   (cnt == 32'd18)?8'h28:  // tray loading | eject
+			   (cnt == 32'd19)?8'h03:  // separate channel mute | volume levels
+			   (cnt == 32'd22)?8'h01:  // 256 volume levels
+			   8'h00):
 			8'h00;
 	end
 endfunction
 
-wire [7:0] mode_sense_dout = (CDROM != 0) ? cd_mode_sense_byte(data_cnt, cd_ms30_r, capacity)
+// Response size per page. Serving fewer bytes than the driver armed for is the
+// deadlock above, so these must match the payloads exactly.
+wire [31:0] cd_ms_len = (cd_page_r == 6'h30) ? 32'd36 :
+                        (cd_page_r == 6'h0E) ? 32'd28 :
+                        (cd_page_r == 6'h2A) ? 32'd38 : 32'd12;
+
+wire [7:0] mode_sense_dout = (CDROM != 0) ? cd_mode_sense_byte(data_cnt, cd_page_r, capacity)
                                           : hd_mode_sense_dout;
 wire [7:0] hd_mode_sense_dout =
 		(data_cnt == 32'd3 )?8'd8:
@@ -428,7 +467,7 @@ wire [7:0] hd_mode_sense_dout =
 // byte 0 of every CD response carrying the PREVIOUS command's decode while
 // bytes 1+ were correct -- the data_cnt increment was what retriggered it).
 reg [1:0]  c1_op_r        = 2'b00;   // Apple READ TOC operation, CDB[9][7:6]
-reg        cd_ms30_r      = 1'b0;    // MODE SENSE asked for the Apple magic page
+reg [5:0]  cd_page_r      = 6'd0;    // MODE SENSE page code, CDB[2][5:0]
 reg        cd_astat_vol_r = 1'b0;    // AUDIO STATUS asked for volumes, CDB[3]==1
 reg [31:0] cd_alloc10_r   = 32'd0;   // raw 10-byte-CDB allocation, CDB[7:8]
 reg [31:0] cd_hdr_addr_r  = 32'd0;   // READ HEADER address echo, CDB[2:5]
@@ -770,8 +809,7 @@ wire [31:0] data_len =
 		 // and an over-serve of trailing zeros is harmless where an
 		 // under-serve is not.
 		 ((CDROM != 0) && cmd_mode_sense)?
-		     ((alloc_len < (cd_ms30_r ? 32'd36 : 32'd12)) ? alloc_len
-		                                                  : (cd_ms30_r ? 32'd36 : 32'd12)):
+		     ((alloc_len < cd_ms_len) ? alloc_len : cd_ms_len):
 		 { 16'd0, tlen };                 // anything else: length in bytes
 
 always @(posedge clk) begin
@@ -992,7 +1030,7 @@ always @(posedge clk) begin
 
 		// CD serve parameters, decoded here once (see the CD decode block).
 		c1_op_r        <= cmd[9][7:6];
-		cd_ms30_r      <= (CDROM != 0) && (op_code == 8'h1a) && (cmd[2][5:0] == 6'h30);
+		cd_page_r      <= cmd[2][5:0];
 		cd_astat_vol_r <= (cmd[3] == 8'h01);
 		cd_alloc10_r   <= {16'd0, cmd[7], cmd[8]};
 		cd_hdr_addr_r  <= {cmd[2], cmd[3], cmd[4], cmd[5]};
