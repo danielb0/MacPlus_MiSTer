@@ -440,12 +440,6 @@ function [7:0] cd_mode_sense_byte;
 	end
 endfunction
 
-// Response size per page. Serving fewer bytes than the driver armed for is the
-// deadlock above, so these must match the payloads exactly.
-wire [31:0] cd_ms_len = (cd_page_r == 6'h30) ? 32'd36 :
-                        (cd_page_r == 6'h0E) ? 32'd28 :
-                        (cd_page_r == 6'h2A) ? 32'd38 : 32'd12;
-
 wire [7:0] mode_sense_dout = (CDROM != 0) ? cd_mode_sense_byte(data_cnt, cd_page_r, capacity)
                                           : hd_mode_sense_dout;
 wire [7:0] hd_mode_sense_dout =
@@ -813,13 +807,15 @@ wire [31:0] data_len =
 		 cmd_cd_hdr?((cd_alloc10_r < 32'd16) ? cd_alloc10_r : 32'd16):
 		 cmd_cd_actl?{24'd0, cd_alloc10_r[7:0]}:  // AUDIO CONTROL: DataOut, discarded
 		 ((CDROM != 0) && cmd_mode_select)?alloc_len:  // alloc 0 = no data (not 256)
-		 // MODE SENSE is clamped on the CD path only. The disk path keeps
-		 // serving exactly `tlen` as it always has: it is the path every
-		 // existing user depends on, Phase 2 is meant to be purely additive,
-		 // and an over-serve of trailing zeros is harmless where an
-		 // under-serve is not.
-		 ((CDROM != 0) && cmd_mode_sense)?
-		     ((alloc_len < cd_ms_len) ? alloc_len : cd_ms_len):
+		 // MODE SENSE serves the FULL allocation, padded with zeros past the
+		 // real page data. The clamp that used to be here -- min(alloc,
+		 // page size) -- was the 2026-08-21 "+MODE" boot hang: a real driver
+		 // arms a generous buffer (0xff) or asks for page 0x3f and pumps
+		 // blind for every byte, so stopping at the page's real size strands
+		 // it forever. Byte 0 still reports the real data length, which is how
+		 // the host knows where the padding starts. This matches the disk
+		 // path, which has always served the full `tlen`.
+		 ((CDROM != 0) && cmd_mode_sense)?alloc_len:
 		 { 16'd0, tlen };                 // anything else: length in bytes
 
 always @(posedge clk) begin

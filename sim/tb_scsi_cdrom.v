@@ -1047,6 +1047,46 @@ module tb_scsi_cdrom;
       report(ok, "cd27 - aborted command reports ABORTED COMMAND + the opcode");
       if (!ok) $display("       (key=%02x asc=%02x want 0b/e0)", buf_in[2], buf_in[12]);
 
+      // ==================================================================
+      // Test 28: MODE SENSE with an OVER-ARMED allocation. cd24 arms each page
+      // at its real size, so alloc == the target's own idea of the length and
+      // the clamp in data_len is a no-op -- the bench encoded the same
+      // assumption as the RTL. A real driver does not do that: it arms a
+      // generous fixed buffer (0xff, 0x40) and/or asks for page 0x3f, then
+      // pumps blind for every byte it armed. Serving the page's real size
+      // instead of the allocation strands it forever. This is the level-5
+      // ("+MODE") hang seen on hardware 2026-08-21.
+      //
+      // Byte 0 must still report the REAL data length, not the allocation --
+      // that is how the host knows where the padding starts.
+      // ==================================================================
+      do_reset; mount_image(IMG_BLOCKS);
+      begin : t28
+         integer k, bad;
+         reg [7:0] pages [0:4];
+         integer   reals [0:4];
+         integer   arms  [0:4];
+         pages[0]=8'h0e; reals[0]=28; arms[0]=255;  // the page the driver asks for
+         pages[1]=8'h2a; reals[1]=38; arms[1]=255;
+         pages[2]=8'h30; reals[2]=36; arms[2]=64;
+         pages[3]=8'h3f; reals[3]=12; arms[3]=255;  // "all pages"
+         pages[4]=8'h01; reals[4]=12; arms[4]=48;   // unsupported page
+         bad = 0;
+         for (k = 0; k < 5; k = k + 1) begin
+            select_target;
+            send_cdb(8'h1a,8'h00,pages[k],8'h00,arms[k][7:0],8'h00,0,0,0,0,0,0, 6);
+            read_blind(arms[k]);
+            finish_command;
+            if (blind_short || (blind_got != arms[k]) || (buf_in[0] !== (reals[k]-1))) begin
+               $display("       page %02x: armed %0d got %0d short=%b b0=%02x (want b0=%02x)",
+                        pages[k], arms[k], blind_got, blind_short, buf_in[0], reals[k]-1);
+               bad = bad + 1;
+            end
+         end
+         ok = (bad == 0);
+      end
+      report(ok, "cd28 - MODE SENSE satisfies an OVER-armed blind transfer");
+
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);
       $display("");
