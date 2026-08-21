@@ -54,6 +54,8 @@ module tb_scsi_cdrom;
    wire [15:0] sd_buff_din;
    reg         sd_buff_wr   = 1'b0;
 
+   reg         cd_ms_bare   = 1'b0;   // MODE SENSE content bisect
+
    localparam [2:0] TARGET_ID = 3'd3;   // AppleCD SC factory default
 
    scsi #(.ID(TARGET_ID), .CDROM(1), .WDOG_LOG(11)) dut   // ~20us watchdog for sim (bench guards are 4000 clks)
@@ -65,6 +67,7 @@ module tb_scsi_cdrom;
       .bus_busy(bus_busy),
       .cd_enable(cd_enable),
       .cd_dbg(3'd0),
+      .cd_ms_bare(cd_ms_bare),
       .sel(sel),
       .atn(atn),
       .bsy(bsy),
@@ -1086,6 +1089,55 @@ module tb_scsi_cdrom;
          ok = (bad == 0);
       end
       report(ok, "cd28 - MODE SENSE satisfies an OVER-armed blind transfer");
+
+      // ==================================================================
+      // Test 29: the MODE SENSE content bisect itself. An instrument that has
+      // never been exercised is not evidence -- the debug ladder shipped with
+      // levels 1 and 2 silently gating out REQUEST SENSE, which would have
+      // made a hang there unreadable. So prove this one before trusting it.
+      //
+      // Bare mode must: declare 4 bytes of mode data (byte 0 = 3), declare NO
+      // block descriptor (byte 3 = 0), carry no page bytes, and still satisfy
+      // the initiator's full armed allocation -- the transfer length must be
+      // identical to full mode, so that length is held constant across the
+      // bisect and only CONTENT varies.
+      // ==================================================================
+      do_reset; mount_image(IMG_BLOCKS);
+      begin : t29
+         integer bad, k;
+         bad = 0;
+         cd_ms_bare = 1'b1;
+         // over-armed, and for a page that has real content in full mode
+         select_target;
+         send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
+         read_blind(255);
+         finish_command;
+         if (blind_short || (blind_got != 255)) begin
+            $display("       bare: armed 255 got %0d short=%b", blind_got, blind_short);
+            bad = bad + 1;
+         end
+         if (buf_in[0] !== 8'd3)    begin $display("       bare: byte0=%02x want 03", buf_in[0]); bad=bad+1; end
+         if (buf_in[3] !== 8'd0)    begin $display("       bare: byte3=%02x want 00 (no block desc)", buf_in[3]); bad=bad+1; end
+         if (buf_in[2] !== 8'h80)   begin $display("       bare: byte2=%02x want 80 (WP)", buf_in[2]); bad=bad+1; end
+         // nothing past the 4-byte header may be non-zero
+         for (k = 4; k < 255; k = k + 1)
+            if (buf_in[k] !== 8'h00) bad = bad + 1;
+
+         // and the switch must be a true no-op when clear: full mode unchanged
+         cd_ms_bare = 1'b0;
+         select_target;
+         send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
+         read_blind(255);
+         finish_command;
+         if (blind_short || (blind_got != 255) || (buf_in[0] !== 8'd27) ||
+             (buf_in[3] !== 8'd8) || (buf_in[12] !== 8'h0e)) begin
+            $display("       full: b0=%02x b3=%02x b12=%02x got %0d (want 1b/08/0e/255)",
+                     buf_in[0], buf_in[3], buf_in[12], blind_got);
+            bad = bad + 1;
+         end
+         ok = (bad == 0);
+      end
+      report(ok, "cd29 - MODE SENSE bare-header bisect is correct and reverts cleanly");
 
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);

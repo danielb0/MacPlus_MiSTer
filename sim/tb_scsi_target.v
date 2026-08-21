@@ -60,6 +60,7 @@ module tb_scsi_target;
       .bus_busy(bus_busy),
       .cd_enable(1'b0),
       .cd_dbg(3'd0),
+      .cd_ms_bare(1'b0),
       .sel(sel),
       .atn(atn),
       .bsy(bsy),

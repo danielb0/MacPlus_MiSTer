@@ -24,6 +24,11 @@ module scsi
 	// command outside the enabled set answers CHECK CONDITION, which is a
 	// legitimate SCSI response, so the bus stays healthy at every level.
 	input [2:0] cd_dbg,
+	// MODE SENSE content bisect (CDROM targets only). 0 = our full response.
+	// 1 = the bare 4-byte mode parameter header -- no block descriptor, no
+	// pages -- at the SAME transfer length. Splits "our bytes are wrong" from
+	// "answering 0x1a at all is what breaks it".
+	input 	  cd_ms_bare,
 	input 	  sel,
 	input 	  atn, // initiator requests to send a message
 	output 	  bsy, // target holds bus
@@ -440,8 +445,23 @@ function [7:0] cd_mode_sense_byte;
 	end
 endfunction
 
-wire [7:0] mode_sense_dout = (CDROM != 0) ? cd_mode_sense_byte(data_cnt, cd_page_r, capacity)
-                                          : hd_mode_sense_dout;
+// The minimum a conforming target may return: a 4-byte header declaring no
+// block descriptor and no pages. Every dependency is a function ARGUMENT --
+// a continuous assignment calling a function takes its sensitivity from the
+// call's arguments, not from signals read inside the body.
+function [7:0] cd_ms_bare_byte;
+	input [31:0] cnt;
+	begin
+		cd_ms_bare_byte = (cnt == 32'd0) ? 8'd3 :    // mode data length = 4-1
+		                  (cnt == 32'd2) ? 8'h80 :   // WP (read-only medium)
+		                  8'h00;                     // byte 3 = 0: no block desc
+	end
+endfunction
+
+wire [7:0] mode_sense_dout = (CDROM != 0)
+                             ? (cd_ms_bare ? cd_ms_bare_byte(data_cnt)
+                                           : cd_mode_sense_byte(data_cnt, cd_page_r, capacity))
+                             : hd_mode_sense_dout;
 wire [7:0] hd_mode_sense_dout =
 		(data_cnt == 32'd3 )?8'd8:
 		(data_cnt == 32'd5 )?capacity[23:16]:
