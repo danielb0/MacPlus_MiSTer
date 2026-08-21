@@ -54,7 +54,7 @@ module tb_scsi_cdrom;
    wire [15:0] sd_buff_din;
    reg         sd_buff_wr   = 1'b0;
 
-   reg         cd_ms_bare   = 1'b0;   // MODE SENSE content bisect
+   reg  [1:0]  cd_ms_mode   = 2'd0;   // MODE SENSE content bisect
 
    localparam [2:0] TARGET_ID = 3'd3;   // AppleCD SC factory default
 
@@ -67,7 +67,7 @@ module tb_scsi_cdrom;
       .bus_busy(bus_busy),
       .cd_enable(cd_enable),
       .cd_dbg(3'd0),
-      .cd_ms_bare(cd_ms_bare),
+      .cd_ms_mode(cd_ms_mode),
       .sel(sel),
       .atn(atn),
       .bsy(bsy),
@@ -1106,7 +1106,7 @@ module tb_scsi_cdrom;
       begin : t29
          integer bad, k;
          bad = 0;
-         cd_ms_bare = 1'b1;
+         cd_ms_mode = 2'd1;
          // over-armed, and for a page that has real content in full mode
          select_target;
          send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
@@ -1124,7 +1124,7 @@ module tb_scsi_cdrom;
             if (buf_in[k] !== 8'h00) bad = bad + 1;
 
          // and the switch must be a true no-op when clear: full mode unchanged
-         cd_ms_bare = 1'b0;
+         cd_ms_mode = 2'd0;
          select_target;
          send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
          read_blind(255);
@@ -1138,6 +1138,72 @@ module tb_scsi_cdrom;
          ok = (bad == 0);
       end
       report(ok, "cd29 - MODE SENSE bare-header bisect is correct and reverts cleanly");
+
+      // ==================================================================
+      // Test 30: the two middle bisect states. Each must be a response a real
+      // drive could legitimately give, and each must differ from its neighbour
+      // in exactly ONE component -- otherwise a hardware result cannot be
+      // attributed. Transfer length is held constant across all states so that
+      // length is never the variable under test.
+      //
+      //   state 2: header + block descriptor, no pages  (mode data length 11)
+      //   state 3: state 2 + page code and declared length, payload zeroed
+      // ==================================================================
+      do_reset; mount_image(IMG_BLOCKS);
+      begin : t30
+         integer bad, k;
+         reg [7:0] desc2 [4:11];
+         bad = 0;
+
+         // ---- state 2: header + block descriptor, nothing after byte 11
+         cd_ms_mode = 2'd2;
+         select_target;
+         send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
+         read_blind(255); finish_command;
+         if (blind_short || (blind_got != 255)) begin
+            $display("       s2: armed 255 got %0d short=%b", blind_got, blind_short); bad=bad+1; end
+         if (buf_in[0] !== 8'd11) begin $display("       s2: byte0=%02x want 0b", buf_in[0]); bad=bad+1; end
+         if (buf_in[3] !== 8'd8)  begin $display("       s2: byte3=%02x want 08", buf_in[3]); bad=bad+1; end
+         if (buf_in[10] !== 8'h08)begin $display("       s2: byte10=%02x want 08", buf_in[10]); bad=bad+1; end
+         for (k = 12; k < 255; k = k + 1)
+            if (buf_in[k] !== 8'h00) bad = bad + 1;   // no page may appear
+         for (k = 4; k <= 11; k = k + 1) desc2[k] = buf_in[k];
+
+         // ---- state 3: adds ONLY the page shell; payload must stay zero
+         cd_ms_mode = 2'd3;
+         select_target;
+         send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
+         read_blind(255); finish_command;
+         if (buf_in[0] !== 8'd27) begin $display("       s3: byte0=%02x want 1b", buf_in[0]); bad=bad+1; end
+         if (buf_in[3] !== 8'd8)  begin $display("       s3: byte3=%02x want 08", buf_in[3]); bad=bad+1; end
+         if (buf_in[12] !== 8'h0e)begin $display("       s3: byte12=%02x want 0e", buf_in[12]); bad=bad+1; end
+         if (buf_in[13] !== 8'h0e)begin $display("       s3: byte13=%02x want 0e", buf_in[13]); bad=bad+1; end
+         for (k = 14; k < 255; k = k + 1)
+            if (buf_in[k] !== 8'h00) bad = bad + 1;   // payload must be zeroed
+
+         // the block descriptor must be IDENTICAL in states 2 and 3, so that a
+         // difference between them on hardware is attributable to the page
+         // shell alone -- that is the whole point of a one-component step
+         for (k = 4; k <= 11; k = k + 1)
+            if (buf_in[k] !== desc2[k]) begin
+               $display("       s3: descriptor byte %0d = %02x, state 2 had %02x",
+                        k, buf_in[k], desc2[k]);
+               bad = bad + 1;
+            end
+
+         // ---- an unknown page in state 3 must not sprout a page shell
+         cd_ms_mode = 2'd3;
+         select_target;
+         send_cdb(8'h1a,8'h00,8'h01,8'h00,8'd64,8'h00,0,0,0,0,0,0, 6);
+         read_blind(64); finish_command;
+         if (buf_in[0] !== 8'd11) begin $display("       s3/unknown: byte0=%02x want 0b", buf_in[0]); bad=bad+1; end
+         for (k = 12; k < 64; k = k + 1)
+            if (buf_in[k] !== 8'h00) bad = bad + 1;
+
+         cd_ms_mode = 2'd0;
+         ok = (bad == 0);
+      end
+      report(ok, "cd30 - bisect states 2 and 3 each add exactly one component");
 
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);

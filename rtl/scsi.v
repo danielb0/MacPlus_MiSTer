@@ -24,11 +24,15 @@ module scsi
 	// command outside the enabled set answers CHECK CONDITION, which is a
 	// legitimate SCSI response, so the bus stays healthy at every level.
 	input [2:0] cd_dbg,
-	// MODE SENSE content bisect (CDROM targets only). 0 = our full response.
-	// 1 = the bare 4-byte mode parameter header -- no block descriptor, no
-	// pages -- at the SAME transfer length. Splits "our bytes are wrong" from
-	// "answering 0x1a at all is what breaks it".
-	input 	  cd_ms_bare,
+	// MODE SENSE content bisect (CDROM targets only). Hardware proved the
+	// MECHANISM of answering 0x1a is fine -- state 1 boots with every command
+	// enabled -- so the fault is in our response BYTES. These states add one
+	// component at a time, all at the SAME transfer length so only content
+	// varies, and every one is a response a real drive may legitimately give:
+	//   0 full   1 header only   2 +block descriptor   3 +page code/length
+	// 2 hangs => the block descriptor. 2 boots and 3 hangs => the page shell.
+	// 3 boots => the page PAYLOAD.
+	input [1:0] cd_ms_mode,
 	input 	  sel,
 	input 	  atn, // initiator requests to send a message
 	output 	  bsy, // target holds bus
@@ -449,18 +453,42 @@ endfunction
 // block descriptor and no pages. Every dependency is a function ARGUMENT --
 // a continuous assignment calling a function takes its sensitivity from the
 // call's arguments, not from signals read inside the body.
-function [7:0] cd_ms_bare_byte;
+function [7:0] cd_ms_bisect_byte;
 	input [31:0] cnt;
+	input [1:0]  m;
+	input [5:0]  page;
+	input [31:0] cap;
+	reg          known;
 	begin
-		cd_ms_bare_byte = (cnt == 32'd0) ? 8'd3 :    // mode data length = 4-1
-		                  (cnt == 32'd2) ? 8'h80 :   // WP (read-only medium)
-		                  8'h00;                     // byte 3 = 0: no block desc
+		known = (page == 6'h30) || (page == 6'h0E) || (page == 6'h2A);
+		cd_ms_bisect_byte =
+			// ---- 4-byte mode parameter header (every state)
+			(cnt == 32'd0)?((m == 2'd1) ? 8'd3 :
+			                (m == 2'd2) ? 8'd11 :
+			                (page == 6'h30) ? 8'd35 :
+			                (page == 6'h0E) ? 8'd27 :
+			                (page == 6'h2A) ? 8'd37 : 8'd11):
+			(cnt == 32'd2)?8'h80:                        // WP
+			(cnt == 32'd3)?((m == 2'd1) ? 8'd0 : 8'd8):  // block desc length
+			(m == 2'd1)?8'h00:                           // state 1 ends here
+			// ---- 8-byte block descriptor (states 2, 3)
+			(cnt == 32'd5 )?cap[23:16]:
+			(cnt == 32'd6 )?cap[15:8]:
+			(cnt == 32'd7 )?cap[7:0]:
+			(cnt == 32'd10)?8'h08:                       // block length 2048
+			(m == 2'd2)?8'h00:                           // state 2 ends here
+			// ---- page SHELL only: code + declared length, payload zeroed
+			(cnt == 32'd12)?(known ? {2'd0, page} : 8'h00):
+			(cnt == 32'd13)?((page == 6'h0E) ? 8'h0E :
+			                 (page == 6'h2A) ? 8'h18 : 8'h00):
+			8'h00;
 	end
 endfunction
 
 wire [7:0] mode_sense_dout = (CDROM != 0)
-                             ? (cd_ms_bare ? cd_ms_bare_byte(data_cnt)
-                                           : cd_mode_sense_byte(data_cnt, cd_page_r, capacity))
+                             ? ((cd_ms_mode != 2'd0)
+                                ? cd_ms_bisect_byte(data_cnt, cd_ms_mode, cd_page_r, capacity)
+                                : cd_mode_sense_byte(data_cnt, cd_page_r, capacity))
                              : hd_mode_sense_dout;
 wire [7:0] hd_mode_sense_dout =
 		(data_cnt == 32'd3 )?8'd8:
