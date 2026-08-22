@@ -152,6 +152,65 @@ for {set n 0} {$n < $samples} {incr n} {
 			puts [format "          %s %-13s %02X" $dir $nm $ev]
 		}
 	}
+
+	# ---- PDMA / PDM2: the discriminating word -----------------------------
+	# Added 2026-08-22 to settle the third reading of the wedge (see
+	# SCSI_UPGRADE_PLAN.md 5.6). Field layout is defined in rtl/dbg_probes.sv
+	# and proven by sim/tb_dbg_probes.v; change all three together.
+	set pdma [b2i [rd PDMA]]
+	set pdm2 [b2i [rd PDM2]]
+
+	set dack_tot [expr {($pdma >> 24) & 0xff}]
+	set dack_arm [expr {($pdma >> 20) & 0xf}]
+	set arm_cnt  [expr {($pdma >> 16) & 0xf}]
+	set wdog_cnt [expr {($pdma >> 12) & 0xf}]
+	set iowd_cnt [expr {($pdma >>  8) & 0xf}]
+	set phmask   [expr {($pdma >>  2) & 0x3f}]
+	set req_stat [expr {($pdma >>  1) & 1}]
+	set req_msg  [expr { $pdma        & 1}]
+
+	set dack_mis [expr {($pdm2 >> 31) & 1}]
+	set drq_mis  [expr {($pdm2 >> 30) & 1}]
+	set ack_stat [expr {($pdm2 >> 29) & 1}]
+	set irq_seen [expr {($pdm2 >> 28) & 1}]
+	set lv_bsy   [expr {($pdm2 >> 27) & 1}]
+	set lv_req   [expr {($pdm2 >> 26) & 1}]
+	set lv_dma   [expr {($pdm2 >> 25) & 1}]
+	set lv_pm    [expr {($pdm2 >> 24) & 1}]
+	set ring     [expr { $pdm2 & 0xffffff}]
+
+	set phname {IDLE CMD DATA-OUT DATA-IN STATUS MESSAGE ?6 ?7}
+	set seen ""
+	for {set b 0} {$b < 6} {incr b} {
+		if {($phmask >> $b) & 1} { append seen "[lindex $phname $b] " }
+	}
+	set ringstr ""
+	for {set e 0} {$e < 8} {incr e} {
+		append ringstr "[lindex $phname [expr {($ring >> ($e * 3)) & 7}]] "
+	}
+
+	puts [format "  PDMA  DACK reads since the DMA arm: %d   (lifetime %s, arms since selection %d)" 	             $dack_arm [expr {$dack_tot >= 255 ? ">=255" : $dack_tot}] $arm_cnt]
+	puts [format "        watchdog fires since selection: bus=%d  io-stall=%d" $wdog_cnt $iowd_cnt]
+	puts [format "        phases visited since selection: %s" [string trim $seen]]
+	puts [format "  PDM2  sticky: DACK-in-mismatch=%d DRQ-in-mismatch=%d ACK-in-STATUS=%d IRQ-latched=%d REQ-in-STATUS=%d REQ-in-MESSAGE=%d" 	             $dack_mis $drq_mis $ack_stat $irq_seen $req_stat $req_msg]
+	puts [format "        live: BSY=%d REQ=%d DMA_EN=%d PMATCH=%d" $lv_bsy $lv_req $lv_dma $lv_pm]
+	puts [format "        phase ring (newest first): %s" [string trim $ringstr]]
+
+	# The reading this capture supports, stated outright so a capture cannot be
+	# quietly re-interpreted after the fact.
+	set data_seen [expr {($phmask >> 2) & 1 || ($phmask >> 3) & 1}]
+	if {$wdog_cnt > 0 || $iowd_cnt > 0} {
+		puts "  ==>   a watchdog FIRED: the invisible-completion reading is out."
+	} elseif {$dack_arm >= 2 && !$data_seen && $dack_mis} {
+		puts "  ==>   CONFIRMED: DACK reads during a phase mismatch consumed the"
+		puts "        transaction. No data phase, no watchdog. Fix = gate bsr_dmarq"
+		puts "        and dma_ack with bsr_pmatch (SCSI_UPGRADE_PLAN.md 5.6)."
+	} elseif {$arm_cnt > 0 && $dack_arm == 0} {
+		puts "  ==>   FALSIFIED: the driver armed pseudo-DMA and then did NO DACK"
+		puts "        read at all. The transaction did not complete this way."
+	} else {
+		puts "  ==>   inconclusive so far -- sample again while wedged."
+	}
 	puts ""
 
 	if {$n + 1 < $samples} { after [expr {int($delay * 1000)}] }
@@ -173,3 +232,11 @@ puts "  * PODR shows the tail of the last CDB the driver handed the target."
 puts "  * PIOS stuck>0 with PIO2 cd_rd=1 and rd>ack = a fetch the HPS never"
 puts "    answered. That holds io_busy, which holds REQ low AND resets the bus"
 puts "    watchdog every cycle -- a hang with no recovery (scsi.v:239, :1195)."
+puts "  * PDMA/PDM2 are the discriminating word. Both readings of the wedge"
+puts "    predict the SAME frozen PSCS/PODR capture; they differ only here."
+puts "    Predicted by the invisible-completion reading: DACK-since-arm=2,"
+puts "    both watchdog counts 0, phases CMD/STATUS/MESSAGE/IDLE with no DATA,"
+puts "    DACK-in-mismatch=1, IRQ-latched=0."
+puts "  * The old DACK row in PRG was a 4-bit WRAPPING counter that was never"
+puts "    cleared, so on a machine that booted off a SCSI disk it read as noise"
+puts "    mod 16. Trust the PDMA fields, not that row."

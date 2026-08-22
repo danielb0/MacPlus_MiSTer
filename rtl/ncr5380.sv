@@ -81,6 +81,12 @@ module ncr5380
 	input        [2:0] cd_ms_mode,
 	input        [3:0] cd_vendor_dbg
 	,input       [1:0] cd_sense_mode
+
+	// Debug tap for the JTAG probe deck (rtl/dbg_probes.sv). Raw state only --
+	// every counter, sticky bit and epoch lives in the probe deck, so this bus
+	// stays one flat vector of things that already exist and the debug logic
+	// stays in one file. Pruned entirely when the deck is not instantiated.
+	,output     [11:0] dbg_bus
 );
 	parameter DEVS = 2;
 	// Index of the CD-ROM target within the DEVS arrays, or DEVS for "none".
@@ -358,6 +364,21 @@ module ncr5380
 	end
 
 
+	/* ---- debug tap -------------------------------------------------------
+	 * Bit assignments are mirrored in rtl/dbg_probes.sv and decoded by
+	 * scripts/read_probes.tcl; change all three together.
+	 *   [4:0]   scsi_bsy, scsi_msg, scsi_cd, scsi_io, scsi_req  (raw, un-deferred)
+	 *   [9:5]   dma_en, dma_ack, bsr_pmatch, irq_latch, dma_armed
+	 *   [11:10] any target's bus-watchdog / io-stall abort
+	 * The five bus signals decode the target's phase exactly (see the phase
+	 * table in scsi.v), which is why no phase port is needed here.
+	 */
+	assign dbg_bus = { |target_iostall, |target_wdog,
+	                   dma_armed, irq_latch, bsr_pmatch, dma_ack, dma_en,
+	                   scsi_req, scsi_io, scsi_cd, scsi_msg, scsi_bsy };
+
+	wire [DEVS-1:0] target_wdog, target_iostall;
+
 	// input signals from targets
 	wire [DEVS-1:0] target_bsy;
 	wire [DEVS-1:0] target_msg;
@@ -416,7 +437,9 @@ module ncr5380
 				.sd_buff_addr( sd_buff_addr ),
 				.sd_buff_dout( sd_buff_dout ),
 				.sd_buff_din( sd_buff_din[i] ),
-				.sd_buff_wr( sd_buff_wr & target_bsy[i] )
+				.sd_buff_wr( sd_buff_wr & target_bsy[i] ),
+
+				.dbg_abort( { target_iostall[i], target_wdog[i] } )
 			);
 		end
 	endgenerate

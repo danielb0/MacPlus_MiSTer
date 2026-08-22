@@ -357,6 +357,7 @@ wire memoryLatch;
 // peripherals
 wire vid_alt, loadPixels, pixelOut, _hblank, _vblank, hsync, vsync;
 wire memoryOverlayOn, selectSCSI, selectSCC, selectIWM, selectVIA, selectRAM, selectROM, selectSEOverlay;
+wire [11:0] scsi_dbg;   // raw 5380 state, for rtl/dbg_probes.sv
 wire [15:0] dataControllerDataOut;
 
 // audio
@@ -632,6 +633,7 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	._cpuVMA(_cpuVMA),
 	.cpuDataIn(cpuDataOut),
 	.cpuDataOut(dataControllerDataOut), 	
+	.scsi_dbg(scsi_dbg),
 	.cpuAddrRegHi(cpuAddr[12:9]),
 	.cpuAddrRegMid(cpuAddr[6:4]),  // for SCSI
 	.cpuAddrRegLo(cpuAddr[2:1]),		
@@ -1041,7 +1043,8 @@ dbg_probes dbg_probes_inst
 	.cd_io_ack  ( sd_ack[4]               ),
 	.cd_io_lba  ( scsi_sd_lba[SCSI_CD_DEV]),
 	.d0_io_rd   ( scsi_sd_rd[0]           ),
-	.d0_io_ack  ( sd_ack[0]               )
+	.d0_io_ack  ( sd_ack[0]               ),
+	.scsi_dbg   ( scsi_dbg                )
 );
 `endif
 

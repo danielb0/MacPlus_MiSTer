@@ -316,6 +316,24 @@ module tb_ncr5380_seam;
 	reg saw_data_phase;
 	integer settle_iters;
 
+	// ---- seam11 watchers --------------------------------------------------
+	// Sticky observers for the un-gated-DACK experiment. These are the sim
+	// twins of the sticky JTAG probes in rtl/dbg_probes.sv: same questions
+	// (did a watchdog fire? was a DATA phase ever entered? did ACK pulse while
+	// the target was in STATUS?), asked of the model first so the hardware
+	// instrument is looking for something already known to be measurable.
+	reg s11_watch = 0;
+	reg s11_abort = 0, s11_ack_status = 0, s11_data_phase = 0;
+	reg [2:0] s11_phase_armed, s11_phase_after1;
+	integer   s11_free_clks;
+
+	always @(posedge clk) if (s11_watch) begin
+		if (dut.target[CD_DEV].target.wdog_abort) s11_abort <= 1;
+		if (dut.scsi_ack && (dut.target[CD_DEV].target.phase == 3'd4))
+			s11_ack_status <= 1;
+		if (!dut.scsi_cd && dut.scsi_io && dut.scsi_req) s11_data_phase <= 1;
+	end
+
 	initial begin
 		repeat (10) @(posedge clk);
 		reset = 0;
@@ -518,6 +536,103 @@ module tb_ncr5380_seam;
 			while (dut.scsi_bsy && g < 2000) begin @(posedge clk); g = g + 1; end
 		end
 		ok("seam8 - bus released after the CHECKed command", !dut.scsi_bsy);
+
+		// =============== seam11: an un-gated DACK eats the STATUS byte ======
+		// The 2026-08-22 review's central RTL claim, made falsifiable here.
+		//
+		// `bsr_dmarq = scsi_req & dma_en` (rtl/ncr5380.sv) carries no phase-match
+		// term, and `dma_ack` is not gated by one either. A real 5380 inhibits
+		// DRQ and halts the DMA handshake when REQ arrives with MSG/CD/IO not
+		// matching TCR, leaving REQ visible in CSR so the driver's poll loop
+		// exits and the SCSI Manager handles the phase change. That inhibition
+		// is the entire exit ramp for "the target CHECKed instead of entering
+		// the data phase" -- the no-media case seam8 just measured.
+		//
+		// So: arm pseudo-DMA for a DATA IN that never comes (TCR = 0x01), then
+		// do what a blind pump loop does -- read the DACK window. If the review
+		// is right, those reads ACK the STATUS and MESSAGE bytes as if they were
+		// sector data, the transaction completes invisibly in microseconds, and
+		// the initiator is left polling a bus that is free.
+		//
+		// These assertions describe a DEFECT. They invert when the pmatch gate
+		// lands; that is the point of writing them down now.
+		reg_read(`R_RST, rv);            // clear any IRQ latched by seam5..8
+		s11_abort = 0; s11_ack_status = 0; s11_data_phase = 0; s11_watch = 1;
+
+		select_target(8'h08);
+		send_cmd_byte(8'h08);            // READ(6), LBA 0, 1 block, no media
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h01);
+		send_cmd_byte(8'h00);
+		reg_write(`W_ICR, 8'h00);
+		reg_write(`W_TCR, 8'h01);        // driver expects DATA IN (msg=0,cd=0,io=1)
+		pdma_arm;                        // MR.DMA_MODE + DMAinitRcv
+
+		wait_raw_req;
+		s11_phase_armed = dut.target[CD_DEV].target.phase;
+		bsr1 = 0;
+		reg_read(`R_BSR, bsr1);
+		ok("seam11 - premise: armed while the target sits in STATUS, not DATA IN",
+		   s11_phase_armed == 3'd4);
+		ok("seam11 - premise: BSR reports the phase mismatch",
+		   !bsr1[`BSR_PMATCH]);
+		ok("seam11 - DEFECT: DRQ asserts anyway (a real 5380 inhibits it)",
+		   bsr1[`BSR_DRQ] && dreq);
+		ok("seam11 - DEFECT: the completion IRQ never latched (mismatch predates the arm)",
+		   !bsr1[`BSR_IRQ]);
+
+		// The blind pump loop's first read.
+		dma_read_byte(dma_b);
+		repeat (8) @(posedge clk);
+		s11_phase_after1 = dut.target[CD_DEV].target.phase;
+		ok("seam11 - DEFECT: a DACK read returns the STATUS byte as sector data",
+		   dma_b == 8'h02);              // CHECK CONDITION
+		ok("seam11 - DEFECT: and ACKs it -- the target advances to MESSAGE",
+		   s11_phase_after1 == 3'd5);
+
+		// The second read.
+		dma_read_byte(dma_b);
+		begin : s11_free
+			integer g;
+			g = 0;
+			while (dut.scsi_bsy && g < 200) begin @(posedge clk); g = g + 1; end
+			s11_free_clks = g;
+		end
+		ok("seam11 - DEFECT: a second DACK read eats COMMAND COMPLETE",
+		   dma_b == 8'h00);
+		ok("seam11 - DEFECT: two blind reads end the whole transaction",
+		   !dut.scsi_bsy);
+		s11_watch = 0;
+
+		// The discriminators the hardware probes are being built to measure.
+		// Every one of them has to hold here, or the sticky probes would be
+		// looking for the wrong thing on the DE10.
+		ok("seam11 - the bus goes free in microseconds, no watchdog involved",
+		   !s11_abort && s11_free_clks < 200);
+		ok("seam11 - no DATA phase was ever entered", !s11_data_phase);
+		ok("seam11 - ACK was asserted while the target was in STATUS",
+		   s11_ack_status);
+		reg_read(`R_CSR, csr1);
+		ok("seam11 - CSR reads back 0x00 on the free bus, as the probes saw",
+		   csr1 == 8'h00);
+
+		// Finish the transaction whichever way the DUT behaved. Under today's
+		// RTL the two DACK reads already ended it; once the pmatch gate lands
+		// they will not ACK at all and status/message are still waiting on the
+		// register path. Leaving either case unfinished parks the target
+		// holding BSY and the NEXT selection fails silently -- the trap this
+		// bench has now been caught by three times.
+		reg_write(`W_MR, 8'h00);
+		if (dut.scsi_bsy) recv_byte(rv);
+		if (dut.scsi_bsy) recv_byte(rv);
+		begin : rel11
+			integer g;
+			g = 0;
+			while (dut.scsi_bsy && g < 4000) begin @(posedge clk); g = g + 1; end
+		end
+		ok("seam11 - bus released before the next test", !dut.scsi_bsy);
 
 		// =============== seam9: a fetch that never completes ================
 		// io_busy holds REQ low (scsi.v:239) AND resets the bus watchdog every

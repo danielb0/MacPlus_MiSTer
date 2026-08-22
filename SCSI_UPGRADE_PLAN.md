@@ -858,14 +858,105 @@ a mismatch already present at arm time still latches — which also gives the
 SCSI Manager the BSR bit 4 it expects after a short transfer. Per the method
 note above: run the discriminating measurement before trusting the fix.
 
+### Acting on the review: the mechanism is now proven in the model (2026-08-22)
+
+Three things came out of the review: audit the instrument, add discriminating
+probes, hold the fix until a measurement supports it. All three are done except
+the measurement, which needs the board.
+
+**1. The instrument was unreadable, and that is why the datum was "in tension".**
+The DACK-read row was a free-running **4-bit wrap counter that was never
+cleared**. A machine that boots off a SCSI hard disk performs thousands of DACK
+reads before it ever touches the CD, so at the wedge that field held
+(lifetime mod 16) — a number with no relationship to the two reads the mechanism
+predicts, and one that reads back `0` on roughly one boot in sixteen. "No DACK
+reads observed" was never evidence of anything. It is now an 8-bit *saturating*
+lifetime total (0 means genuinely none, and it cannot roll back to 0) plus a
+small counter re-armed by each DMA start, which is the count the mechanism
+actually predicts.
+
+**2. The mechanism reproduces in simulation, exactly as described** — `seam11`
+in `sim/tb_ncr5380_seam.v`. Arm pseudo-DMA with `TCR=0x01` (driver expects DATA
+IN) while the no-media READ has already CHECKed into STATUS, then do what a
+blind pump loop does. Every predicted value landed on the first run:
+
+* BSR reports the mismatch, and **DRQ asserts anyway** — a real 5380 inhibits it.
+* The first DACK read returns `0x02` (CHECK CONDITION) *as sector data* and ACKs
+  it; the target advances to MESSAGE.
+* The second eats COMMAND COMPLETE. The bus is free in under 200 clocks.
+* No watchdog fired, no DATA phase was ever entered, ACK pulsed while the target
+  sat in STATUS, and CSR reads back `0x00` on the free bus — the wedge capture.
+* `irq_latch` never set, because the mismatch predates the arm.
+
+So the RTL half of the reading is no longer a hypothesis. What remains open is
+the *driver* half: whether the Mac's pump loop actually issues those two DACK
+reads. Only the board can answer that.
+
+These assertions describe a defect and are labelled `DEFECT:` in the bench; they
+invert when the fix lands. Mutating the RTL with the proposed gate
+(`bsr_dmarq & bsr_pmatch`, `dma_ack & bsr_pmatch`) flips exactly those
+assertions and **leaves seam1–seam10 green**, which is the first evidence that
+the fix does not break the pseudo-DMA path that already works (`seam7`).
+
+**3. The four discriminating probes are built, and the deck now has a test.**
+`PDMA` and `PDM2` in `rtl/dbg_probes.sv`, decoded by `scripts/read_probes.tcl`,
+which prints a verdict line rather than leaving the capture open to
+re-interpretation:
+
+| field | question | invisible-completion predicts | missed-REQ predicts |
+|---|---|---|---|
+| `PDMA` DACK-since-arm | did the pump loop run? | **2** | 0 |
+| `PDMA` bus / io-stall fires | did anything time out? | **0 / 0** | at least 1 |
+| `PDMA` phase mask | where did the target go? | CMD, STATUS, MESSAGE, IDLE — **no DATA** | same, plus an abort |
+| `PDM2` DACK-in-mismatch | the smoking gun | **1** | 0 |
+| `PDM2` REQ-in-STATUS | separates the `io_busy` fallback | 1 | 0 if `req` was suppressed |
+| `PDM2` phase ring | the sequence, not just the set | IDLE, MESSAGE, STATUS, CMD | — |
+
+Everything except the lifetime DACK total is cleared on selection, so a capture
+describes the **last transaction** — the wedged one. The `PDM2` bits are cleared
+there too, which is itself tested: a sticky bit that can never clear reads the
+same on every capture and measures nothing.
+
+`sim/tb_dbg_probes.v` drives the deck from a real `ncr5380` + `scsi` pair over a
+modelled **CPU bus** (`cpuAddr`/`_cpuAS`/`_cpuRW`, SCSI at `0x58xxxx`, register
+in A6-A4, DACK on A9), replays the wedge and checks every packed field. It found
+a bug in itself immediately (a 25-bit address literal), and three mutations of
+the deck — a per-arm counter that never re-arms, an inverted DACK decode, a
+phase decode that confuses STATUS with DATA-OUT — are each caught by it.
+`sim/test_read_probes.tcl` runs the reader script itself against synthetic
+captures with the Quartus JTAG commands stubbed, because the reader
+re-implements the bit packing by hand in Tcl and a mis-slice there reads back as
+a plausible number. That is exactly how the first DACK row misled us.
+
+**Cost of the tap.** This does what §3 said the deck would not: one 12-bit
+`dbg_bus` output on `ncr5380` and one 2-bit `dbg_abort` on `scsi.v`. The abort
+bit is unavoidable — an abort and an ordinary completion are indistinguishable
+from outside the target, and separating them is the measurement that alone
+splits the two readings. The other eleven bits are raw state; every counter,
+epoch and sticky bit still lives in `dbg_probes.sv`. Both ports prune when the
+deck is not instantiated.
+
+**Next, in order:** build with `USE_SCSI_ISSP`, boot with no disc, wedge it, run
+`quartus_stp -t scripts/read_probes.tcl`, and read the verdict line. Then apply
+the fix — and resolve the `BSR=0x90` vs `0x80` question from that capture, since
+`PDM2` now reports whether the IRQ ever latched.
+
 ### Gates
 
-`disk 12/12, CD 35/35, seam 32/32` — run all three, disk first.
+`disk 12/12, CD 35/35, seam 45/45, probes 20/20, reader 9/9` — run all five,
+disk first. The last two cover the instrument, not the core:
+
+```
+C:/iverilog/bin/iverilog.exe -g2005-sv -o sim/out/tb_dbg_probes.vvp sim/tb_dbg_probes.v rtl/dbg_probes.sv rtl/ncr5380.sv rtl/scsi.v && C:/iverilog/bin/vvp.exe sim/out/tb_dbg_probes.vvp
+tclsh sim/test_read_probes.tcl
+```
 
 ### Debug scaffolding to remove when this closes
 
 OSD: `status[21:19]` CD Debug ladder, `status[24:22]` MODE SENSE bisect,
 `status[28:25]` vendor-command bisect, `status[16:15]` no-media sense bisect.
-RTL: `cd_dbg`, `cd_ms_mode`, `cd_vendor_dbg`, `cd_sense_mode`, `USE_SCSI_ISSP`
-and `rtl/dbg_probes.sv`. Keep `cd28`/`cd32` (under-serve regression guards),
+RTL: `cd_dbg`, `cd_ms_mode`, `cd_vendor_dbg`, `cd_sense_mode`, `USE_SCSI_ISSP`,
+`rtl/dbg_probes.sv`, and the debug taps it needs — `dbg_bus` on `ncr5380`,
+`dbg_abort` on `scsi.v`, `scsi_dbg` through `dataController_top`. Drop
+`sim/tb_dbg_probes.v` and `sim/test_read_probes.tcl` with them. Keep `cd28`/`cd32` (under-serve regression guards),
 `seam9`/`seam10`, and the seam bench itself.

@@ -63,7 +63,16 @@ module scsi
 	input   [7:0] sd_buff_addr,
 	input  [15:0] sd_buff_dout,
 	output [15:0] sd_buff_din,
-	input         sd_buff_wr
+	input         sd_buff_wr,
+
+	// Debug: {io-stall abort, bus-watchdog abort}. The one thing the JTAG probe
+	// deck cannot infer from the host bus or from the target's SCSI pins: an
+	// abort and an ordinary completion look identical from outside (both end in
+	// STATUS/MESSAGE or a released bus). Counting these is what separates "the
+	// driver missed REQ and a watchdog rescued the bus" from "the transaction
+	// completed invisibly" -- see SCSI_UPGRADE_PLAN.md 5.6. Unconnected in a
+	// build without the probe deck, where it costs nothing.
+	output  [1:0] dbg_abort
 );
 
 // SCSI device id
@@ -1232,6 +1241,11 @@ end
 reg [WDOG_LOG-1:0] wdog = 0;
 wire wdog_expired = &wdog;
 wire wdog_abort   = (wdog_expired && (phase != PHASE_IDLE)) || iostall_abort;
+
+// Debug export. wdog_abort already includes iostall_abort, so report the bus
+// watchdog on its own bit -- otherwise one io stall would look like two
+// different failures.
+assign dbg_abort = { iostall_abort, wdog_abort && !iostall_abort };
 
 always @(posedge clk) begin
 	if (any_rst || (phase == PHASE_IDLE) || stb_ack || stb_adv || io_busy || wdog_abort)

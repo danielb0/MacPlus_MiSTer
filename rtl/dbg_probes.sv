@@ -28,6 +28,9 @@
 //   PIO2  CD/disk io_rd vs io_ack counts + live handshake bits
 //   PRG0-3  ring of the last 8 SCSI register accesses -- the CONVERSATION,
 //           not just its last line
+//   PDMA  the discriminating word: DACK reads since the arm, watchdog fire
+//         counts, phase-visit mask -- see "the discriminators" below
+//   PDM2  sticky evidence bits + a ring of the last 8 target phases
 // ---------------------------------------------------------------------------
 module dbg_probes (
 	input  wire        clk,
@@ -51,8 +54,25 @@ module dbg_probes (
 	input  wire        cd_io_ack,
 	input  wire [31:0] cd_io_lba,
 	input  wire        d0_io_rd,
-	input  wire        d0_io_ack
+	input  wire        d0_io_ack,
+
+	// Raw 5380 state, tapped in rtl/ncr5380.sv. Bit assignments are defined
+	// there; all counting, epochs and sticky logic live here.
+	input  wire [11:0] scsi_dbg
 );
+
+	wire dbg_bsy    = scsi_dbg[0];
+	wire dbg_msg    = scsi_dbg[1];
+	wire dbg_cd     = scsi_dbg[2];
+	wire dbg_io     = scsi_dbg[3];
+	wire dbg_req    = scsi_dbg[4];
+	wire dbg_dma_en = scsi_dbg[5];
+	wire dbg_ack    = scsi_dbg[6];
+	wire dbg_pmatch = scsi_dbg[7];
+	wire dbg_irq    = scsi_dbg[8];
+	wire dbg_armed  = scsi_dbg[9];
+	wire dbg_wdog   = scsi_dbg[10];
+	wire dbg_iowdog = scsi_dbg[11];
 
 	// ---- bus-cycle edges --------------------------------------------------
 	reg as_d;
@@ -148,7 +168,7 @@ module dbg_probes (
 	// PSCS: [31:24]=rd_cnt [23:16]=rd_val [15:12]={dack,reg}
 	//       [11:8]=DACK-read count [7:0]=wr_cnt
 	reg [31:0] pscs_r;
-	always @(posedge clk) pscs_r <= {rd_cnt, rd_val, rd_sel, dack_rd_cnt, wr_cnt};
+	always @(posedge clk) pscs_r <= {rd_cnt, rd_val, rd_sel, dack_rd_nib, wr_cnt};
 
 	// PSCW: [31:24]=wr_cnt [23:16]=wr_val [15:12]={dack,reg} [7:0]=rd_cnt
 	reg [31:0] pscw_r;
@@ -173,12 +193,124 @@ module dbg_probes (
 			             rw_lat, dack_lat, reg_lat, 3'd0,
 			             rw_lat ? din_d[15:8] : dout_d[15:8]};
 
-	// Count DACK reads separately: a pseudo-DMA read consumes a byte with no
-	// register write at all, so it is invisible in PSCW. If the driver ever
-	// collected a status byte that way, this is the only thing that shows it.
-	reg [3:0] dack_rd_cnt;
-	always @(posedge clk)
-		if (as_rise & sel_lat & rw_lat & dack_lat) dack_rd_cnt <= dack_rd_cnt + 4'd1;
+	// ---- the discriminators (PDMA / PDM2) ---------------------------------
+	// The 2026-08-22 review left one measurement standing between two readings
+	// of the wedge, and the instrument that was supposed to answer it could
+	// not:
+	//
+	//   the OLD counter here was a free-running 4-bit wrap counter, never
+	//   cleared. A machine that boots off a SCSI hard disk does thousands of
+	//   DACK reads before it ever touches the CD, so at the wedge it holds
+	//   (total mod 16) -- a number with no relation to the two reads the
+	//   mechanism predicts, and one that reads back 0 once every sixteen
+	//   boots. "No DACK reads observed" was never evidence of anything.
+	//
+	// So: an 8-bit SATURATING lifetime total (0 now means genuinely none, and
+	// it cannot roll back to 0), plus a small counter re-armed on each DMA
+	// start, which is the count the mechanism actually predicts (2).
+	//
+	// The rest of this block answers the other three questions the review
+	// specified, all sticky and all cleared on selection so what is read back
+	// describes the LAST transaction -- the wedged one:
+	//   * did either watchdog fire? (predict no: the "missed REQ" reading
+	//     needs at least one, the "completed invisibly" reading needs none)
+	//   * which phases were visited? (predict CMD -> STATUS -> MESSAGE -> IDLE
+	//     and no DATA phase at all)
+	//   * was REQ ever high while the target sat in STATUS? (the io_busy
+	//     fallback has no identified setter, but its abort path erases
+	//     io_rd/io_wr, so it cannot be excluded after the fact any other way)
+	wire dack_rd = as_rise & sel_lat &  rw_lat & dack_lat;
+	// A write to reg 5 (Start DMA Send) or reg 7 (Start DMA Initiator Receive)
+	// is what sets dma_en; the wedge capture recorded reg 7.
+	wire dma_arm = as_rise & sel_lat & ~rw_lat & ~dack_lat &
+	               ((reg_lat == 3'd5) | (reg_lat == 3'd7));
+
+	// Target phase, decoded from the bus signals the initiator can see. Codes
+	// match rtl/scsi.v's PHASE_* so a capture reads against that table.
+	wire [2:0] phase_now =
+		!dbg_bsy                          ? 3'd0 :   // IDLE
+		( dbg_msg &  dbg_cd &  dbg_io)    ? 3'd5 :   // MESSAGE_OUT
+		( dbg_msg)                        ? 3'd7 :   // (no such phase)
+		( dbg_cd  &  dbg_io)              ? 3'd4 :   // STATUS_OUT
+		( dbg_cd)                         ? 3'd1 :   // CMD_IN
+		( dbg_io)                         ? 3'd2 :   // DATA_OUT (to initiator)
+		                                    3'd3;    // DATA_IN
+
+	reg  dbg_bsy_d = 0, dbg_wdog_d = 0, dbg_iowdog_d = 0;
+	reg  [2:0] phase_d = 3'd0;
+	wire new_sel = ~dbg_bsy_d & dbg_bsy;             // selection: the epoch mark
+
+	reg  [7:0] dack_rd_tot = 0;   // lifetime, saturating
+	reg  [3:0] dack_rd_arm = 0;   // since the last DMA start, saturating
+	reg  [3:0] arm_cnt     = 0;   // DMA starts since selection
+	reg  [3:0] wdog_cnt    = 0;   // bus-watchdog aborts since selection
+	reg  [3:0] iowdog_cnt  = 0;   // io-stall aborts since selection
+	reg  [5:0] phase_seen  = 0;   // bit n = phase code n visited since selection
+	reg [23:0] phase_ring  = 0;   // last 8 phases, newest in [2:0]
+
+	reg st_req_status   = 0;      // REQ high while in STATUS
+	reg st_req_msgout   = 0;      // REQ high while in MESSAGE
+	reg st_dack_mism    = 0;      // a DACK read happened during a phase mismatch
+	reg st_drq_mism     = 0;      // DRQ was asserted during a phase mismatch
+	reg st_ack_status   = 0;      // ACK pulsed while in STATUS (the byte moved)
+	reg st_irq_seen     = 0;      // the completion IRQ latched at some point
+
+	always @(posedge clk) begin
+		dbg_bsy_d    <= dbg_bsy;
+		dbg_wdog_d   <= dbg_wdog;
+		dbg_iowdog_d <= dbg_iowdog;
+		phase_d      <= phase_now;
+
+		// Lifetime DACK reads: saturate rather than wrap.
+		if (dack_rd && ~&dack_rd_tot) dack_rd_tot <= dack_rd_tot + 8'd1;
+
+		// Per-arm DACK reads. Cleared by the arming write itself, so a capture
+		// answers "how many DACK reads since the driver said go", not "ever".
+		if (dma_arm)                       dack_rd_arm <= 4'd0;
+		else if (dack_rd && ~&dack_rd_arm) dack_rd_arm <= dack_rd_arm + 4'd1;
+
+		// Everything below is per-transaction.
+		if (new_sel) begin
+			arm_cnt       <= 4'd0;
+			wdog_cnt      <= 4'd0;
+			iowdog_cnt    <= 4'd0;
+			phase_seen    <= 6'd0;
+			st_req_status <= 1'b0;
+			st_req_msgout <= 1'b0;
+			st_dack_mism  <= 1'b0;
+			st_drq_mism   <= 1'b0;
+			st_ack_status <= 1'b0;
+			st_irq_seen   <= 1'b0;
+		end else begin
+			if (dma_arm                     && ~&arm_cnt)    arm_cnt    <= arm_cnt    + 4'd1;
+			if (~dbg_wdog_d   & dbg_wdog    && ~&wdog_cnt)   wdog_cnt   <= wdog_cnt   + 4'd1;
+			if (~dbg_iowdog_d & dbg_iowdog  && ~&iowdog_cnt) iowdog_cnt <= iowdog_cnt + 4'd1;
+			if (phase_now < 3'd6) phase_seen[phase_now] <= 1'b1;
+
+			if (dbg_req && (phase_now == 3'd4)) st_req_status <= 1'b1;
+			if (dbg_req && (phase_now == 3'd5)) st_req_msgout <= 1'b1;
+			if (dbg_ack && (phase_now == 3'd4)) st_ack_status <= 1'b1;
+			if (dack_rd &&  !dbg_pmatch)                    st_dack_mism <= 1'b1;
+			if (dbg_req && dbg_dma_en && !dbg_pmatch)       st_drq_mism  <= 1'b1;
+			if (dbg_irq)                                    st_irq_seen  <= 1'b1;
+		end
+
+		// Phase ring: one entry per phase CHANGE, so eight entries cover a whole
+		// transaction instead of eight clocks of one phase.
+		if (phase_now != phase_d) phase_ring <= {phase_ring[20:0], phase_now};
+	end
+
+	// PSCS keeps a nibble of the lifetime total for continuity; 15 means ">=15".
+	wire [3:0] dack_rd_nib = (dack_rd_tot > 8'd15) ? 4'd15 : dack_rd_tot[3:0];
+
+	reg [31:0] pdma_r, pdm2_r;
+	always @(posedge clk) begin
+		pdma_r <= {dack_rd_tot, dack_rd_arm, arm_cnt, wdog_cnt, iowdog_cnt,
+		           phase_seen, st_req_status, st_req_msgout};
+		pdm2_r <= {st_dack_mism, st_drq_mism, st_ack_status, st_irq_seen,
+		           dbg_bsy, dbg_req, dbg_dma_en, dbg_pmatch,
+		           phase_ring};
+	end
 
 	// ---- PIOS / PIO2: is an HPS sector fetch stalled? ----------------------
 	// rd_stuck saturates while cd_io_rd stays continuously asserted. A
@@ -271,5 +403,15 @@ module dbg_probes (
 		.instance_id ("PIO2"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
 	) cp_pio2 (.probe(pio2_r), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	altsource_probe #(
+		.instance_id ("PDMA"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_pdma (.probe(pdma_r), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	altsource_probe #(
+		.instance_id ("PDM2"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_pdm2 (.probe(pdm2_r), .source(), .source_clk(clk), .source_ena(1'b1));
 
 endmodule

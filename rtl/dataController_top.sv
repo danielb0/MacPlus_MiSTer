@@ -18,6 +18,10 @@ module dataController_top(
 
 	// 68000 CPU memory interface:
 	input [15:0] cpuDataIn,
+	// Raw 5380 state for the JTAG probe deck (rtl/dbg_probes.sv). Unused, and
+	// pruned, in a build without the deck.
+	output [11:0] scsi_dbg,
+
 	input [3:0] cpuAddrRegHi, // A12-A9
 	input [2:0] cpuAddrRegMid, // A6-A4
 	input [1:0] cpuAddrRegLo, // A2-A1
@@ -228,6 +232,7 @@ module dataController_top(
 		.ior(!_cpuUDS),
 		.iow(!_cpuLDS),
 		.dack(cpuAddrRegHi[0]),   // A9
+		.dbg_bus(scsi_dbg),
 		.wdata(cpuDataIn[15:8]),
 		.rdata(scsiDataOut),
 
