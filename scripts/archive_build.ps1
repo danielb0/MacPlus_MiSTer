@@ -14,17 +14,38 @@ $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
     if ($Label -notmatch '^[A-Za-z0-9._-]+$') { throw "label must be alphanumeric/._- : '$Label'" }
-    $sha = (git rev-parse --short=8 HEAD).Trim()
-
-    # The tag compiled into the bitstream must name the commit we are archiving
-    # it as, or the archive filename and PBLD will disagree on the board.
+    # The bitstream is named by the tag COMPILED INTO IT, not by HEAD -- the
+    # filename and what PBLD reports on the board must never disagree.
     $tagLine = Select-String -Path 'rtl/build_tag.v' -Pattern "assign tag = 32'h([0-9a-f]{8})"
-    if (-not $tagLine) { throw "cannot read the tag from rtl/build_tag.v" }
-    $tag = $tagLine.Matches[0].Groups[1].Value
-    if ($tag -ne $sha) {
-        throw ("rtl/build_tag.v says $tag but HEAD is $sha. The build carries the " +
-               "wrong tag; re-stamp and recompile rather than archiving a bitstream " +
-               "that misnames itself.")
+    if (-not $tagLine) { throw 'cannot read the tag from rtl/build_tag.v' }
+    $sha = $tagLine.Matches[0].Groups[1].Value
+    if ($sha -eq '00000000') {
+        throw 'rtl/build_tag.v is unstamped. Run scripts/stamp_build_tag.ps1 and recompile.'
+    }
+
+    # What matters is whether the DESIGN moved since that build, not whether any
+    # commit did. Doc-only commits after a compile are normal and harmless; an
+    # RTL commit means the bitstream no longer represents the tree.
+    $design = @('rtl','sys','MacPlus.sv','MacPlus.qsf','files.qip')
+    $moved  = git diff --name-only $sha HEAD -- $design 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "cannot diff $sha against HEAD; is it a valid commit?" }
+    if ($moved) {
+        throw ("design files changed since the build tagged ${sha}:" + [Environment]::NewLine +
+               ($moved -join [Environment]::NewLine) + [Environment]::NewLine +
+               'Re-stamp and recompile rather than archiving a stale bitstream.')
+    }
+    $head = (git rev-parse --short=8 HEAD).Trim()
+    if ($head -ne $sha) {
+        Write-Host "note: HEAD is $head; the build is $sha, design unchanged between them."
+    }
+
+    # Uncommitted design edits are the other way to build something untracked.
+    $dirty = git status --porcelain -- $design
+    # build_tag.v is stamped before every compile and is EXPECTED dirty.
+    $dirty = $dirty | Where-Object { $_ -notmatch 'rtl/build_tag\.v' }
+    if ($dirty) {
+        Write-Warning 'Design files are dirty; the archive may not match any commit:'
+        $dirty | ForEach-Object { Write-Warning "  $_" }
     }
 
     foreach ($ext in 'rbf','sof') {
