@@ -1,12 +1,16 @@
-// build_tag.v -- REGENERATED BEFORE EVERY COMPILE, do not hand-edit.
-// Written by scripts/stamp_build_tag.ps1 from: git rev-parse --short=8 HEAD
+// build_tag.v -- REGENERATED BEFORE EVERY COMPILE by scripts/stamp_build_tag.ps1.
 //
-// Why this exists: on 2026-08-22 two different RTL fixes produced byte-for-byte
-// identical probe captures, and there was no way to tell from the board whether
-// the second build had actually been loaded -- the .rbf is loaded from the build
-// directory, so which bitstream is running depends on when the core was last
-// loaded, not on when it was compiled. A capture must be able to name its own
-// bitstream. Read back on the PBLD probe and printed by read_probes.tcl.
+// The COMMITTED value is deliberately 0, meaning "unstamped". Do not commit a
+// real SHA here: the file is stamped from HEAD just before a compile, so any
+// SHA committed into it necessarily names the PREVIOUS commit. That happened
+// twice -- the file read ac38fc96 while HEAD was 3426398e -- and a capture that
+// misnames its own build is worse than no tag at all.
+//
+// With 0 committed, forgetting to stamp is reported by scripts/read_probes.tcl
+// as "bitstream=UNSTAMPED" rather than as a confident, wrong SHA, and a stray
+// `git add -A` cannot poison the tag.
+//
+// Read back on the PBLD probe. See SCSI_UPGRADE_PLAN.md.
 module build_tag(output [31:0] tag);
-	assign tag = 32'hbde27691;
+	assign tag = 32'h00000000;
 endmodule
