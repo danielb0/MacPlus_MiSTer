@@ -5,6 +5,10 @@
 # committed. The tag then names the commit whose RTL is being built, and
 # build_tag.v itself is left dirty in the tree -- that is expected and correct.
 #
+# The file is COMMITTED as 0 ("unstamped") on purpose, so a missed stamp reads
+# back as UNSTAMPED instead of as the previous commit's SHA. Never commit the
+# stamped value -- a stray 'git add -A' has poisoned it before.
+#
 # It exists because on 2026-08-22 the tag was hand-stamped, then committed, and
 # so ended up naming the PREVIOUS commit: the file said ac38fc96 while HEAD was
 # 3426398e. A capture that misnames its own build is worse than no tag at all.
