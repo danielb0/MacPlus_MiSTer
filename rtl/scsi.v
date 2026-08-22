@@ -37,6 +37,7 @@ module scsi
 	// the state that boots names the page.
 	input [2:0] cd_ms_mode,
 	input [3:0] cd_vendor_dbg,
+	input [1:0] cd_sense_mode,
 	input 	  sel,
 	input 	  atn, // initiator requests to send a message
 	output 	  bsy, // target holds bus
@@ -1045,6 +1046,20 @@ wire  cd_vend_supp =
 // dispatch falls through to STATUS_OUT -- a complete, zero-length GOOD.
 wire  cd_vend_unk_ok = (cd_vendor_dbg == 4'd9);
 wire  cmd_ok_cd_bis  = cd_vend_unk_ok ? 1'b1 : (cmd_ok_cd_sel && !cd_vend_supp);
+
+// No-media sense bisect (status[16:15]). Our answer to a command against an
+// empty drive is SK_NOT_READY + vendor ASC 0xB0, from MAME return_no_cd.
+// MacOS demonstrably BRANCHES on this value -- MAME records that 0x3A makes
+// it hammer the user to format the disc -- and the LC, whose driver copes,
+// runs a later System than the 7.1.2 seen wedging here. So the code is a real
+// variable, and a small enough space to bisect rather than guess at.
+//   0 = B0 NOT READY (shipping)   1 = 3A NOT READY (medium not present)
+//   2 = 28 UNIT ATTENTION (medium may have changed)
+//   3 = 04 NOT READY (LUN becoming ready)
+wire [3:0] cd_nomedia_key = (cd_sense_mode == 2'd2) ? 4'h6 : 4'h2;
+wire [7:0] cd_nomedia_asc = (cd_sense_mode == 2'd1) ? 8'h3a :
+                            (cd_sense_mode == 2'd2) ? 8'h28 :
+                            (cd_sense_mode == 2'd3) ? 8'h04 : 8'hb0;
 wire  cmd_ok = (CDROM != 0) ? cmd_ok_cd_bis : cmd_ok_hd;
 
 // Media-dependent commands fail with the AppleCD no-disc sense while no image
@@ -1103,8 +1118,8 @@ always @(posedge clk) begin
 			sense_key <= 4'h5;  // ILLEGAL REQUEST
 			sense_asc <= 8'h20; // invalid command operation code
 		end else if (cd_no_media) begin
-			sense_key <= 4'h2;  // NOT READY
-			sense_asc <= 8'hb0; // AppleCD vendor "no disc" (NOT 0x3A -- see above)
+			sense_key <= cd_nomedia_key;
+			sense_asc <= cd_nomedia_asc;  // selectable; see cd_sense_mode
 		end else if (cd_hdr_msf_rej) begin
 			sense_key <= 4'h5;  // ILLEGAL REQUEST
 			sense_asc <= 8'h24; // invalid field in CDB

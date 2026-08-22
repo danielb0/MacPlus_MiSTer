@@ -82,7 +82,7 @@ module tb_ncr5380_seam;
 		.io_lba(io_lba), .io_rd(io_rd), .io_wr(io_wr), .io_ack(io_ack),
 		.sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout),
 		.sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr),
-		.cd_enable(cd_enable), .cd_dbg(cd_dbg), .cd_ms_mode(cd_ms_mode), .cd_vendor_dbg(4'd0)
+		.cd_enable(cd_enable), .cd_dbg(cd_dbg), .cd_ms_mode(cd_ms_mode), .cd_vendor_dbg(4'd0), .cd_sense_mode(2'd0)
 	);
 
 	// ---- minimal HPS sector server ---------------------------------------

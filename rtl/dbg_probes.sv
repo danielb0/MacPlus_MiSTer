@@ -15,7 +15,7 @@
 // FPGA-ONLY: instantiated from MacPlus.sv behind `USE_SCSI_ISSP`, so the
 // altsource_probe primitive never reaches a simulator.
 //
-// Probe deck (8 instances -- MacLC notes a ~20 hub-node ceiling above which
+// Probe deck (12 instances -- MacLC notes a ~20 hub-node ceiling above which
 // the name table reads back corrupted, so there is room but not much):
 //
 //   PIFA  instruction-fetch sampler: WHERE is the CPU?
@@ -26,6 +26,8 @@
 //   PODR  last four bytes written to the data register -- the CDB tail
 //   PIOS  {rd_stuck, cd_io_lba} -- is an HPS fetch stalled, and for which LBA?
 //   PIO2  CD/disk io_rd vs io_ack counts + live handshake bits
+//   PRG0-3  ring of the last 8 SCSI register accesses -- the CONVERSATION,
+//           not just its last line
 // ---------------------------------------------------------------------------
 module dbg_probes (
 	input  wire        clk,
@@ -151,6 +153,18 @@ module dbg_probes (
 	reg [31:0] pscw_r;
 	always @(posedge clk) pscw_r <= {wr_cnt, wr_val, wr_sel, 4'd0, rd_cnt};
 
+	// ---- PRG0..PRG3: a ring of the last 8 SCSI register accesses -----------
+	// PSCS/PSCW hold only the LAST access, which shows the poll but not the
+	// conversation that led to it. This keeps the last eight, newest first, so
+	// the CDB handover, the arming writes and any status read can be read back
+	// as a sequence. Each entry is {rw, dack, reg[2:0], 3'b0, value[7:0]}.
+	reg [127:0] acc_hist;
+	always @(posedge clk)
+		if (as_rise & sel_lat)
+			acc_hist <= {acc_hist[111:0],
+			             rw_lat, dack_lat, reg_lat, 3'd0,
+			             rw_lat ? din_d[15:8] : dout_d[15:8]};
+
 	// ---- PIOS / PIO2: is an HPS sector fetch stalled? ----------------------
 	// rd_stuck saturates while cd_io_rd stays continuously asserted. A
 	// saturated value with rd_cnt > ack_cnt is a fetch the HPS never answered,
@@ -215,6 +229,23 @@ module dbg_probes (
 		.instance_id ("PIFD"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
 	) cp_pifd (.probe(pifd_r), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	altsource_probe #(
+		.instance_id ("PRG0"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_prg0 (.probe(acc_hist[31:0]),   .source(), .source_clk(clk), .source_ena(1'b1));
+	altsource_probe #(
+		.instance_id ("PRG1"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_prg1 (.probe(acc_hist[63:32]),  .source(), .source_clk(clk), .source_ena(1'b1));
+	altsource_probe #(
+		.instance_id ("PRG2"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_prg2 (.probe(acc_hist[95:64]),  .source(), .source_clk(clk), .source_ena(1'b1));
+	altsource_probe #(
+		.instance_id ("PRG3"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_prg3 (.probe(acc_hist[127:96]), .source(), .source_clk(clk), .source_ena(1'b1));
 
 	altsource_probe #(
 		.instance_id ("PIOS"), .probe_width (32), .source_width (1),

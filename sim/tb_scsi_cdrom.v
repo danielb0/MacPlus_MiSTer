@@ -55,7 +55,8 @@ module tb_scsi_cdrom;
    reg         sd_buff_wr   = 1'b0;
 
    reg  [2:0]  cd_ms_mode   = 3'd0;   // MODE SENSE content bisect
-   reg  [3:0]  cd_vendor_dbg = 4'd0;  // Apple vendor-command bisect
+   reg  [3:0]  cd_vendor_dbg = 4'd0;
+   reg  [1:0]  cd_sense_mode = 2'd0;  // no-media sense bisect  // Apple vendor-command bisect
 
    localparam [2:0] TARGET_ID = 3'd3;   // AppleCD SC factory default
 
@@ -70,6 +71,7 @@ module tb_scsi_cdrom;
       .cd_dbg(3'd0),
       .cd_ms_mode(cd_ms_mode),
       .cd_vendor_dbg(cd_vendor_dbg),
+      .cd_sense_mode(cd_sense_mode),
       .sel(sel),
       .atn(atn),
       .bsy(bsy),
@@ -1465,6 +1467,57 @@ module tb_scsi_cdrom;
          ok = (bad == 0);
       end
       report(ok, "cd34 - state 9 completes an unimplemented opcode with GOOD");
+
+      // --- cd35: the no-media sense selector --------------------------------
+      // Prove the instrument before it ships. Each state must actually change
+      // the sense the target reports for a command issued against an empty
+      // drive -- otherwise a hardware bisect over these states means nothing.
+      begin : cd35
+         integer bad;
+         bad = 0;
+
+         // Unmount: img_blocks = 0 with a mount strobe is "no media".
+         @(posedge clk); #1;
+         img_blocks  = 32'd0;
+         img_mounted = 1'b1;
+         @(posedge clk); #1;
+         img_mounted = 1'b0;
+         repeat (600) begin @(posedge clk); #1; end
+
+         cd_sense_mode = 2'd0;
+         simple_cmd6(8'h00,0,0,0,0,0);        // TEST UNIT READY -> CHECK
+         get_sense;
+         if ((buf_in[2] !== 8'h02) || (buf_in[12] !== 8'hb0)) begin
+            $display("       mode0: key %h asc %h, expected 02/B0",
+                     buf_in[2], buf_in[12]); bad = bad + 1; end
+
+         cd_sense_mode = 2'd1;
+         simple_cmd6(8'h00,0,0,0,0,0);
+         get_sense;
+         if ((buf_in[2] !== 8'h02) || (buf_in[12] !== 8'h3a)) begin
+            $display("       mode1: key %h asc %h, expected 02/3A",
+                     buf_in[2], buf_in[12]); bad = bad + 1; end
+
+         cd_sense_mode = 2'd2;
+         simple_cmd6(8'h00,0,0,0,0,0);
+         get_sense;
+         if ((buf_in[2] !== 8'h06) || (buf_in[12] !== 8'h28)) begin
+            $display("       mode2: key %h asc %h, expected 06/28",
+                     buf_in[2], buf_in[12]); bad = bad + 1; end
+
+         cd_sense_mode = 2'd3;
+         simple_cmd6(8'h00,0,0,0,0,0);
+         get_sense;
+         if ((buf_in[2] !== 8'h02) || (buf_in[12] !== 8'h04)) begin
+            $display("       mode3: key %h asc %h, expected 02/04",
+                     buf_in[2], buf_in[12]); bad = bad + 1; end
+
+         cd_sense_mode = 2'd0;
+         mount_image(IMG_BLOCKS);             // restore for any later test
+         ok = (bad == 0);
+      end
+      report(ok, "cd35 - no-media sense selector changes key/ASC per state");
+
 
 
       $display("");

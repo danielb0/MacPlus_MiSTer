@@ -62,6 +62,7 @@ module tb_scsi_target;
       .cd_dbg(3'd0),
       .cd_ms_mode(3'd0),
       .cd_vendor_dbg(4'd0),
+      .cd_sense_mode(2'd0),
       .sel(sel),
       .atn(atn),
       .bsy(bsy),

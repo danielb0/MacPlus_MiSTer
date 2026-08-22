@@ -80,6 +80,7 @@ module ncr5380
 	input        [2:0] cd_dbg,
 	input        [2:0] cd_ms_mode,
 	input        [3:0] cd_vendor_dbg
+	,input       [1:0] cd_sense_mode
 );
 	parameter DEVS = 2;
 	// Index of the CD-ROM target within the DEVS arrays, or DEVS for "none".
@@ -388,6 +389,7 @@ module ncr5380
 				.cd_dbg   ( cd_dbg ),
 				.cd_ms_mode( cd_ms_mode ),
 				.cd_vendor_dbg( cd_vendor_dbg ),
+				.cd_sense_mode( cd_sense_mode ),
 				.sel    ( scsi_sel ),
 				.atn    ( scsi_atn ),
 

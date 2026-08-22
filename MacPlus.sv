@@ -74,6 +74,7 @@ localparam CONF_STR = {
 	"OJL,CD Debug,Off,INQ,+TUR,+SENSE,+CAP,+MODE,+READ,All;",
 	"OMO,CD MODE SENSE,Full,Hdr,Hdr+desc,+pg shell,-p30 body,-p0E body,-p2A body,Full;",
 	"OPS,CD Vendor Cmd,Off,-C1 toc,-C2 subq,-CC astat,-CE actl,-42 subch,-43 toc10,-44 hdr,-All Apple,Unk=GOOD;",
+	"OFG,CD NoMedia Sense,B0 NotRdy,3A NotRdy,28 UnitAtt,04 NotRdy;",
 	"-;",
 	"O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
@@ -203,6 +204,8 @@ wire [2:0] cd_dbg = status[21:19];
 wire [2:0] cd_ms_mode = status[24:22];
 // Apple vendor-command bisect; see cmd_ok_cd_bis in rtl/scsi.v.
 wire [3:0] cd_vendor_dbg = status[28:25];
+// No-media sense bisect; see cd_nomedia_asc in rtl/scsi.v.
+wire [1:0] cd_sense_mode = status[16:15];
 // sd_buff_din[2]/[3] driven below by each drive's floppy_sd_writer (Phase 4) -
 // only ever consulted by hps_io during a sd_wr session for that slot, which
 // only the writer ever asserts, so no mux against the loader is needed here.
@@ -709,6 +712,7 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.cd_dbg(cd_dbg),
 	.cd_ms_mode(cd_ms_mode),
 	.cd_vendor_dbg(cd_vendor_dbg),
+	.cd_sense_mode(cd_sense_mode),
 	.io_lba(scsi_sd_lba),
 	.io_rd(scsi_sd_rd),
 	.io_wr(scsi_sd_wr),

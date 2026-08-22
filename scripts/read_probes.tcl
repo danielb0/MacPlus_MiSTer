@@ -130,6 +130,28 @@ for {set n 0} {$n < $samples} {incr n} {
 	puts [format "  PIFD  %04X: %04X                  <- instruction word there" $fd_a $fd_o]
 	puts [format "  PIOS  cd fetch stuck=%-3d lba=%d" [expr {($pios >> 24) & 0xff}] [expr {$pios & 0xffffff}]]
 	puts [format "  PIO2  cd rd=%d ack=%d  disk0 rd=%d   live: cd_rd=%d cd_wr=%d cd_ack=%d d0_rd=%d d0_ack=%d" [expr {($pio2 >> 24) & 0xff}] [expr {($pio2 >> 16) & 0xff}] [expr {($pio2 >> 8) & 0xff}] [expr {($pio2 >> 4) & 1}] [expr {($pio2 >> 3) & 1}] [expr {($pio2 >> 2) & 1}] [expr {($pio2 >> 1) & 1}] [expr {$pio2 & 1}]]
+	# The access ring, newest first. Entry = {rw,dack,reg,3'b0,val}.
+	puts "  PRG   recent SCSI register accesses (newest first):"
+	foreach pr {PRG0 PRG1 PRG2 PRG3} {
+		set w [b2i [rd $pr]]
+		foreach half {0 16} {
+			set e [expr {($w >> $half) & 0xffff}]
+			if {$e == 0} { continue }
+			set erw [expr {($e >> 15) & 1}]
+			set edk [expr {($e >> 14) & 1}]
+			set erg [expr {($e >> 11) & 7}]
+			set ev  [expr { $e & 0xff}]
+			if {$erw} {
+				set nm [lindex $rdname $erg]
+				set dir "rd"
+			} else {
+				set nm [lindex $wrname $erg]
+				set dir "wr"
+			}
+			if {$edk} { append nm " (DACK)" }
+			puts [format "          %s %-13s %02X" $dir $nm $ev]
+		}
+	}
 	puts ""
 
 	if {$n + 1 < $samples} { after [expr {int($delay * 1000)}] }
