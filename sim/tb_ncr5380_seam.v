@@ -193,6 +193,42 @@ module tb_ncr5380_seam;
 		end
 	endtask
 
+	// ---- pseudo-DMA (DACK) path ------------------------------------------
+	// THE PATH THE REAL DRIVER USES, and the one nothing has ever tested. The
+	// hardware probes caught the Mac wedged here: last register write was
+	// DMAinitRcv, then it polled forever. Everything above this point drives
+	// the plain register path instead, which is why that hole survived.
+	task pdma_arm;
+		begin
+			reg_write(`W_MR, 8'h02);      // MR.DMA_MODE
+			reg_write(`W_IDMAR, 8'h00);   // Start DMA Initiator Receive
+		end
+	endtask
+
+	// Read one byte through the DACK window (not the register file).
+	task dma_read_byte(output [7:0] b);
+		begin
+			@(negedge clk); bus_cs = 1; dack = 1; ior = 1;
+			@(negedge clk);
+			b = rdata;
+			@(negedge clk); ior = 0; dack = 0; bus_cs = 0;
+			@(negedge clk);
+		end
+	endtask
+
+	// Wait for BSR.DRQ, bounded. Returns 1 if it ever asserted.
+	task wait_drq(output got);
+		integer guard;
+		begin
+			got = 0; guard = 0;
+			while (!got && guard < 3000) begin
+				reg_read(`R_BSR, rv);
+				if (rv[`BSR_DRQ]) got = 1;
+				guard = guard + 1;
+			end
+		end
+	endtask
+
 	// Select a target by ID bit
 	task select_target(input [7:0] id_bit);
 		integer guard;
@@ -214,6 +250,10 @@ module tb_ncr5380_seam;
 	reg [7:0] inq [0:5];
 	reg [7:0] stat, msg;
 	reg seen_eodma_low;
+	integer dma_bytes;
+	reg [7:0] dma_b, dma_first;
+	reg drq_seen;
+	reg saw_data_phase;
 	integer settle_iters;
 
 	initial begin
@@ -333,6 +373,77 @@ module tb_ncr5380_seam;
 		reg_read(`R_RST, rv);
 		reg_read(`R_BSR, bsr2);
 		ok("seam6 - reg-7 read clears the IRQ latch", !bsr2[`BSR_IRQ]);
+
+		// Consume status + message. Leaving them unread parks the target in
+		// STATUS still asserting BSY, and the NEXT select_target then fails
+		// silently -- which is exactly how seam7 came to arm pseudo-DMA
+		// against a free bus and report a DRQ failure that was not real.
+		reg_write(`W_MR, 8'h00);         // leave DMA mode
+		recv_byte(rv);
+		recv_byte(rv);
+		begin : rel
+			integer g;
+			g = 0;
+			while (dut.scsi_bsy && g < 2000) begin @(posedge clk); g = g + 1; end
+		end
+		ok("seam6 - bus released after the transaction", !dut.scsi_bsy);
+
+		// =============== seam7: pseudo-DMA actually delivers ================
+		// If the DACK path cannot deliver a normal INQUIRY, that alone explains
+		// a driver that arms DMA and polls forever -- so test the GOOD case
+		// first, before drawing any conclusion from the failing one.
+		select_target(8'h08);
+		send_cmd_byte(8'h12);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h20);
+		send_cmd_byte(8'h00);
+		reg_write(`W_ICR, 8'h00);
+		pdma_arm;
+
+		dma_bytes = 0;
+		wait_drq(drq_seen);
+		ok("seam7 - BSR.DRQ asserts once pseudo-DMA is armed", drq_seen);
+		while (drq_seen && !dut.scsi_cd && dut.scsi_io && dma_bytes < 100) begin
+			dma_read_byte(dma_b);
+			if (dma_bytes == 0) dma_first = dma_b;
+			dma_bytes = dma_bytes + 1;
+			wait_drq(drq_seen);
+		end
+		ok("seam7 - pseudo-DMA delivered the full 32-byte INQUIRY",
+		   dma_bytes == 32);
+		ok("seam7 - first pseudo-DMA byte is the real payload (05)",
+		   dma_first == 8'h05);
+		recv_byte(rv);   // status
+		recv_byte(rv);   // message
+
+		// =============== seam8: a CHECKed command serves no data ============
+		// No image is mounted in this bench, so a CD READ CHECKs with the
+		// no-media sense and never enters a data phase. An initiator that has
+		// already armed pseudo-DMA then polls DRQ forever -- exactly the shape
+		// the hardware probes recorded. This documents the mechanism; it does
+		// not assert that the target is wrong to CHECK.
+		select_target(8'h08);
+		send_cmd_byte(8'h08);            // READ(6)
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h01);            // one block
+		send_cmd_byte(8'h00);
+		reg_write(`W_ICR, 8'h00);
+		pdma_arm;
+
+		// NOTE: BSR.DRQ is scsi_req & dma_en with no phase qualification, so it
+		// also asserts in STATUS. "Did DRQ assert" is therefore the wrong
+		// question; "did a DATA phase ever happen" is the right one.
+		saw_data_phase = 0;
+		for (i = 0; i < 400; i = i + 1) begin
+			if (!dut.scsi_cd && dut.scsi_io && dut.scsi_req) saw_data_phase = 1;
+			@(posedge clk);
+		end
+		ok("seam8 - a no-media READ never enters a data phase", !saw_data_phase);
+		ok("seam8 - it lands in STATUS instead", dut.scsi_cd && dut.scsi_io);
 
 		$display("");
 		$display("SEAM: %0d of %0d failing", fails, tests);
