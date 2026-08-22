@@ -409,6 +409,14 @@ module dbg_probes (
 		           3'd0, cd_io_rd, cd_io_wr, cd_io_ack, d0_io_rd, d0_io_ack};
 	end
 
+	// ---- which bitstream is this? -----------------------------------------
+	// rtl/build_tag.v is regenerated from the git SHA before every compile, so
+	// a capture names the build it came from. Two RTL fixes once produced
+	// identical captures and there was no way to tell whether the second had
+	// actually been loaded onto the board.
+	wire [31:0] build_tag_w;
+	build_tag build_tag_inst(.tag(build_tag_w));
+
 	// ---- probe instances ---------------------------------------------------
 	altsource_probe #(
 		.instance_id ("PIFA"), .probe_width (32), .source_width (1),
@@ -481,5 +489,10 @@ module dbg_probes (
 		.instance_id ("PDM3"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
 	) cp_pdm3 (.probe(pdm3_r), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	altsource_probe #(
+		.instance_id ("PBLD"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_pbld (.probe(build_tag_w), .source(), .source_clk(clk), .source_ena(1'b1));
 
 endmodule

@@ -114,7 +114,8 @@ for {set n 0} {$n < $samples} {incr n} {
 	return $n
 }
 
-	puts [format "sample %d" $n]
+	set pbld [b2i [rd PBLD]]
+	puts [format "sample %d   bitstream=%08X" $n $pbld]
 	puts [format "  PIFA  fetch#%3d  PC=%06X      <- where the CPU is" $if_cnt $if_addr]
 	puts [format "  PACT  bus cycles %d" $pact]
 	puts [format "  PSCS  last READ  reg=%-12s val=%02X  (reads:%d)" \

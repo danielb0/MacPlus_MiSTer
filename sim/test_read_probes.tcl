@@ -48,7 +48,7 @@ proc read_probe_data {args} {
 	return [tobin 0]
 }
 
-set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PDMA PDM2 PDM3}
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PDMA PDM2 PDM3 PBLD}
 
 # ---- the capture the invisible-completion reading predicts -----------------
 # Field positions match the PDMA packing in rtl/dbg_probes.sv:
@@ -82,8 +82,11 @@ proc capture {} {
 # one DACK landed outside a data phase, no DACK writes.
 set probeval(PDM3) [expr {(0 << 24) | (1 << 20) | (1 << 16) | (4 << 13) |                           (0 << 12) | (4 << 9) | (1 << 8) | (1 << 7) | (0 << 6)}]
 
+set probeval(PBLD) 0x13cdd790
+
 set out [capture]
 
+ok "reader names the bitstream the capture came from"    [string match "*bitstream=13CDD790*" $out]
 ok "reader names the phase the driver armed in"    [string match "*at the DMA arm: phase=STATUS TCR=1 pmatch=0*" $out]
 ok "reader names the phase of the first DACK after the arm"    [string match "*first DACK access after the arm was in phase STATUS*" $out]
 ok "reader flags the DACK that landed outside a data phase"    [string match "*landed OUTSIDE a data phase*" $out]
