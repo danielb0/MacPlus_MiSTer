@@ -86,6 +86,11 @@ module ncr5380
 	// The disks keep indices 0..n at IDs 6,5,... exactly as before; the CD takes
 	// the last index at ID 3.
 	parameter CD_DEV = DEVS;
+	// Target bus-watchdog period, forwarded to scsi.v. Benches shorten it so a
+	// timeout is reachable in simulation; synthesis keeps the ~129 ms default.
+	parameter WDOG_LOG = 22;
+	// Stall timeout for an HPS fetch that never completes; see scsi.v.
+	parameter IOWDOG_LOG = 24;
 
 	assign dreq = scsi_req & dma_en;
 
@@ -360,7 +365,7 @@ module ncr5380
 			// found before the CD, while a bootable CD still works when no disk
 			// is bootable. ID 3 is also the AppleCD SC factory default.
 			scsi #(.ID((i == CD_DEV) ? 3'd3 : (3'd6 - i[2:0])),
-			       .CDROM((i == CD_DEV) ? 1 : 0)) target
+			       .CDROM((i == CD_DEV) ? 1 : 0), .WDOG_LOG(WDOG_LOG), .IOWDOG_LOG(IOWDOG_LOG)) target
 			(
 				.clk    ( clk ),
 				.rst    ( scsi_rst ),

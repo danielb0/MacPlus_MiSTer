@@ -62,7 +62,7 @@ module tb_ncr5380_seam;
 	reg      [31:0] img_size = 0;
 	wire     [31:0] io_lba [DEVS];
 	wire [DEVS-1:0] io_rd, io_wr;
-	reg  [DEVS-1:0] io_ack = 0;
+	reg  [DEVS-1:0] io_ack = 0;   // driven by the HPS model below
 	reg       [7:0] sd_buff_addr = 0;
 	reg      [15:0] sd_buff_dout = 0;
 	wire     [15:0] sd_buff_din [DEVS];
@@ -72,7 +72,9 @@ module tb_ncr5380_seam;
 	reg       [2:0] cd_dbg = 0;      // 0 = all commands enabled
 	reg       [2:0] cd_ms_mode = 0;  // 0 = full MODE SENSE response
 
-	ncr5380 #(.DEVS(DEVS), .CD_DEV(CD_DEV)) dut (
+	// WDOG_LOG(11) ~= 20us and IOWDOG_LOG(14) ~= 0.5ms, so both timeouts are
+	// reachable in simulation. Synthesis keeps the real 129ms / 516ms periods.
+	ncr5380 #(.DEVS(DEVS), .CD_DEV(CD_DEV), .WDOG_LOG(11), .IOWDOG_LOG(14)) dut (
 		.clk(clk), .reset(reset),
 		.bus_cs(bus_cs), .bus_rs(bus_rs), .ior(ior), .iow(iow),
 		.dack(dack), .dreq(dreq), .wdata(wdata), .rdata(rdata),
@@ -82,6 +84,39 @@ module tb_ncr5380_seam;
 		.sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr),
 		.cd_enable(cd_enable), .cd_dbg(cd_dbg), .cd_ms_mode(cd_ms_mode), .cd_vendor_dbg(4'd0)
 	);
+
+	// ---- minimal HPS sector server ---------------------------------------
+	// Answers the CD slot's io_rd with an ack after hps_delay clocks. Setting
+	// hps_delay long enough for the target's bus watchdog to fire first is what
+	// reproduces a LATE ack -- one that arrives after the target has left the
+	// bus and dropped BSY.
+	integer hps_delay = 20;
+	reg     hps_enable = 1'b1;
+	integer hps_acks = 0;
+	reg     saw_io_rd = 0;
+
+	always @(posedge clk) begin : hps
+		integer wait_n;
+		if (reset) begin
+			io_ack  <= 0;
+			wait_n   = 0;
+		end else begin
+			if (io_rd[CD_DEV] | io_wr[CD_DEV]) saw_io_rd <= 1'b1;
+			if ((io_rd[CD_DEV] | io_wr[CD_DEV]) && hps_enable && !io_ack[CD_DEV]) begin
+				wait_n = wait_n + 1;
+				if (wait_n >= hps_delay) begin
+					io_ack[CD_DEV] <= 1'b1;
+					hps_acks = hps_acks + 1;
+					wait_n = 0;
+				end
+			end else if (io_ack[CD_DEV]) begin
+				io_ack[CD_DEV] <= 1'b0;
+				wait_n = 0;
+			end else begin
+				wait_n = 0;
+			end
+		end
+	end
 
 	integer fails = 0;
 	integer tests = 0;
@@ -226,6 +261,17 @@ module tb_ncr5380_seam;
 				if (rv[`BSR_DRQ]) got = 1;
 				guard = guard + 1;
 			end
+		end
+	endtask
+
+	// Mount an image on the CD slot (MiSTer convention: img_mounted is a pulse).
+	task mount_cd(input [31:0] blocks);
+		begin
+			img_size = blocks;
+			img_mounted[CD_DEV] = 1'b1;
+			@(posedge clk); @(posedge clk);
+			img_mounted[CD_DEV] = 1'b0;
+			repeat (400) @(posedge clk);   // let the lead-out MSF conversion settle
 		end
 	endtask
 
@@ -445,6 +491,81 @@ module tb_ncr5380_seam;
 		ok("seam8 - a no-media READ never enters a data phase", !saw_data_phase);
 		ok("seam8 - it lands in STATUS instead", dut.scsi_cd && dut.scsi_io);
 
+		// Complete the transaction. Leaving status/message unread parks the
+		// target holding BSY and the NEXT selection fails silently -- the same
+		// trap that made seam7 measure a free bus. Caught twice now; any test
+		// that starts a transaction must finish it.
+		reg_write(`W_MR, 8'h00);
+		recv_byte(rv);
+		recv_byte(rv);
+		begin : rel8
+			integer g;
+			g = 0;
+			while (dut.scsi_bsy && g < 2000) begin @(posedge clk); g = g + 1; end
+		end
+		ok("seam8 - bus released after the CHECKed command", !dut.scsi_bsy);
+
+		// =============== seam9: a fetch that never completes ================
+		// io_busy holds REQ low (scsi.v:239) AND resets the bus watchdog every
+		// cycle (scsi.v:1195). So while a sector fetch is outstanding the target
+		// cannot time out -- if the HPS never answers, it holds BSY forever with
+		// REQ low and no recovery path. That is the shape the hardware probes
+		// recorded: initiator polling, no DRQ, activity LED stuck on.
+		//
+		// A real drive that loses a fetch still releases the bus eventually.
+		hps_enable = 1'b0;               // HPS never answers
+		saw_io_rd  = 1'b0;
+		mount_cd(32'd120000);
+
+		select_target(8'h08);
+		send_cmd_byte(8'h08);            // READ(6), LBA 0, 1 block
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h01);
+		send_cmd_byte(8'h00);
+		reg_write(`W_ICR, 8'h00);
+		pdma_arm;
+
+		begin : fetchwait
+			integer g;
+			g = 0;
+			while (!saw_io_rd && g < 20000) begin @(posedge clk); g = g + 1; end
+		end
+		ok("seam9 - target requested a sector fetch", saw_io_rd);
+
+		begin : busfree
+			integer g;
+			g = 0;
+			while (dut.scsi_bsy && g < 300000) begin @(posedge clk); g = g + 1; end
+		end
+		ok("seam9 - target releases the bus when a fetch never completes",
+		   !dut.scsi_bsy);
+
+		// The stalled request itself must be cleared. Checked BEFORE the HPS is
+		// re-enabled: re-enabling it answers the outstanding fetch and clears
+		// io_rd by itself, which masks the difference entirely (the first two
+		// versions of this test both passed with the clear removed).
+		ok("seam9 - the stalled request is cleared, not left asserted",
+		   !io_rd[CD_DEV]);
+
+		// Releasing the bus is not enough. A stale io_rd left asserted keeps
+		// io_busy high, which suppresses REQ for the NEXT command too -- the
+		// failure the any_rst clear already exists to prevent (see scsi.v).
+		// Without this leg, dropping the io_rd clear from the fix still passes,
+		// because a second stall timeout releases the bus anyway.
+		hps_enable = 1'b1;
+		select_target(8'h08);
+		send_cmd_byte(8'h12);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h20);
+		send_cmd_byte(8'h00);
+		reg_write(`W_ICR, 8'h00);
+		recv_byte(dma_b);
+		ok("seam9 - the NEXT command still works after a stalled fetch",
+		   dma_b == 8'h05);
 		$display("");
 		$display("SEAM: %0d of %0d failing", fails, tests);
 		if (fails == 0) $display("NCR5380 SEAM GATE: PASS - host-side register path behaves");

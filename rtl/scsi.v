@@ -765,7 +765,7 @@ always @(posedge clk) begin
 	// resets again -- an intermittent reset/re-scan loop. It is also the Phase 0
 	// finding that these registers have no reset at all and power up as X in
 	// simulation, which made io_busy (and therefore req) X forever.
-	if(any_rst) begin
+	if(any_rst || iostall_abort) begin
 		io_rd      <= 1'b0;
 		io_wr      <= 1'b0;
 		wr_pending <= 1'b0;
@@ -1187,9 +1187,36 @@ wire [15:0] tlen10 = { cmd[7], cmd[8] };
 // recovery can be exercised in reasonable sim time. The timeout VALUE is not the
 // thing under test -- the recovery behaviour is.
 parameter WDOG_LOG = 22;               // 2^22 clks @32.5MHz = ~129 ms
+
+// ---- IO-stall watchdog ----------------------------------------------------
+// The bus watchdog above is RESET by io_busy, because a legitimate HPS sector
+// fetch runs far longer than its period. That leaves exactly one state
+// unguarded: a fetch that never completes AT ALL. io_busy then holds REQ low
+// (see `req`) and resets the bus watchdog every cycle, so the target keeps BSY
+// forever while the initiator polls for data that can never arrive -- a hang
+// with no recovery path, by construction. Seen on hardware as the SCSI
+// activity LED stuck on with the Mac spinning in its pseudo-DMA poll loop,
+// and reproduced by seam9 in sim/tb_ncr5380_seam.v.
+//
+// A real drive that loses a sector fetch still releases the bus. This is a
+// second, much longer timer that runs ONLY while io_busy holds, and aborts
+// through the same path as the bus watchdog. Clearing the stale io_rd/io_wr
+// is not optional: io_busy suppresses REQ, so without it the abort could not
+// even send its own CHECK CONDITION, and the next command would inherit the
+// wedge (the same failure the any_rst clear exists to prevent).
+parameter IOWDOG_LOG = 24;             // 2^24 clks @32.5MHz = ~516 ms
+reg [IOWDOG_LOG-1:0] iowdog = 0;
+wire iowdog_expired = &iowdog;
+wire iostall_abort  = iowdog_expired;
+always @(posedge clk) begin
+	if (any_rst || !io_busy || (phase == PHASE_IDLE) || iostall_abort)
+		iowdog <= 0;
+	else
+		iowdog <= iowdog + 1'd1;
+end
 reg [WDOG_LOG-1:0] wdog = 0;
 wire wdog_expired = &wdog;
-wire wdog_abort   = wdog_expired && (phase != PHASE_IDLE);
+wire wdog_abort   = (wdog_expired && (phase != PHASE_IDLE)) || iostall_abort;
 
 always @(posedge clk) begin
 	if (any_rst || (phase == PHASE_IDLE) || stb_ack || stb_adv || io_busy || wdog_abort)
