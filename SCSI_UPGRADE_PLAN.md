@@ -698,3 +698,98 @@ Rough, assuming hardware validation between phases:
 
 Phases 1 and 2/3 are independently shippable. If CD-ROM proves impractical on a
 Plus, Phase 1 still stands on its own as a correctness fix worth having.
+
+---
+
+## 5.6 Hardware bring-up: the CD-ROM boot hang (2026-08-20 → 08-22)
+
+**Status: the CD-ROM feature works** — with a disc mounted the Plus boots System
+7.1.2 with the Apple CD extensions and reads the CD directory. Selection,
+INQUIRY, MODE SENSE (including the magic page 0x30), the Apple vendor command
+path, READ CAPACITY and the 2048-byte READ ring are all validated on real
+hardware. **But booting is intermittent, and with no disc mounted it wedges at
+"Welcome to Macintosh" every time.** That is the open item.
+
+### What the wedge actually is (measured, not inferred)
+
+JTAG In-System Probes (`rtl/dbg_probes.sv`, read with
+`scripts/read_probes.tcl`) captured the wedged machine directly. `PIFD` recorded
+the instruction words, which disassemble to:
+
+```
+0128E4:  0710             BTST  D3,(A0)        ; a 5380 register
+0128E6:  660E             BNE.S 0128F6         ; bit SET -> exit
+0128E8:  082B 0005 0040   BTST  #5,(64,A3)     ; offset 0x40 = CSR, bit 5 = REQ
+0128EE:  67F4             BEQ.S 0128E4         ; REQ CLEAR -> loop
+```
+
+The driver spins while `BSR[D3]==0 && CSR.REQ==0`. Measured wedged: `BSR=0x90`,
+`CSR=0x00`, last register write `DMAinitRcv`, write counter frozen, `PODR` =
+`00 00 01 00` (a one-block READ), and no DACK reads at all.
+
+So: **the driver issues a one-block READ to an empty drive, arms pseudo-DMA and
+waits for REQ or DRQ, while the bus is completely free** — the target answered
+with CHECK CONDITION for no media, correctly, and left. The open question is why
+this driver does not handle that CHECK, when a real AppleCD returns the same.
+
+### Two real defects found and fixed en route (neither is the hang)
+
+1. **Unrecoverable IO stall** (`b7e928e`). `io_busy` holds REQ low
+   (`scsi.v:239`) *and* sits in the bus watchdog's reset list (`scsi.v:1195`),
+   so a sector fetch that never completes wedged the target with its own
+   recovery disabled. New `IOWDOG_LOG` (~516 ms) aborts through the same path
+   and clears the stale `io_rd`/`io_wr`. Reproduced by `seam9`.
+   **Still unvalidated on hardware** — `PIO2` showed `cd rd=0` in every capture,
+   so the path was never exercised.
+2. **A REQ deferral that could hide REQ forever** (`b0282b6`), introduced by the
+   `65910b1` port of MacLC's completion semantics. `req_deferred` cleared only
+   on `csr_rd`, which is gated by `ior`, while `rdata` is not — and §3 of this
+   document already recorded the reason that matters: *the Plus reads on UDS and
+   writes on LDS*. A CSR poll through the other byte lane therefore read the
+   right value and never cleared the deferral. Fixed by detecting a read as
+   "not a write", plus a 1024-clock age-out. Proven by `seam10`.
+
+### Corrections to §3 "Not porting the LC's pseudo-DMA machinery"
+
+That section still stands on the 16-bit word/longword machinery — the Plus is
+byte-wide and none of it applies. Two of its other claims were revised:
+
+* **The JTAG probe harness WAS ported**, in lean form. The objection was to the
+  LC's ~15 debug ports threaded through `scsi.v`; the deck actually built takes
+  everything from top-level signals in `MacPlus.sv` and adds no ports to
+  `scsi.v` at all. It is behind `USE_SCSI_ISSP` and is what finally localised
+  the wedge. In-System Sources & Probes works in Quartus 17.0 Lite.
+* **`o_irq` is still not routed** — correct, the Plus has no free VIA interrupt
+  input and does not route a 5380 IRQ. But `BSR` bit 4 is now a real latched
+  completion IRQ that a polled driver can read, which is a different thing from
+  an interrupt line and costs nothing.
+
+### The seam finally has a test
+
+`sim/tb_ncr5380_seam.v` is the first bench for the `ncr5380 <-> scsi.v` seam —
+the register model the Mac actually talks to, previously untested because every
+other bench drives `scsi.v` on its target pins. It covers selection, a full CDB
+handover, the pseudo-DMA DACK path, both watchdogs and the REQ deferral.
+
+### Method note
+
+Eight hypothesis-driven fixes found eight real bugs and none of them was the
+hang. What actually moved it: a free experiment (mount a disc and compare), and
+instruments that were proven before being trusted. Mutation testing caught four
+tests that passed for the wrong reason — twice in tests written while explicitly
+watching for that failure mode. Also: **any bench test that starts a SCSI
+transaction must finish it** (status *and* message); leaving the target holding
+BSY makes the next selection fail silently and the following test measure
+nothing.
+
+### Gates
+
+`disk 12/12, CD 35/35, seam 32/32` — run all three, disk first.
+
+### Debug scaffolding to remove when this closes
+
+OSD: `status[21:19]` CD Debug ladder, `status[24:22]` MODE SENSE bisect,
+`status[28:25]` vendor-command bisect, `status[16:15]` no-media sense bisect.
+RTL: `cd_dbg`, `cd_ms_mode`, `cd_vendor_dbg`, `cd_sense_mode`, `USE_SCSI_ISSP`
+and `rtl/dbg_probes.sv`. Keep `cd28`/`cd32` (under-serve regression guards),
+`seam9`/`seam10`, and the seam bench itself.
