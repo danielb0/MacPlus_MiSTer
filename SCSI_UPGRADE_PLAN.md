@@ -451,6 +451,13 @@ whether the Plus shares that failure mode.
 
 Port `cd_audio.sv` (1,416 lines) and mix `cd_snd_l/r` into the audio path.
 
+**The output is genuinely stereo (user, 2026-08-22).** MiSTer's `sys_top` carries
+separate 16-bit `AUDIO_L`/`AUDIO_R`, so CD audio does not have to be folded down
+— the Mac's own mono output goes to both channels and the CD's two channels can
+be mixed in as true stereo. That removes the main reason to compromise on the
+mixer design, and it makes the signedness question below MORE important, not
+less: a mono error is a volume error, a stereo error is an image error.
+
 **Blocking investigation before this phase:** our audio output is
 `assign AUDIO_L = {audio[10:0], 5'b00000}` with `AUDIO_S = 1` (signed)
 (`MacPlus.sv:228-231`). If `audio` is an unsigned 0..2047 value, placing it in a
