@@ -1370,6 +1370,60 @@ Two hypotheses were also closed out in sim, both negative results worth keeping:
 Gates: `disk 12/12, CD 35/35, seam 56/56, probes 31/31, reader 18/18`.
 **Attempt 4 is UNBUILT.**
 
+### Attempt 4 WORKS: booted to the desktop with no disc (2026-08-22, hardware)
+
+**`bitstream=BDE27691`** — the tag did its job on its first outing, and all 16
+probes are present. The machine booted through to the Finder with the CD drive
+enabled and **no disc mounted**, the case that failed 5 out of 5 before.
+
+```
+sample 0   bitstream=BDE27691
+  PIFA  PC=402772 -> 03F75C -> 07138A      CPU running normal code, not looping
+  PDMA  DACK reads since the DMA arm: 18   arms since selection 1
+        watchdog fires since selection: bus=0  io-stall=0
+        phases visited: IDLE CMD DATA>init(READ) STATUS MESSAGE
+  PDM2  DACK-in-mismatch=0  ACK-in-STATUS=0
+  PDM3  at the DMA arm: phase=DATA>init(READ) TCR=1 pmatch=1
+        first DACK access after the arm was in phase DATA>init(READ)
+```
+
+Every discriminator is on the healthy side: no watchdog fired, the transaction
+walked the full `CMD -> DATA -> STATUS -> MESSAGE -> IDLE` sequence, the driver
+armed *inside* the data phase with TCR matching, its first DACK landed in that
+same phase, and `ACK-in-STATUS=0` — the original defect stays fixed.
+
+**So the conclusion is settled.** The review's diagnosis was right and its
+primary remedy — a DACK access must not ACK a byte from a non-data phase — is
+the whole fix. Gating `dma_ack` alone delivers it. The second half of the
+review's fix shape (inhibit DRQ, level-trigger the completion IRQ) was not just
+unnecessary but actively harmful: **suppressing DRQ is what hung attempts 1 and
+2**, and the IRQ latch was never implicated at all.
+
+PDM3 also answers, on the healthy path, the question that justified building it:
+the driver arms *after* the target is already in its data phase, not before. The
+early-pump hypothesis was wrong in sim (`seam13`) and is wrong on hardware.
+
+#### One more instrument trap, found in this capture
+
+`rtl/scsi.v` names phases from the **target's** point of view — `PHASE_DATA_OUT`
+is the target driving data *out to the initiator*, i.e. a **READ**, and
+`PHASE_DATA_IN` is a **WRITE**. The reader printed those names raw, so every
+capture stated the exact opposite of the transfer's direction: attempt 2's
+"DATA-IN" was really a write, and this one's "DATA-OUT" is really a read. The
+underlying numbers were always self-consistent (attempt 2's frozen accesses were
+`wr ODR (DACK)`; this one's are 18 DACK *reads*), so no conclusion was wrong —
+but the label was, and it is now `DATA>init(READ)` / `DATA>targ(WRITE)`, with two
+tests pinning the direction (reader 18 -> 20).
+
+#### Still open
+
+* **With a disc mounted** the wedge was intermittent, via the same `cd_no_media`
+  path (`!toc_ready` races a READ). Not yet re-tested on attempt 4.
+* A real 5380 *does* inhibit DRQ on a phase mismatch. Attempt 4 knowingly does
+  not. If that fidelity is ever wanted, it is its own one-variable change — and
+  the evidence says it needs a very good reason.
+* Debug scaffolding is still in the build (see the removal list below).
+
 ### Gates
 
 `disk 12/12, CD 35/35, seam 51/51, probes 31/31, reader 13/13` — run all five,

@@ -98,7 +98,7 @@ ok "reader prints both watchdog counts as zero" \
 ok "reader names the phases visited" \
    [string match "*IDLE CMD STATUS MESSAGE*" $out]
 ok "reader reports no DATA phase in the mask" \
-   [expr {![string match "*DATA-IN*" $out] && ![string match "*DATA-OUT*" $out]}]
+   [expr {![string match "*DATA>init*" $out] && ![string match "*DATA>targ*" $out]}]
 ok "reader decodes the sticky evidence bits" \
    [string match "*DACK-in-mismatch=1 REQ+DMA-in-mismatch=1 ACK-in-STATUS=1 IRQ-latched=0*" $out]
 ok "reader decodes the phase ring newest-first" \
@@ -121,6 +121,21 @@ set probeval(PDM2) [expr {(0 << 31) | (1 << 30) | (0 << 29) | (0 << 28) | \
 set out [capture]
 ok "armed with zero DACK reads reads back as FALSIFIED" \
    [string match "*FALSIFIED*" $out]
+
+# ---- phase-code DIRECTION, the label that was inverted ---------------------
+# rtl/scsi.v names phases from the TARGET's side: PHASE_DATA_OUT(2) is the
+# target driving data out to the initiator, i.e. a READ, and PHASE_DATA_IN(3)
+# is a WRITE. Printing those raw names told a reader the exact opposite of what
+# the transfer was doing. Lock the direction so it cannot invert again.
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PDMA PDM2 PDM3 PBLD}
+set probeval(PDM3) [expr {(0 << 24) | (1 << 20) | (1 << 16) | (2 << 13) | \
+                          (1 << 12) | (3 << 9) | (1 << 8) | (0 << 7) | (1 << 6)}]
+set out [capture]
+ok "reader calls target phase code 2 a READ, not DATA-OUT" \
+   [string match "*at the DMA arm: phase=DATA>init(READ)*" $out]
+ok "reader calls target phase code 3 a WRITE, not DATA-IN" \
+   [string match "*first DACK access after the arm was in phase DATA>targ(WRITE)*" $out]
+
 
 # ---- a bitstream OLDER than this working tree ------------------------------
 # The reader used to return 0 for any probe missing from the running design,

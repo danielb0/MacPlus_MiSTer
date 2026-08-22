@@ -218,7 +218,13 @@ for {set n 0} {$n < $samples} {incr n} {
 	set nondata  [expr {($pdm3 >>  7) & 1}]
 	set in_data  [expr {($pdm3 >>  6) & 1}]
 
-	set phname {IDLE CMD DATA-OUT DATA-IN STATUS MESSAGE ?6 ?7}
+	# Codes come from rtl/scsi.v's PHASE_*, which names phases from the TARGET's
+	# point of view: PHASE_DATA_OUT(2) is the target driving data OUT to the
+	# initiator -- a READ -- and PHASE_DATA_IN(3) is data coming IN to the target
+	# -- a WRITE. That is the exact opposite of the initiator-perspective "DATA
+	# IN / DATA OUT" every SCSI document uses, so printing the raw names inverts
+	# the meaning for anyone reading a capture. Spell out the direction instead.
+	set phname {IDLE CMD DATA>init(READ) DATA>targ(WRITE) STATUS MESSAGE ?6 ?7}
 	set seen ""
 	for {set b 0} {$b < 6} {incr b} {
 		if {($phmask >> $b) & 1} { append seen "[lindex $phname $b] " }
