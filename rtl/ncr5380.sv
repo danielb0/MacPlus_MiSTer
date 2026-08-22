@@ -275,8 +275,8 @@ module ncr5380
 	 */
 
 	/* Register-space read strobes (never the DACK/pseudo-DMA window) */
-	wire csr_rd = bus_cs & ~dack & ior & (bus_rs == `RREG_CSR);
-	wire rst_rd = bus_cs & ~dack & ior & (bus_rs == `RREG_RST);
+	wire csr_rd = bus_cs & ~dack & ~iow & (bus_rs == `RREG_CSR);
+	wire rst_rd = bus_cs & ~dack & ~iow & (bus_rs == `RREG_RST);
 
 	/* Deferred bus-visible REQ (Snow controller.rs `set_req` semantics).
 	 * The SCSI Manager's between-chunk settle loop
@@ -292,6 +292,7 @@ module ncr5380
 	 * loops and DACK pacing are unaffected.
 	 */
 	reg req_deferred;
+	reg [9:0] defer_age;   // bounds how long a REQ can stay hidden
 	reg old_req_bus_d;
 	reg old_csr_rd_d;
 	always @(posedge clk or posedge reset) begin
@@ -306,6 +307,14 @@ module ncr5380
 				req_deferred <= 1'b1;       // new REQ: hidden until a CSR read
 			else if (req_deferred & old_csr_rd_d & ~csr_rd)
 				req_deferred <= 1'b0;       // CSR read completed: reveal REQ
+			// Self-limiting: csr_rd depends on the host asserting a particular
+			// byte lane, but rdata does not, so a poll through the other lane
+			// reads the right value while never clearing the deferral -- REQ
+			// would stay hidden for good and a CSR-polling driver would spin
+			// forever (seam10). Age it out so that cannot happen.
+			if (!req_deferred) defer_age <= 10'd0;
+			else if (~&defer_age) defer_age <= defer_age + 10'd1;
+			if (&defer_age) req_deferred <= 1'b0;
 			if (!scsi_req)
 				req_deferred <= 1'b0;
 		end

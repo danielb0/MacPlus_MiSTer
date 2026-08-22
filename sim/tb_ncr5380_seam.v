@@ -153,6 +153,20 @@ module tb_ncr5380_seam;
 
 	reg [7:0] rv, csr1, csr2, bsr1, bsr2;
 
+	// Read a register WITHOUT asserting ior, i.e. through the other byte lane.
+	// rdata is combinational and not gated by ior, so this returns the correct
+	// value -- but csr_rd (which IS gated by ior) never pulses. That asymmetry
+	// is the hazard seam10 tests.
+	task reg_read_noior(input [2:0] rs, output [7:0] d);
+		begin
+			@(negedge clk); bus_cs = 1; dack = 0; bus_rs = rs; ior = 0;
+			@(negedge clk);
+			d = rdata;
+			@(negedge clk); bus_cs = 0;
+			@(negedge clk);
+		end
+	endtask
+
 	// Poll CSR until REQ reads back set.
 	task wait_req(output integer polls);
 		integer guard;
@@ -566,6 +580,52 @@ module tb_ncr5380_seam;
 		recv_byte(dma_b);
 		ok("seam9 - the NEXT command still works after a stalled fetch",
 		   dma_b == 8'h05);
+		// =============== seam10: the REQ deferral must be self-limiting ======
+		// req_deferred hides a newly asserted REQ from CSR until one CSR read
+		// COMPLETES, and "completes" is detected via csr_rd, which is gated by
+		// ior (= !_cpuUDS). But rdata is NOT gated by ior, so a poll through the
+		// other byte lane reads the right value while never clearing the
+		// deferral -- REQ stays hidden forever and a driver polling CSR bit 5
+		// spins for good. That is the loop disassembled from hardware:
+		//     BTST D3,(A0) / BNE exit / BTST #5,(64,A3) / BEQ loop
+		// A latch that can hide REQ indefinitely is wrong however it is polled.
+		select_target(8'h08);
+		// Hand over one CDB byte with the BLIND handshake, which touches no CSR.
+		// select_target polls CSR with ior, which would have already cleared the
+		// deferral -- the first version of this test passed for exactly that
+		// reason. ack_pulse returns with a FRESH REQ asserted and no CSR read
+		// since it rose, which is the state the hazard needs.
+		reg_write(`W_ODR, 8'h12);
+		ack_pulse(8'h01);
+		ok("seam10 - target is asserting REQ on the bus", dut.scsi_req);
+		ok("seam10 - and that REQ is currently deferred (test premise)",
+		   dut.req_deferred);
+
+		begin : deferral
+			integer g;
+			csr1 = 0;
+			g = 0;
+			while (!csr1[`CSR_REQ] && g < 40) begin
+				reg_read_noior(`R_CSR, csr1);
+				g = g + 1;
+			end
+		end
+		ok("seam10 - REQ becomes visible even when polled without ior",
+		   csr1[`CSR_REQ]);
+		ior = 0;
+
+		// The age-out is a second, independent safety net: the deferral must
+		// lapse even with NO CSR access whatsoever. Without this leg the lane
+		// fix alone satisfies the test above, and the age-out ships untested --
+		// which is the failure mode that made the command ladder unreadable.
+		select_target(8'h08);
+		reg_write(`W_ODR, 8'h12);
+		ack_pulse(8'h01);
+		ok("seam10 - premise: a fresh REQ is deferred again", dut.req_deferred);
+		repeat (1200) @(posedge clk);
+		ok("seam10 - the deferral ages out with no CSR access at all",
+		   !dut.req_deferred);
+
 		$display("");
 		$display("SEAM: %0d of %0d failing", fails, tests);
 		if (fails == 0) $display("NCR5380 SEAM GATE: PASS - host-side register path behaves");
