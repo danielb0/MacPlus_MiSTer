@@ -1245,6 +1245,17 @@ probes 31/31, reader 13/13`):**
   dirty, and is to be run immediately before each compile, leaving `build_tag.v`
   dirty in the tree by design.
 
+**And the stamping script bit immediately, which is the point of writing it.**
+Windows PowerShell 5.1's `Set-Content -Encoding utf8` writes a **BOM**, and
+iverilog will not parse a file that starts with one: it reported `build_tag`
+as a missing module and produced no executable. That was nearly missed,
+because a stale `.vvp` from the previous run was still on disk and `vvp` ran
+it happily -- the new PBLD tests "passed" against a binary built before they
+existed. The script now writes UTF-8 without a BOM, and the gate runs check
+the compile's exit status and the absence of a "were missing" warning before
+trusting any PASS line. Piping iverilog into `tail` hides its exit status;
+don't.
+
 **Compile hazard confirmed, not yet cleared:** `compile_log.txt` ends mid-word
 (`Warni`), so the 18:24 Analysis & Synthesis really was killed. `db/` (700 files)
 and `incremental_db/` must be deleted before the next compile.

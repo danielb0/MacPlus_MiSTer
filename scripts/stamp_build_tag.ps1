@@ -36,6 +36,12 @@ module build_tag(output [31:0] tag);
 	assign tag = 32'h$sha;
 endmodule
 "@
-    Set-Content -Path 'rtl/build_tag.v' -Value $body -Encoding utf8
+    # NOT Set-Content -Encoding utf8: on Windows PowerShell 5.1 that writes a
+    # BOM, and iverilog then fails to parse the file -- it reports build_tag as
+    # a missing module and produces no executable, which is easy to miss if a
+    # stale .vvp is still lying around. Write plain UTF-8, no BOM.
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText(
+        (Join-Path $root 'rtl/build_tag.v'), ($body + "`r`n"), $utf8NoBom)
     Write-Host "rtl/build_tag.v stamped $sha"
 } finally { Pop-Location }
