@@ -54,7 +54,7 @@ module tb_scsi_cdrom;
    wire [15:0] sd_buff_din;
    reg         sd_buff_wr   = 1'b0;
 
-   reg  [1:0]  cd_ms_mode   = 2'd0;   // MODE SENSE content bisect
+   reg  [2:0]  cd_ms_mode   = 3'd0;   // MODE SENSE content bisect
 
    localparam [2:0] TARGET_ID = 3'd3;   // AppleCD SC factory default
 
@@ -1106,7 +1106,7 @@ module tb_scsi_cdrom;
       begin : t29
          integer bad, k;
          bad = 0;
-         cd_ms_mode = 2'd1;
+         cd_ms_mode = 3'd1;
          // over-armed, and for a page that has real content in full mode
          select_target;
          send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
@@ -1124,7 +1124,7 @@ module tb_scsi_cdrom;
             if (buf_in[k] !== 8'h00) bad = bad + 1;
 
          // and the switch must be a true no-op when clear: full mode unchanged
-         cd_ms_mode = 2'd0;
+         cd_ms_mode = 3'd0;
          select_target;
          send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
          read_blind(255);
@@ -1156,7 +1156,7 @@ module tb_scsi_cdrom;
          bad = 0;
 
          // ---- state 2: header + block descriptor, nothing after byte 11
-         cd_ms_mode = 2'd2;
+         cd_ms_mode = 3'd2;
          select_target;
          send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
          read_blind(255); finish_command;
@@ -1170,7 +1170,7 @@ module tb_scsi_cdrom;
          for (k = 4; k <= 11; k = k + 1) desc2[k] = buf_in[k];
 
          // ---- state 3: adds ONLY the page shell; payload must stay zero
-         cd_ms_mode = 2'd3;
+         cd_ms_mode = 3'd3;
          select_target;
          send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
          read_blind(255); finish_command;
@@ -1192,7 +1192,7 @@ module tb_scsi_cdrom;
             end
 
          // ---- an unknown page in state 3 must not sprout a page shell
-         cd_ms_mode = 2'd3;
+         cd_ms_mode = 3'd3;
          select_target;
          send_cdb(8'h1a,8'h00,8'h01,8'h00,8'd64,8'h00,0,0,0,0,0,0, 6);
          read_blind(64); finish_command;
@@ -1200,10 +1200,77 @@ module tb_scsi_cdrom;
          for (k = 12; k < 64; k = k + 1)
             if (buf_in[k] !== 8'h00) bad = bad + 1;
 
-         cd_ms_mode = 2'd0;
+         cd_ms_mode = 3'd0;
          ok = (bad == 0);
       end
       report(ok, "cd30 - bisect states 2 and 3 each add exactly one component");
+
+      // ==================================================================
+      // Test 31: the per-page payload states. Hardware exonerated the block
+      // descriptor and the page code/length byte (states 1-3 all boot, full
+      // hangs), so the fault is in a page BODY. States 4/5/6 suppress exactly
+      // one page's body each; the state that boots names the page.
+      //
+      // The properties that make that inference valid, and so must hold here:
+      //  - a state suppresses its OWN page's body and no other page's
+      //  - byte 12 and byte 13 still come from the REAL response in all of
+      //    them, so the body is the only thing that varies
+      //  - a suppressed body is genuinely all zero
+      // ==================================================================
+      do_reset; mount_image(IMG_BLOCKS);
+      begin : t31
+         integer bad, k, s, p;
+         reg [7:0] pg  [0:2];
+         integer   tot [0:2];
+         reg [7:0] b13 [0:2];
+         pg[0]=8'h30; tot[0]=36; b13[0]=8'h00;
+         pg[1]=8'h0e; tot[1]=28; b13[1]=8'h0e;
+         pg[2]=8'h2a; tot[2]=38; b13[2]=8'h18;
+         bad = 0;
+
+         for (s = 0; s < 3; s = s + 1) begin
+            cd_ms_mode = 3'd4 + s[2:0];
+            for (p = 0; p < 3; p = p + 1) begin
+               select_target;
+               send_cdb(8'h1a,8'h00,pg[p],8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
+               read_blind(255);
+               finish_command;
+               if (buf_in[0] !== (tot[p]-1)) begin
+                  $display("       s%0d/p%02x: byte0=%02x want %02x", 4+s, pg[p], buf_in[0], tot[p]-1);
+                  bad = bad + 1; end
+               if (buf_in[3] !== 8'd8) begin
+                  $display("       s%0d/p%02x: byte3=%02x want 08", 4+s, pg[p], buf_in[3]);
+                  bad = bad + 1; end
+               if (buf_in[12] !== pg[p]) begin
+                  $display("       s%0d/p%02x: byte12=%02x", 4+s, pg[p], buf_in[12]);
+                  bad = bad + 1; end
+               if (buf_in[13] !== b13[p]) begin
+                  $display("       s%0d/p%02x: byte13=%02x want %02x", 4+s, pg[p], buf_in[13], b13[p]);
+                  bad = bad + 1; end
+               if (s == p)
+                  for (k = 14; k < tot[p]; k = k + 1)
+                     if (buf_in[k] !== 8'h00) begin
+                        $display("       s%0d/p%02x: body byte %0d = %02x, want 00", 4+s, pg[p], k, buf_in[k]);
+                        bad = bad + 1; end
+            end
+         end
+
+         // a NON-targeted page must keep its real body: page 0x30 still says
+         // "APPLE" while the 0x0E state is selected
+         cd_ms_mode = 3'd5;
+         select_target;
+         send_cdb(8'h1a,8'h00,8'h30,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
+         read_blind(255); finish_command;
+         if ((buf_in[14] !== "A") || (buf_in[15] !== "P") || (buf_in[18] !== "E")) begin
+            $display("       s5/p30: body suppressed but should not be (%02x %02x %02x)",
+                     buf_in[14], buf_in[15], buf_in[18]);
+            bad = bad + 1;
+         end
+
+         cd_ms_mode = 3'd0;
+         ok = (bad == 0);
+      end
+      report(ok, "cd31 - per-page body states suppress one page each, shells intact");
 
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);

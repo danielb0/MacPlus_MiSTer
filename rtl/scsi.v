@@ -29,10 +29,13 @@ module scsi
 	// enabled -- so the fault is in our response BYTES. These states add one
 	// component at a time, all at the SAME transfer length so only content
 	// varies, and every one is a response a real drive may legitimately give:
-	//   0 full   1 header only   2 +block descriptor   3 +page code/length
-	// 2 hangs => the block descriptor. 2 boots and 3 hangs => the page shell.
-	// 3 boots => the page PAYLOAD.
-	input [1:0] cd_ms_mode,
+	//   0 full        1 header only    2 +block descriptor  3 +page shell
+	//   4 -p30 body   5 -p0E body      6 -p2A body          7 full
+	// Hardware walked 1, 2 and 3 green and 0 hangs, so the block descriptor
+	// and the page code/length byte are exonerated and the fault is in a page
+	// PAYLOAD (bytes 14+). States 4-6 suppress exactly one page's payload, so
+	// the state that boots names the page.
+	input [2:0] cd_ms_mode,
 	input 	  sel,
 	input 	  atn, // initiator requests to send a message
 	output 	  bsy, // target holds bus
@@ -485,11 +488,21 @@ function [7:0] cd_ms_bisect_byte;
 	end
 endfunction
 
-wire [7:0] mode_sense_dout = (CDROM != 0)
-                             ? ((cd_ms_mode != 2'd0)
-                                ? cd_ms_bisect_byte(data_cnt, cd_ms_mode, cd_page_r, capacity)
-                                : cd_mode_sense_byte(data_cnt, cd_page_r, capacity))
-                             : hd_mode_sense_dout;
+// States 3..6 serve the full response with one page's PAYLOAD suppressed --
+// byte 12 (page code) and byte 13 (declared length) still come from the real
+// response, so the only thing that changes is the body. State 3 suppresses
+// every page, 4/5/6 suppress one each.
+wire cd_ms_kill_body = (cd_ms_mode == 3'd3) ||
+                       ((cd_ms_mode == 3'd4) && (cd_page_r == 6'h30)) ||
+                       ((cd_ms_mode == 3'd5) && (cd_page_r == 6'h0E)) ||
+                       ((cd_ms_mode == 3'd6) && (cd_page_r == 6'h2A));
+
+wire [7:0] mode_sense_dout =
+		(CDROM == 0) ? hd_mode_sense_dout :
+		((cd_ms_mode == 3'd1) || (cd_ms_mode == 3'd2))
+		    ? cd_ms_bisect_byte(data_cnt, cd_ms_mode[1:0], cd_page_r, capacity) :
+		(cd_ms_kill_body && (data_cnt >= 32'd14)) ? 8'h00 :
+		cd_mode_sense_byte(data_cnt, cd_page_r, capacity);
 wire [7:0] hd_mode_sense_dout =
 		(data_cnt == 32'd3 )?8'd8:
 		(data_cnt == 32'd5 )?capacity[23:16]:

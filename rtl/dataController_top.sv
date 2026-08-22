@@ -112,7 +112,7 @@ module dataController_top(
 	input            [31:0] img_size,
 	input                   cd_enable,
 	input             [2:0] cd_dbg,
-	input             [1:0] cd_ms_mode,
+	input             [2:0] cd_ms_mode,
 	output           [31:0] io_lba[SCSI_DEVS],
 	output  [SCSI_DEVS-1:0] io_rd,
 	output  [SCSI_DEVS-1:0] io_wr,

@@ -72,7 +72,7 @@ localparam CONF_STR = {
 	"SC4,ISO,Mount CD-ROM;",
 	"OI,CD-ROM Drive,Enabled,Disabled;",
 	"OJL,CD Debug,Off,INQ,+TUR,+SENSE,+CAP,+MODE,+READ,All;",
-	"OMN,CD MODE SENSE,Full,Bare hdr,Hdr+desc,Hdr+desc+pg;",
+	"OMO,CD MODE SENSE,Full,Hdr,Hdr+desc,+pg shell,-p30 body,-p0E body,-p2A body,Full;",
 	"-;",
 	"O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
@@ -199,7 +199,7 @@ wire [2:0] cd_dbg = status[21:19];
 // transfer length identical. It boots => the fault is in our response
 // CONTENT. It still hangs => the fault is the mechanism of answering 0x1a at
 // all (phase/REQ handling or the ncr5380 seam), not the bytes.
-wire [1:0] cd_ms_mode = status[23:22];
+wire [2:0] cd_ms_mode = status[24:22];
 // sd_buff_din[2]/[3] driven below by each drive's floppy_sd_writer (Phase 4) -
 // only ever consulted by hps_io during a sd_wr session for that slot, which
 // only the writer ever asserts, so no mux against the loader is needed here.

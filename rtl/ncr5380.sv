@@ -78,7 +78,7 @@ module ncr5380
 	// when CD_DEV is in range; low makes the bus identical to a disks-only build.
 	input              cd_enable,
 	input        [2:0] cd_dbg,
-	input        [1:0] cd_ms_mode
+	input        [2:0] cd_ms_mode
 );
 	parameter DEVS = 2;
 	// Index of the CD-ROM target within the DEVS arrays, or DEVS for "none".
