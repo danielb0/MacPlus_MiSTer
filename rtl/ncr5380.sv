@@ -105,7 +105,15 @@ module ncr5380
 	// phase rather than on TCR.
 	wire bus_data_phase = scsi_bsy & ~scsi_cd & ~scsi_msg;
 
-	assign dreq = scsi_req & dma_en & bus_data_phase;
+	// NOT gated on bus_data_phase, and that is deliberate. A real 5380 does
+	// inhibit DRQ on a phase mismatch, and two builds that did so both hung the
+	// machine. The live capture from the second (2187326, md5-confirmed, and
+	// identified independently by its 14-instance ISSP set) shows the driver
+	// arming pseudo-DMA in a LEGITIMATE DATA-IN phase and then performing zero
+	// DACK reads until the target's bus watchdog fired at 129 ms, leaving it
+	// polling BSR=0x98 -- DRQ clear -- forever. Hiding DRQ from this driver is
+	// what breaks it. The confirmed defect is fixed by gating dma_ack alone.
+	assign dreq = scsi_req & dma_en;
 
 	reg  [7:0] mr;        /* Mode Register */
 	reg  [7:0] icr;       /* Initiator Command Register */
@@ -256,7 +264,7 @@ module ncr5380
 	 * anything -- two different builds reporting byte-identical state is also
 	 * what a stale core looks like, and PBLD exists to rule that out.
 	 */
-	wire bsr_dmarq = scsi_req & dma_en & bus_data_phase;
+	wire bsr_dmarq = scsi_req & dma_en;	/* see dreq: DRQ stays visible */
 	wire bsr_perr = 1'b0;	/* We don't do parity */
 	wire bsr_irq = irq_latch;	/* latched completion IRQ, cleared by a reg-7 read */
 	wire bsr_pmatch = 

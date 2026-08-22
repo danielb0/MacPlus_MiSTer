@@ -597,8 +597,21 @@ module tb_ncr5380_seam;
 		   s11_phase_armed == 3'd4);
 		ok("seam11 - premise: BSR reports the phase mismatch",
 		   !bsr1[`BSR_PMATCH]);
-		ok("seam11 - DRQ is inhibited outside a data phase, as a real 5380 does",
-		   !bsr1[`BSR_DRQ] && !dreq);
+		// DRQ stays VISIBLE, deliberately. A real 5380 does inhibit it here, and
+		// two builds that did so both hung the machine; the live capture from the
+		// second (2187326, confirmed by md5 and by its 14-instance ISSP set) shows
+		// the driver arming pseudo-DMA and then performing ZERO DACK reads while
+		// the target sat in a legitimate DATA-IN phase, until the target's bus
+		// watchdog fired at 129 ms and left it polling a free bus forever with
+		// BSR=0x98 -- DRQ clear. Whatever suppressed DRQ there, hiding it from
+		// this driver is what breaks the machine.
+		//
+		// The confirmed defect is that a DACK access must not ACK a byte from a
+		// non-data phase. That is fixed below by gating dma_ack alone. The exit
+		// ramp the review actually relies on is REQ staying visible in CSR, which
+		// is asserted further down and does not need DRQ suppressed.
+		ok("seam11 - DRQ is still offered; only the ACK is withheld",
+		   bsr1[`BSR_DRQ] && dreq);
 		// The IRQ latch is deliberately NOT touched by this change -- see the
 		// note in ncr5380.sv. It stays edge-triggered, so a mismatch that
 		// predates the arm still produces no IRQ. That is a known gap, left

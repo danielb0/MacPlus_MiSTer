@@ -1288,6 +1288,88 @@ attempt 3 is the one-variable experiment regardless.
 (`Warni`), so the 18:24 Analysis & Synthesis really was killed. `db/` (700 files)
 and `incremental_db/` must be deleted before the next compile.
 
+### The board answered: the gate works, and it is also what breaks the machine (2026-08-22, live)
+
+**Retraction first.** The section above concluded attempt 2 "cannot be shown to
+have run" and that no per-SHA `.rbf` archives existed for the two attempts. Both
+claims are wrong. The archives use `MacPlus_<sha>_<tag>.rbf`, which my glob
+missed: `MacPlus_bcb8a68_pmatchgate.rbf` and `MacPlus_2187326_dataphasegate.rbf`
+are both on disk. `output_files/MacPlus.rbf` is md5-identical to the latter, and
+the running bitstream carries exactly 14 ISSP instances — PDMA and PDM2 but no
+PDM3 and no PBLD — which is precisely attempt 2's probe set, since PDM3 arrived
+in `13cdd79` and PBLD in `ac38fc9`. **H-B is dead. Attempt 2 genuinely ran.**
+
+**And the reader was lying.** Against that 14-instance bitstream,
+`read_probes.tcl` printed a full, confident PDM3 block — *"at the DMA arm:
+phase=IDLE ... no DACK access at all since the arm"* — entirely fabricated,
+because `rd()` returned 0 for any absent instance and every derived field
+formatted that zero as data. `bitstream=00000000` likewise read as an unstamped
+tag rather than a missing probe. Fixed, with five tests (reader 13 -> 18).
+
+#### What attempt 2 actually does on hardware
+
+Four samples, machine wedged, CPU alive and looping over `0x417450-0x417454`:
+
+```
+PSCS  last READ  reg=BSR  val=98  (reads:42 -> 143 -> 56 -> 159, wrapping)
+PSCW  last WRITE reg=ODR (DACK)   val=00  (writes:34, FROZEN)
+PDMA  DACK reads since the DMA arm: 0    arms since selection 1
+      watchdog fires since selection: bus=1  io-stall=0
+      phases visited since selection: IDLE CMD DATA-IN STATUS
+PDM2  DACK-in-mismatch=0  ACK-in-STATUS=0  IRQ-latched=1  REQ-in-STATUS=1
+      live: BSY=0 REQ=0 DMA_EN=1 PMATCH=1
+```
+
+* **The gate works.** `ACK-in-STATUS=0` and `DACK-in-mismatch=0`: no DACK access
+  ever consumed a byte from a non-data phase. The confirmed defect is fixed.
+* **But a new failure replaced it.** The transaction reached a *legitimate*
+  `DATA-IN` phase, the driver armed pseudo-DMA — and then did **zero** DACK
+  reads. The target's bus watchdog fired at 129 ms, the bus went free, and the
+  driver has been polling `BSR=0x98` ever since. `0x98` is eodma + IRQ + pmatch:
+  **DRQ (bit 6) is clear.** The driver is waiting for a DRQ that the gate can
+  suppress and that never comes.
+* This **exonerates the completion-IRQ latch** the plan blamed. `IRQ-latched=1`
+  and BSR bit 4 is set, yet the loop does not exit on it — the loop's `BTST`
+  tests a different bit, and the failure is "never pumped at all", which a latch
+  that only sets bit 4 cannot cause.
+
+#### Attempt 4: gate the ACK, leave DRQ visible
+
+So the gate on `dreq`/`bsr_dmarq` is implicated and the gate on `dma_ack` is not.
+Attempt 4 keeps only the latter:
+
+| | dreq | bsr_dmarq | dma_ack | IRQ latch |
+|---|---|---|---|---|
+| attempts 1-3 | gated | gated | gated | 1,2 level / 3 edge |
+| **attempt 4** | **un-gated** | **un-gated** | **gated** | edge (untouched) |
+
+This is the minimal change that fixes the confirmed defect, and it cannot cause
+a DRQ-visibility regression because it does not touch DRQ. The review's actual
+exit ramp is preserved: `seam11` still passes *"CSR shows REQ, so the polling
+loop can exit"*, and still passes *"does NOT ACK it: the target stays in
+STATUS"* and *"ACK was never asserted in STATUS"*.
+
+A real 5380 does inhibit DRQ on a phase mismatch, so this is knowingly less
+faithful than the review asked for. That fidelity is what two builds died on. If
+PDM3 later shows the inhibition is needed, it can be added back as its own
+one-variable change — with the instrument to see it, which attempt 2 lacked.
+
+`seam11`'s DRQ assertion was flipped to match, and that is the third time this
+bench has had to be edited to track an RTL decision. **The benches that assert
+RTL *policy* rather than instrument properties remain a real design flaw** — see
+the note in the session-end state.
+
+Two hypotheses were also closed out in sim, both negative results worth keeping:
+
+* **seam13** (new): the driver pumping *before* the target reaches its data
+  phase — the window the plan named as unmeasured, which neither seam11 nor
+  seam12 covers because both `wait_raw_req` first. It **passes** on the gated
+  RTL, so early pumping does not explain the regressions.
+* **seam12** already covered the stale-TCR write, which killed attempt 1.
+
+Gates: `disk 12/12, CD 35/35, seam 56/56, probes 31/31, reader 18/18`.
+**Attempt 4 is UNBUILT.**
+
 ### Gates
 
 `disk 12/12, CD 35/35, seam 51/51, probes 31/31, reader 13/13` — run all five,
