@@ -1256,6 +1256,34 @@ the compile's exit status and the absence of a "were missing" warning before
 trusting any PASS line. Piping iverilog into `tail` hides its exit status;
 don't.
 
+**H-B, answered by the user: the JTAG flash was discarded before the capture.**
+Confirmed directly — the core *was* re-selected/power-cycled after programming
+the `.sof`. On MiSTer that makes the HPS reload the `.rbf` from disk, which
+overwrites the JTAG-programmed bitstream. **So the md5 check proved nothing
+about what ran**: it verified the `.sof` file, and the `.sof` was thrown away
+seconds later. Whatever executed came from the `.rbf` path.
+
+Whether that `.rbf` was attempt 2 now turns entirely on how the file reaches
+the board, and **nothing on this machine can answer that**: there is no
+archived `.rbf` for attempt 1 or attempt 2. `output_files/MacPlus.rbf` is one
+file every build overwrites, and the per-SHA archives that do exist
+(`MacPlus.rbf.010dff8` and friends) are from an older session and predate both
+attempts. The sole evidence of what ran is a file timestamp.
+
+Two consequences, both procedural:
+
+1. **Stop JTAG-flashing `.sof` for these tests.** It is discarded by the very
+   action needed to boot the machine. Put the build on the path the core
+   actually loads, then load it. One artefact, one route.
+2. **Archive the `.rbf` under its SHA at every build**, the way `PBLD` stamps
+   the bitstream — so "which build was that?" stays answerable afterwards and
+   not only live over JTAG.
+
+Attempt 2 is therefore **not a trustworthy data point**. It may have run; it
+cannot be shown to have run. Its byte-identical counters should not be treated
+as evidence about the gate, and the argument for attempt 3 does not need them:
+attempt 3 is the one-variable experiment regardless.
+
 **Compile hazard confirmed, not yet cleared:** `compile_log.txt` ends mid-word
 (`Warni`), so the 18:24 Analysis & Synthesis really was killed. `db/` (700 files)
 and `incremental_db/` must be deleted before the next compile.
