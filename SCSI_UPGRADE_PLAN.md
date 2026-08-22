@@ -782,6 +782,82 @@ transaction must finish it** (status *and* message); leaving the target holding
 BSY makes the next selection fail silently and the following test measure
 nothing.
 
+### The third reading: the transaction completed, invisibly (review, 2026-08-22)
+
+An independent review of the wedge evidence against the RTL produced a third
+reading, distinct from both "the driver missed REQ" and "selection never
+succeeded" — and it explains every probed value with one defect.
+
+First, a deduction that kills the selection theory outright: the CDB tail in
+the write ring **proves selection succeeded**. The Plus SCSI Manager sends
+command bytes per-byte, polled on REQ; it will not write byte N+1 without
+seeing REQ for it. Ten bytes written means a target answered selection and
+handshook the whole COMMAND phase.
+
+Second, a deduction that kills the missed-REQ theory: with the target sitting
+in STATUS_OUT and `req` un-suppressed, the polling loop *cannot* spin 129 ms.
+`bsr_dmarq` is un-deferred, and the CSR REQ deferral is bounded at 1024 clocks
+(~31 µs). Either the loop exited, or `req` was suppressed for the entire
+window. No suppressor exists on the no-media path (`req_rd` needs DATA_OUT,
+`req_wr` needs `cmd_write`, ICR.ACK reads 0), so: the loop exited.
+
+The mechanism. `bsr_dmarq = scsi_req & dma_en` (`ncr5380.sv` ~218) has **no
+phase-match term**. A real 5380 inhibits DRQ and halts the DMA handshake when
+REQ arrives with MSG/CD/IO not matching the TCR, leaving REQ visible in CSR so
+the driver's loop exits through the REQ test and the SCSI Manager handles the
+phase change. That inhibition is the entire exit ramp for "target CHECKed
+instead of entering a data phase," and our model lacks it. So:
+
+1. No media → READ dispatches to STATUS_OUT with CHECK (correct).
+2. Driver arms `DMAinitRcv`; `dma_en=1` meets the status-phase REQ; DRQ rises.
+3. The blind loop sees BSR bit 6, does a DACK read; `dma_ack` pulses ACK; the
+   target's status byte is consumed *as sector data* and discarded.
+4. MESSAGE_OUT asserts REQ; DRQ again; a second DACK read eats COMMAND
+   COMPLETE; phase → IDLE. **Bus free, in microseconds, no watchdog involved.**
+5. The driver has 2 of ~512 blind-read bytes and polls a free bus forever.
+
+Why the other measurements fit: CSR=0x00 (transaction genuinely ended);
+write counter frozen (the pump loop writes nothing until its count is
+satisfied); zero CD sector fetches (no data phase ever dispatched); the sense
+bisect was a no-op because the driver never reaches REQUEST SENSE — the frozen
+write counter is the airtight proof of that, not the bisect. The intermittency
+with a disc is the *same* bug: `cd_no_media` includes `!toc_ready`, so a READ
+that lands before the TOC build finishes takes the identical CHECK path — one
+bug, one race, not two. And BSR bit 4: `irq_latch` is edge-triggered on a
+pmatch 1→0 while `dma_armed`; a mismatch that *predates* the arm (as here)
+produces no edge — a second divergence from the real chip, which level-checks
+phase match when DMA starts. (Open discrepancy: this section earlier recorded
+`BSR=0x90` and the review worked from `0x80`. Bit 4 set is still consistent —
+`irq_latch` persists from any earlier completed transfer until a reg-7 *read*
+clears it — but resolve which was measured; it constrains whether this driver
+ever reads reg 7.)
+
+**The one datum in tension, and the measurement that settles it.** The "no
+DACK reads" probe row contradicts the mechanism, which predicts **exactly two**
+DACK reads within microseconds of the reg-7 write. If a correct counter of
+`i_dma_rd` edges truly reads 0 since the arm, the mechanism is falsified.
+Check what the instrument counts first: two isolated DACK reads followed by
+hours of filtered polling are easy to lose in the access ring, and the ring's
+`~dack` decode may not capture the DACK window at all. Sticky probes to add,
+cleared on selection / on the reg-7 write:
+
+1. 2-bit DACK-read counter since last `DMAinitRcv` write — predict 2.
+2. `wdog_abort` / `iostall_abort` fire counters — predict **0**; the
+   missed-REQ reading requires ≥1. This alone separates the theories.
+3. Phase-visit bitmask since selection — predict CMD→STATUS→MESSAGE→IDLE,
+   no DATA phase.
+4. Sticky "`req` high while `phase==STATUS_OUT`" — the fallback theory
+   (io_busy suppression, third term of `scsi.v` ~232) has no identified
+   setter but can't be excluded post-hoc, because the abort path clears
+   `io_rd`/`io_wr`/`wr_pending` and destroys the evidence.
+
+**Fix shape, if confirmed:** gate `bsr_dmarq` and `dma_ack` with `bsr_pmatch`
+so a DACK access during a mismatch cannot ACK a status byte, and make the
+completion-IRQ latch level-triggered (`dma_en && scsi_req && !bsr_pmatch`) so
+a mismatch already present at arm time still latches — which also gives the
+SCSI Manager the BSR bit 4 it expects after a short transfer. Per the method
+note above: run the discriminating measurement before trusting the fix.
+
 ### Gates
 
 `disk 12/12, CD 35/35, seam 32/32` — run all three, disk first.
