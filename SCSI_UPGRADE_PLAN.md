@@ -941,9 +941,72 @@ deck is not instantiated.
 the fix — and resolve the `BSR=0x90` vs `0x80` question from that capture, since
 `PDM2` now reports whether the IRQ ever latched.
 
+### The hardware capture, and the fix (2026-08-22, commit `ce70a45` + this one)
+
+Captured on the DE10 with the machine wedged at "Welcome to Macintosh", no disc
+mounted, booting from a SCSI hard disk. **The reading is confirmed.**
+
+```
+PSCS  last READ  reg=BSR  val=80        PSCW  last WRITE reg=DMAinitRcv
+PODR  00 00 01 00                       PIO2  cd rd=0   disk0 rd=170
+PRG   rd CDR (DACK) 55  x8              <- 0x55 is ncr5380's idle `din`
+PDMA  DACK reads since the DMA arm: 15 (saturated)   arms since selection 1
+      watchdog fires since selection: bus=0  io-stall=0
+PDM2  DACK-in-mismatch=1  ACK-in-STATUS=1  IRQ-latched=1  REQ-in-STATUS=1
+      live: BSY=0 REQ=0 DMA_EN=1 PMATCH=0
+```
+
+* **`ACK-in-STATUS=1` with `DACK-in-mismatch=1`** — a DACK read pulsed ACK while
+  the target sat in STATUS. That is the mechanism, observed directly.
+* **Both watchdog counters are 0.** The missed-REQ reading needs at least one.
+  Dead.
+* **`cd rd=0`** — the CD target never once asked the HPS for a sector, so no
+  data phase was ever dispatched, independently of the phase mask.
+* **The bus is free** (`BSY=0`) while the driver polls, and the eight newest
+  accesses are DACK reads returning `0x55` — `ncr5380`'s idle `din`. The driver
+  is blind-reading a bus with nobody on it.
+
+Two things did NOT match the prediction, and both are informative:
+
+1. **15+ DACK reads, not 2.** The prediction assumed the loop stops when DRQ
+   drops. It does not — that is what *blind* means. It eats STATUS and MESSAGE,
+   then keeps pumping the rest of its count off a dead bus. Not a falsification;
+   a correction to the model of the driver. The 4-bit counter saturated at 15
+   and hid the real figure, so it is 8 bits now.
+2. **A `DATA-IN` bit in the phase mask** — for a transaction that had no data
+   phase. This was **my instrument being wrong**: `dbg_bus[0]` was `scsi_bsy`,
+   which also carries the *initiator's* own BSY (ICR bit 3) and `MR_ARB`. During
+   arbitration both are high while no target drives MSG/CD/IO, and the decoder
+   read that as phase 3. Fixed to `|target_bsy`, with a regression in
+   `sim/tb_dbg_probes.v` that fails if the tap ever goes back. It also explains
+   the `IDLE, DATA-IN, CMD` ordering in the phase ring, which is otherwise
+   impossible. Because of the false DATA bit the verdict line printed
+   "inconclusive" on a capture that was conclusive.
+
+**`BSR=0x90` vs `0x80` is settled too.** `IRQ-latched=1` (sticky, since
+selection) with a live `BSR` of `0x80` means the latch *was* set and a reg-7
+read has since cleared it. Both earlier readings were true, at different moments
+— and the driver does read reg 7.
+
+**The fix, now applied:**
+
+* `dreq` and `bsr_dmarq` gain the `bsr_pmatch` term: DRQ is inhibited on a phase
+  mismatch, as a real 5380 does.
+* `dma_ack` gains it too, so a DACK access during a mismatch cannot ACK.
+* `irq_latch` becomes **level**-triggered (`dma_armed && scsi_req &&
+  !bsr_pmatch`). The edge form only fires when the mismatch appears *after* the
+  arm; here it predates it, so no edge and no IRQ. Gated on `dma_armed` rather
+  than the review's suggested `dma_en`, because `seam6` documents why gating on
+  `dma_en` drops the IRQ when a driver clears MR.DMA_MODE before the phase
+  change.
+
+`seam11` now asserts the corrected behaviour: DRQ inhibited, no ACK, target
+still in STATUS still asking, REQ visible in CSR so the poll loop can exit, and
+the IRQ latched. The register path still completes the transaction.
+
 ### Gates
 
-`disk 12/12, CD 35/35, seam 45/45, probes 20/20, reader 9/9` — run all five,
+`disk 12/12, CD 35/35, seam 44/44, probes 23/23, reader 9/9` — run all five,
 disk first. The last two cover the instrument, not the core:
 
 ```

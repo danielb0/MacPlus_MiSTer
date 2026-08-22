@@ -161,10 +161,10 @@ for {set n 0} {$n < $samples} {incr n} {
 	set pdm2 [b2i [rd PDM2]]
 
 	set dack_tot [expr {($pdma >> 24) & 0xff}]
-	set dack_arm [expr {($pdma >> 20) & 0xf}]
-	set arm_cnt  [expr {($pdma >> 16) & 0xf}]
-	set wdog_cnt [expr {($pdma >> 12) & 0xf}]
-	set iowd_cnt [expr {($pdma >>  8) & 0xf}]
+	set dack_arm [expr {($pdma >> 16) & 0xff}]
+	set arm_cnt  [expr {($pdma >> 14) & 0x3}]
+	set wdog_cnt [expr {($pdma >> 11) & 0x7}]
+	set iowd_cnt [expr {($pdma >>  8) & 0x7}]
 	set phmask   [expr {($pdma >>  2) & 0x3f}]
 	set req_stat [expr {($pdma >>  1) & 1}]
 	set req_msg  [expr { $pdma        & 1}]
@@ -189,10 +189,10 @@ for {set n 0} {$n < $samples} {incr n} {
 		append ringstr "[lindex $phname [expr {($ring >> ($e * 3)) & 7}]] "
 	}
 
-	puts [format "  PDMA  DACK reads since the DMA arm: %d   (lifetime %s, arms since selection %d)" 	             $dack_arm [expr {$dack_tot >= 255 ? ">=255" : $dack_tot}] $arm_cnt]
+	puts [format "  PDMA  DACK reads since the DMA arm: %s   (lifetime %s, arms since selection %d)" 	             [expr {$dack_arm >= 255 ? ">=255" : $dack_arm}] 	             [expr {$dack_tot >= 255 ? ">=255" : $dack_tot}] $arm_cnt]
 	puts [format "        watchdog fires since selection: bus=%d  io-stall=%d" $wdog_cnt $iowd_cnt]
 	puts [format "        phases visited since selection: %s" [string trim $seen]]
-	puts [format "  PDM2  sticky: DACK-in-mismatch=%d DRQ-in-mismatch=%d ACK-in-STATUS=%d IRQ-latched=%d REQ-in-STATUS=%d REQ-in-MESSAGE=%d" 	             $dack_mis $drq_mis $ack_stat $irq_seen $req_stat $req_msg]
+	puts [format "  PDM2  sticky: DACK-in-mismatch=%d REQ+DMA-in-mismatch=%d ACK-in-STATUS=%d IRQ-latched=%d REQ-in-STATUS=%d REQ-in-MESSAGE=%d" 	             $dack_mis $drq_mis $ack_stat $irq_seen $req_stat $req_msg]
 	puts [format "        live: BSY=%d REQ=%d DMA_EN=%d PMATCH=%d" $lv_bsy $lv_req $lv_dma $lv_pm]
 	puts [format "        phase ring (newest first): %s" [string trim $ringstr]]
 
@@ -201,10 +201,11 @@ for {set n 0} {$n < $samples} {incr n} {
 	set data_seen [expr {($phmask >> 2) & 1 || ($phmask >> 3) & 1}]
 	if {$wdog_cnt > 0 || $iowd_cnt > 0} {
 		puts "  ==>   a watchdog FIRED: the invisible-completion reading is out."
-	} elseif {$dack_arm >= 2 && !$data_seen && $dack_mis} {
+	} elseif {$dack_arm >= 2 && !$data_seen && $dack_mis && $ack_stat} {
 		puts "  ==>   CONFIRMED: DACK reads during a phase mismatch consumed the"
-		puts "        transaction. No data phase, no watchdog. Fix = gate bsr_dmarq"
-		puts "        and dma_ack with bsr_pmatch (SCSI_UPGRADE_PLAN.md 5.6)."
+		puts "        transaction (ACK pulsed while the target was in STATUS)."
+		puts "        No data phase, no watchdog. Fix = gate bsr_dmarq and"
+		puts "        dma_ack with bsr_pmatch (SCSI_UPGRADE_PLAN.md 5.6)."
 	} elseif {$arm_cnt > 0 && $dack_arm == 0} {
 		puts "  ==>   FALSIFIED: the driver armed pseudo-DMA and then did NO DACK"
 		puts "        read at all. The transaction did not complete this way."
@@ -236,7 +237,9 @@ puts "  * PDMA/PDM2 are the discriminating word. Both readings of the wedge"
 puts "    predict the SAME frozen PSCS/PODR capture; they differ only here."
 puts "    Predicted by the invisible-completion reading: DACK-since-arm=2,"
 puts "    both watchdog counts 0, phases CMD/STATUS/MESSAGE/IDLE with no DATA,"
-puts "    DACK-in-mismatch=1, IRQ-latched=0."
+puts "    DACK-in-mismatch=1 and ACK-in-STATUS=1."
+puts "  * With the pmatch gate in place ACK-in-STATUS must read 0: a DACK read"
+puts "    during a mismatch no longer consumes the target's status byte."
 puts "  * The old DACK row in PRG was a 4-bit WRAPPING counter that was never"
 puts "    cleared, so on a machine that booted off a SCSI disk it read as noise"
 puts "    mod 16. Trust the PDMA fields, not that row."

@@ -240,11 +240,15 @@ module dbg_probes (
 	reg  [2:0] phase_d = 3'd0;
 	wire new_sel = ~dbg_bsy_d & dbg_bsy;             // selection: the epoch mark
 
+	// The 2026-08-22 capture pinned dack_rd_arm at its 4-bit maximum, which
+	// answered "more than 2" but hid the real figure -- the driver blind-reads
+	// a whole chunk, not two bytes. 8 bits now; the abort and arm counters
+	// only ever need to separate zero from non-zero, so they give up the room.
 	reg  [7:0] dack_rd_tot = 0;   // lifetime, saturating
-	reg  [3:0] dack_rd_arm = 0;   // since the last DMA start, saturating
-	reg  [3:0] arm_cnt     = 0;   // DMA starts since selection
-	reg  [3:0] wdog_cnt    = 0;   // bus-watchdog aborts since selection
-	reg  [3:0] iowdog_cnt  = 0;   // io-stall aborts since selection
+	reg  [7:0] dack_rd_arm = 0;   // since the last DMA start, saturating
+	reg  [1:0] arm_cnt     = 0;   // DMA starts since selection
+	reg  [2:0] wdog_cnt    = 0;   // bus-watchdog aborts since selection
+	reg  [2:0] iowdog_cnt  = 0;   // io-stall aborts since selection
 	reg  [5:0] phase_seen  = 0;   // bit n = phase code n visited since selection
 	reg [23:0] phase_ring  = 0;   // last 8 phases, newest in [2:0]
 
@@ -266,14 +270,14 @@ module dbg_probes (
 
 		// Per-arm DACK reads. Cleared by the arming write itself, so a capture
 		// answers "how many DACK reads since the driver said go", not "ever".
-		if (dma_arm)                       dack_rd_arm <= 4'd0;
-		else if (dack_rd && ~&dack_rd_arm) dack_rd_arm <= dack_rd_arm + 4'd1;
+		if (dma_arm)                       dack_rd_arm <= 8'd0;
+		else if (dack_rd && ~&dack_rd_arm) dack_rd_arm <= dack_rd_arm + 8'd1;
 
 		// Everything below is per-transaction.
 		if (new_sel) begin
-			arm_cnt       <= 4'd0;
-			wdog_cnt      <= 4'd0;
-			iowdog_cnt    <= 4'd0;
+			arm_cnt       <= 2'd0;
+			wdog_cnt      <= 3'd0;
+			iowdog_cnt    <= 3'd0;
 			phase_seen    <= 6'd0;
 			st_req_status <= 1'b0;
 			st_req_msgout <= 1'b0;
@@ -282,9 +286,9 @@ module dbg_probes (
 			st_ack_status <= 1'b0;
 			st_irq_seen   <= 1'b0;
 		end else begin
-			if (dma_arm                     && ~&arm_cnt)    arm_cnt    <= arm_cnt    + 4'd1;
-			if (~dbg_wdog_d   & dbg_wdog    && ~&wdog_cnt)   wdog_cnt   <= wdog_cnt   + 4'd1;
-			if (~dbg_iowdog_d & dbg_iowdog  && ~&iowdog_cnt) iowdog_cnt <= iowdog_cnt + 4'd1;
+			if (dma_arm                     && ~&arm_cnt)    arm_cnt    <= arm_cnt    + 2'd1;
+			if (~dbg_wdog_d   & dbg_wdog    && ~&wdog_cnt)   wdog_cnt   <= wdog_cnt   + 3'd1;
+			if (~dbg_iowdog_d & dbg_iowdog  && ~&iowdog_cnt) iowdog_cnt <= iowdog_cnt + 3'd1;
 			if (phase_now < 3'd6) phase_seen[phase_now] <= 1'b1;
 
 			if (dbg_req && (phase_now == 3'd4)) st_req_status <= 1'b1;
@@ -303,6 +307,11 @@ module dbg_probes (
 	// PSCS keeps a nibble of the lifetime total for continuity; 15 means ">=15".
 	wire [3:0] dack_rd_nib = (dack_rd_tot > 8'd15) ? 4'd15 : dack_rd_tot[3:0];
 
+	// PDMA packing, mirrored in scripts/read_probes.tcl and sim/tb_dbg_probes.v:
+	//   [31:24] lifetime DACK reads   [23:16] DACK reads since the DMA arm
+	//   [15:14] arms since selection  [13:11] bus-watchdog fires
+	//   [10:8]  io-stall fires        [7:2]   phase-visit mask
+	//   [1] REQ seen in STATUS        [0] REQ seen in MESSAGE
 	reg [31:0] pdma_r, pdm2_r;
 	always @(posedge clk) begin
 		pdma_r <= {dack_rd_tot, dack_rd_arm, arm_cnt, wdog_cnt, iowdog_cnt,

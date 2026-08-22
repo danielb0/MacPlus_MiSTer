@@ -154,6 +154,22 @@ module tb_dbg_probes;
 		end
 	endtask
 
+	// Collect one byte through the REGISTER file (not the DACK window) and
+	// handshake it. With the pmatch gate in place this is the only way to
+	// finish a transaction the target is holding in STATUS/MESSAGE.
+	task recv_reg_byte(output [7:0] b);
+		integer g;
+		begin
+			g = 0;
+			while (!dut.scsi_req && g < 4000) begin @(posedge clk); g = g + 1; end
+			bus_cycle(1'b1, 1'b0, `R_CDR, 8'h00, b);
+			reg_wr_(`W_ICR, 8'h10);               // A_ACK
+			while (dut.scsi_req && g < 8000) begin @(posedge clk); g = g + 1; end
+			reg_wr_(`W_ICR, 8'h00);
+			while (!dut.scsi_req && dut.scsi_bsy && g < 12000) begin @(posedge clk); g = g + 1; end
+		end
+	endtask
+
 	task select_cd;
 		integer g;
 		begin
@@ -169,10 +185,10 @@ module tb_dbg_probes;
 	wire [31:0] pdma = probes.pdma_r;
 	wire [31:0] pdm2 = probes.pdm2_r;
 	wire  [7:0] f_dack_tot = pdma[31:24];
-	wire  [3:0] f_dack_arm = pdma[23:20];
-	wire  [3:0] f_arm_cnt  = pdma[19:16];
-	wire  [3:0] f_wdog     = pdma[15:12];
-	wire  [3:0] f_iowdog   = pdma[11:8];
+	wire  [7:0] f_dack_arm = pdma[23:16];
+	wire  [1:0] f_arm_cnt  = pdma[15:14];
+	wire  [2:0] f_wdog     = pdma[13:11];
+	wire  [2:0] f_iowdog   = pdma[10:8];
 	wire  [5:0] f_phases   = pdma[7:2];
 	wire        f_req_stat = pdma[1];
 	wire        f_dack_mis = pdm2[31];
@@ -212,33 +228,51 @@ module tb_dbg_probes;
 		repeat (20) @(posedge clk);
 
 		// ---- the discriminating word --------------------------------------
-		ok("probe - PDMA reports exactly the 2 DACK reads the mechanism predicts",
+		// The RTL now gates the DMA handshake on phase match, so this replay
+		// measures a target that CHECKed and is still asking. The probe deck
+		// has to report exactly that -- these are assertions about the
+		// INSTRUMENT, and each one is a field scripts/read_probes.tcl prints.
+		ok("probe - PDMA counts both DACK reads even though neither ACKed",
 		   f_dack_arm == 2 && f_dack_tot == 2);
 		ok("probe - PDMA reports no bus-watchdog fire",  f_wdog   == 0);
 		ok("probe - PDMA reports no io-stall fire",      f_iowdog == 0);
-		ok("probe - PDMA phase mask is CMD+STATUS+MESSAGE+IDLE, no DATA",
-		   f_phases == 6'b110011);
+		ok("probe - PDMA phase mask is CMD+STATUS, and no DATA phase",
+		   f_phases == 6'b010010);
 		ok("probe - PDMA saw REQ while the target sat in STATUS", f_req_stat);
-		ok("probe - PDM2 caught a DACK read during a phase mismatch", f_dack_mis);
-		ok("probe - PDM2 caught DRQ asserted during a phase mismatch", f_drq_mis);
-		ok("probe - PDM2 caught ACK pulsing in STATUS (the byte moved)", f_ack_stat);
-		ok("probe - PDM2 reports the IRQ never latched", !f_irq_seen);
-		ok("probe - PDM2 phase ring reads IDLE, MESSAGE, STATUS, CMD (newest first)",
-		   f_ring[2:0] == 3'd0 && f_ring[5:3] == 3'd5 &&
-		   f_ring[8:6] == 3'd4 && f_ring[11:9] == 3'd1);
-		ok("probe - the transaction really did end (bench premise)", !dut.scsi_bsy);
-		ok("probe - the two DACK reads returned STATUS then MESSAGE",
-		   b1 == 8'h02 && b2 == 8'h00);
+		ok("probe - PDM2 still flags the DACK read taken during a mismatch",
+		   f_dack_mis);
+		ok("probe - PDM2 flags REQ+DMA meeting a mismatch (what inhibits DRQ)",
+		   f_drq_mis);
+		ok("probe - PDM2 reports NO ACK in STATUS -- the gate is holding",
+		   !f_ack_stat);
+		ok("probe - PDM2 reports the completion IRQ latched", f_irq_seen);
+		ok("probe - PDM2 phase ring reads STATUS, CMD (newest first)",
+		   f_ring[2:0] == 3'd4 && f_ring[5:3] == 3'd1);
+		ok("probe - the target is still holding the bus, still asking",
+		   dut.scsi_bsy && dut.scsi_req);
+		ok("probe - both DACK reads returned the STATUS byte, unconsumed",
+		   b1 == 8'h02 && b2 == 8'h02);
+
+		// Finish the transaction the way the driver now has to: the register
+		// path. Leaving it unfinished parks the target on BSY and the epoch
+		// test below would measure a selection that never happened.
+		reg_wr_(`W_MR, 8'h00);
+		recv_reg_byte(b1);                        // status
+		recv_reg_byte(b2);                        // message
+		begin : rel
+			integer g;
+			g = 0;
+			while (dut.scsi_bsy && g < 4000) begin @(posedge clk); g = g + 1; end
+		end
+		ok("probe - the register path still completes it (status then message)",
+		   !dut.scsi_bsy && b1 == 8'h02 && b2 == 8'h00);
 
 		// ---- the epoch behaviour the old counter lacked --------------------
 		// A sticky bit that can never be cleared, or a counter that never
 		// re-arms, reads the same on every capture and measures nothing.
-		// Clear DMA mode first: dma_en survives a transaction, so a fresh
-		// selection into COMMAND phase re-asserts the DRQ-during-mismatch bit
-		// immediately and legitimately. That is the RTL being honest, not the
-		// probe failing to clear -- but it makes for an ambiguous test, so the
-		// epoch check starts from a disarmed 5380.
-		reg_wr_(`W_MR, 8'h00);
+		// dma_en is already cleared above, so the epoch check starts from a
+		// disarmed 5380 and any sticky bit that reappears is a real clear
+		// failure rather than honest new evidence.
 		select_cd;
 		repeat (4) @(posedge clk);
 		ok("probe - selection clears the per-transaction stickies",
@@ -253,6 +287,38 @@ module tb_dbg_probes;
 		repeat (8) @(posedge clk);
 		ok("probe - and counts again from there", f_dack_arm == 1);
 		ok("probe - while the lifetime total keeps climbing", f_dack_tot == 3);
+
+		// ---- the artifact that misread the 2026-08-22 hardware capture -----
+		// dbg_bus bit 0 must be the TARGET's BSY. scsi_bsy also carries the
+		// initiator's own BSY (ICR bit 3) and MR_ARB, and during arbitration
+		// both are high while NO target drives MSG/CD/IO -- which decodes as
+		// phase 3, DATA-IN. On hardware that painted a DATA phase into the
+		// mask of a transaction that never had one, and the verdict line went
+		// "inconclusive" on a capture that was actually conclusive.
+		begin : arb_artifact
+			integer g;
+			reg [5:0] before_mask;
+			// Park the bus idle and start a fresh epoch.
+			select_cd;
+			reg_wr_(`W_ICR, 8'h00);
+			recv_reg_byte(b1);                    // let it CHECK out cleanly
+			g = 0;
+			while (dut.scsi_bsy && g < 8000) begin
+				if (dut.scsi_req) recv_reg_byte(b2);
+				@(posedge clk); g = g + 1;
+			end
+			// Now assert the INITIATOR's BSY and arbitration, with no target.
+			reg_wr_(`W_MR,  8'h01);               // MR_ARB
+			reg_wr_(`W_ICR, 8'h08);               // ICR_A_BSY
+			before_mask = f_phases;
+			repeat (40) @(posedge clk);
+			ok("probe - initiator BSY/arbitration does not fake a DATA phase",
+			   (f_phases[3:2] == 2'b00) && (f_phases == before_mask));
+			ok("probe - and the 5380 really is reporting BSY at the time",
+			   dut.scsi_bsy);
+			reg_wr_(`W_ICR, 8'h00);
+			reg_wr_(`W_MR,  8'h00);
+		end
 
 		$display("");
 		$display("PROBES: %0d of %0d failing", fails, tests);
