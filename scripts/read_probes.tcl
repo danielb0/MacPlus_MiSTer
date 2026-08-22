@@ -95,6 +95,7 @@ proc rd {name} {
 
 proc b2i {v} { return $v }
 
+set prev_wr -1
 for {set n 0} {$n < $samples} {incr n} {
 	set pifd [b2i [rd PIFD]]
 	set pios [b2i [rd PIOS]]
@@ -260,20 +261,43 @@ for {set n 0} {$n < $samples} {incr n} {
 
 	# The reading this capture supports, stated outright so a capture cannot be
 	# quietly re-interpreted after the fact.
+	#
+	# But these verdicts only MEAN anything on a machine that is actually stuck.
+	# "Armed pseudo-DMA and no DACK yet" is the normal window between arming and
+	# the first byte, hit constantly during a healthy transfer -- a CD-to-disk
+	# copy printed FALSIFIED in capitals on three samples out of five while
+	# working perfectly. Confident-but-wrong instrument output is what made this
+	# investigation expensive; the verdict now says when it cannot judge.
+	#
+	# Activity is measured by the WRITE counter alone. Reads are useless for this:
+	# the wedged machine polled BSR thousands of times a second, so reads advanced
+	# the whole time it was stuck. Writes froze -- that was the airtight signal.
 	set data_seen [expr {($phmask >> 2) & 1 || ($phmask >> 3) & 1}]
+	set can_judge [expr {$samples > 1 && $n > 0}]
+	set active    [expr {$can_judge && ($wr_cnt != $prev_wr)}]
 	if {$wdog_cnt > 0 || $iowd_cnt > 0} {
-		puts "  ==>   a watchdog FIRED: the invisible-completion reading is out."
+		puts "  ==>   a watchdog FIRED: a target timed out waiting for a handshake"
+		puts "        that never came. Always worth explaining, busy or not."
+	} elseif {$active} {
+		puts "  ==>   bus ACTIVE -- register writes are advancing, so the machine"
+		puts "        is NOT wedged. Wedge verdicts suppressed; they apply only"
+		puts "        to a stuck machine."
 	} elseif {$dack_arm >= 2 && !$data_seen && $dack_mis && $ack_stat} {
 		puts "  ==>   CONFIRMED: DACK reads during a phase mismatch consumed the"
 		puts "        transaction (ACK pulsed while the target was in STATUS)."
-		puts "        No data phase, no watchdog. Fix = gate bsr_dmarq and"
-		puts "        dma_ack with bsr_pmatch (SCSI_UPGRADE_PLAN.md 5.6)."
+		puts "        No data phase, no watchdog. Fix = gate dma_ack on the bus"
+		puts "        data phase (SCSI_UPGRADE_PLAN.md 5.6)."
 	} elseif {$arm_cnt > 0 && $dack_arm == 0} {
 		puts "  ==>   FALSIFIED: the driver armed pseudo-DMA and then did NO DACK"
 		puts "        read at all. The transaction did not complete this way."
+		if {!$can_judge} {
+			puts "        (single sample: cannot tell a wedge from a healthy machine"
+			puts "        caught mid-arm. Take several samples.)"
+		}
 	} else {
 		puts "  ==>   inconclusive so far -- sample again while wedged."
 	}
+	set prev_wr $wr_cnt
 	puts ""
 
 	if {$n + 1 < $samples} { after [expr {int($delay * 1000)}] }

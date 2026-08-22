@@ -1467,6 +1467,58 @@ C:/iverilog/bin/iverilog.exe -g2005-sv -o sim/out/tb_dbg_probes.vvp sim/tb_dbg_p
 tclsh sim/test_read_probes.tcl
 ```
 
+### Soak test found a SECOND wedge, unrelated to the first (2026-08-22)
+
+Copying ~32 MB from CD to a hard disk hung the machine. **Not the bug we fixed** —
+`ACK-in-STATUS=0`, `DACK-in-mismatch=0`, bus watchdog `bus=0`. Different signature:
+
+```
+PSCW  last WRITE reg=ODR (DACK)  (writes:58 FROZEN across 4 samples)
+PIFA  PC looping 00FD1C - 00FD26      PSCS alternating BSR=98 / CSR=00
+PDMA  watchdog fires: bus=0  io-stall=1      <-- the IO-STALL timer, not the bus one
+      phases visited: IDLE CMD DATA>targ(WRITE) STATUS
+PDM3  DACK writes since the arm: >=255       live: BSY=0 REQ=0 DMA_EN=1
+```
+
+**An HPS write never completed.** `IOWDOG_LOG=24` aborts an outstanding transfer
+after 2^24 clocks at 32.5 MHz (~516 ms). The abort released the bus and left the
+driver polling forever — **recovery that does not recover**, which is the real
+defect here whatever triggered it.
+
+**Ruled out by measurement, not assumption:**
+
+* *Write past the end of the image.* The volume is 1.3 GB with 222 MB free.
+* *LBA truncation.* 32-bit clean end to end: `scsi.v io_lba[31:0]` ->
+  `ncr5380 io_lba[31:0]` -> `sd_lba[31:0]`, and `lba10` is a full 32 bits.
+* *The 21-bit READ(6)/WRITE(6) ceiling* (2,097,152 blocks = exactly 1 GiB, and
+  ~1.08 GB was in use, so this looked extremely promising). Dead: `cmd_read10`
+  /`cmd_write10` (0x28/0x2a) are implemented and `lba10` is used for them.
+* *The CD path.* `cd rd=96 ack=96`, `cd fetch stuck=0`.
+
+**Leading hypothesis: SD-card write latency exceeded the 516 ms timeout.** Cards
+stall for hundreds of ms during internal garbage collection, specifically under
+sustained write load — which a 32 MB copy is and which hours of CD reading is not.
+
+**Discriminator, not yet run:** repeat the same copy. Hanging at the same file =
+deterministic (address/data dependent) and the probe deck needs the DISK lba added
+— `PIOS` carries `cd_io_lba` only, which is why this could not be pinned down live.
+Hanging elsewhere, or completing = timing, and the fix is ours.
+
+**Aggravating factor: the volume is absurdly large for the era.** HFS addresses at
+most 65,536 allocation blocks, so 1.3 GB means ~20 KB per block and every small
+file costs 20 KB — far more block writes than the file count suggests. Legal (under
+the 2 GB HFS ceiling) but nothing a Plus ever saw; period drives were 20-80 MB.
+Testing continues on smaller images, which **masks this rather than fixing it**.
+
+**Fixes worth making regardless of cause:**
+
+1. An io-stall abort must leave the initiator recoverable, not polling a dead bus.
+2. A longer timeout (`IOWDOG_LOG` 24 -> 26 is ~2 s) if SD latency is confirmed.
+3. Still outstanding from Phase 1: `capacity <= img_blocks` on the disk path
+   ([scsi.v:365](rtl/scsi.v:365)) advertises one block MORE than exists, and there
+   is **no LBA bounds check anywhere** — an out-of-range LBA reaches the HPS and
+   stalls exactly like this. Not the cause here, but the same crater.
+
 ### Debug scaffolding: removed (2026-08-22)
 
 Removed now that the wedge is fixed and the CD path is proved (browsed and
