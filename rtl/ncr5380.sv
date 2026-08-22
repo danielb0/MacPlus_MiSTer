@@ -99,7 +99,7 @@ module ncr5380
 	// Stall timeout for an HPS fetch that never completes; see scsi.v.
 	parameter IOWDOG_LOG = 24;
 
-	assign dreq = scsi_req & dma_en;
+	assign dreq = scsi_req & dma_en & bus_data_phase;
 
 	reg  [7:0] mr;        /* Mode Register */
 	reg  [7:0] icr;       /* Initiator Command Register */
@@ -137,7 +137,12 @@ module ncr5380
 
 		if(~old_dma_wr & i_dma_wr) dma_wr <= 1;
 		if(~old_reg_wr & i_reg_wr) reg_wr <= 1;
-		if((old_dma_wr & ~i_dma_wr) | (old_dma_rd & ~i_dma_rd)) dma_ack <= dma_en;
+		// Gated on the BUS PHASE. A DACK access must not ACK a byte the target
+		// is offering from STATUS or MESSAGE -- that is the confirmed defect
+		// (hardware 2026-08-22: ACK-in-STATUS=1, no watchdog, bus free).
+		// Keyed on the phase rather than on bsr_pmatch because the Plus driver
+		// does not maintain TCR across a write data phase (seam12).
+		if((old_dma_wr & ~i_dma_wr) | (old_dma_rd & ~i_dma_rd)) dma_ack <= dma_en & bus_data_phase;
 	end
 
 	/* System bus reads */
@@ -221,24 +226,29 @@ module ncr5380
 	/* Bus and Status register */
 	/* BSR (read only). We don't do a few things... */
 	wire bsr_eodma = ~(scsi_bsy & ~scsi_cd & ~scsi_msg);	/* asserted whenever NOT in a data phase */
-	/* UNGATED, and known to be wrong -- this is the confirmed CD-ROM no-media
-	 * defect, reverted to on 2026-08-22 after two failed attempts at the gate.
-	 * A real 5380 inhibits DRQ and halts the DMA handshake when REQ arrives in a
-	 * phase the initiator did not arm for; without that, a blind pump loop ACKs
+	/* A real 5380 inhibits DRQ, and halts the DMA handshake, when REQ arrives
+	 * in a phase the initiator did not arm for. That inhibition is the exit ramp
+	 * for "the target CHECKed instead of entering the data phase": REQ stays
+	 * visible in CSR, the driver's poll loop exits through its REQ test, and the
+	 * SCSI Manager handles the phase change. Without it a blind pump loop ACKs
 	 * the STATUS byte as sector data and the transaction ends invisibly
-	 * (seam11).
+	 * (seam11; hardware confirmed ACK-in-STATUS with no watchdog fire).
 	 *
-	 * Attempt 1 gated on bsr_pmatch: broke every pseudo-DMA WRITE, because the
-	 * Plus driver does not maintain TCR across a write data phase (seam12).
-	 * Attempt 2 gated on the bus phase (scsi_bsy & ~scsi_cd & ~scsi_msg): passes
-	 * every bench including seam12, and STILL hangs the machine early on
-	 * hardware in the same place, with the same counters. Whatever the driver
-	 * does between arming DMA and the target entering its data phase is not
-	 * modelled by any bench here, so the next move is to MEASURE that window
-	 * (phase-at-arm, DACK writes per arm, TCR) rather than to guess a third
-	 * time.
+	 * Keyed on the BUS PHASE, not on bsr_pmatch: gating on TCR broke every
+	 * pseudo-DMA WRITE, because the Plus driver does not maintain TCR across a
+	 * write data phase (seam12). This is the same condition bsr_eodma reports,
+	 * so the two cannot disagree.
+	 *
+	 * NOTE, 2026-08-22: this is the review's PRIMARY finding, implemented on its
+	 * own. The earlier two attempts also made the completion-IRQ latch
+	 * level-triggered at the same time, and that latch fired during COMMAND
+	 * phase -- BSR=0x98 mid-write on hardware, i.e. the driver was told a
+	 * transfer had completed before its data phase had even started. Both
+	 * failures are consistent with the driver giving up on that, not with the
+	 * gate. One change at a time from here.
 	 */
-	wire bsr_dmarq = scsi_req & dma_en;
+wire bus_data_phase = scsi_bsy & ~scsi_cd & ~scsi_msg;
+	wire bsr_dmarq = scsi_req & dma_en & bus_data_phase;
 	wire bsr_perr = 1'b0;	/* We don't do parity */
 	wire bsr_irq = irq_latch;	/* latched completion IRQ, cleared by a reg-7 read */
 	wire bsr_pmatch = 

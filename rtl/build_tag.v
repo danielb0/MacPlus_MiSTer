@@ -10,5 +10,5 @@
 // loaded, not on when it was compiled. A capture must be able to name its own
 // bitstream. Read back on the PBLD probe and printed by read_probes.tcl.
 module build_tag(output [31:0] tag);
-	assign tag = 32'h13cdd790;
+	assign tag = 32'hac38fc96;
 endmodule

@@ -597,19 +597,23 @@ module tb_ncr5380_seam;
 		   s11_phase_armed == 3'd4);
 		ok("seam11 - premise: BSR reports the phase mismatch",
 		   !bsr1[`BSR_PMATCH]);
-		ok("seam11 - DEFECT: DRQ asserts anyway (a real 5380 inhibits it)",
-		   bsr1[`BSR_DRQ] && dreq);
-		ok("seam11 - DEFECT: the completion IRQ never latched (mismatch predates the arm)",
+		ok("seam11 - DRQ is inhibited outside a data phase, as a real 5380 does",
+		   !bsr1[`BSR_DRQ] && !dreq);
+		// The IRQ latch is deliberately NOT touched by this change -- see the
+		// note in ncr5380.sv. It stays edge-triggered, so a mismatch that
+		// predates the arm still produces no IRQ. That is a known gap, left
+		// open on purpose so this experiment changes exactly one thing.
+		ok("seam11 - the completion IRQ still does not latch (KNOWN GAP)",
 		   !bsr1[`BSR_IRQ]);
 
 		// The blind pump loop's first read.
 		dma_read_byte(dma_b);
 		repeat (8) @(posedge clk);
 		s11_phase_after1 = dut.target[CD_DEV].target.phase;
-		ok("seam11 - DEFECT: a DACK read returns the STATUS byte as sector data",
+		ok("seam11 - a DACK read still RETURNS the byte (a real 5380 does too)",
 		   dma_b == 8'h02);              // CHECK CONDITION
-		ok("seam11 - DEFECT: and ACKs it -- the target advances to MESSAGE",
-		   s11_phase_after1 == 3'd5);
+		ok("seam11 - but does NOT ACK it: the target stays in STATUS",
+		   s11_phase_after1 == 3'd4);
 
 		// The second read.
 		dma_read_byte(dma_b);
@@ -619,19 +623,17 @@ module tb_ncr5380_seam;
 			while (dut.scsi_bsy && g < 200) begin @(posedge clk); g = g + 1; end
 			s11_free_clks = g;
 		end
-		ok("seam11 - DEFECT: a second DACK read eats COMMAND COMPLETE",
-		   dma_b == 8'h00);
-		ok("seam11 - DEFECT: two blind reads end the whole transaction",
-		   !dut.scsi_bsy);
+		ok("seam11 - a second blind read cannot end the transaction either",
+		   dut.scsi_bsy);
 		s11_watch = 0;
 
 		ok("seam11 - no DATA phase was ever entered", !s11_data_phase);
-		ok("seam11 - ACK was asserted while the target was in STATUS",
-		   s11_ack_status);
+		ok("seam11 - ACK was never asserted in STATUS", !s11_ack_status);
 		ok("seam11 - no watchdog was involved", !s11_abort);
+		// The exit ramp: the poll loop tests CSR bit 5.
 		reg_read(`R_CSR, csr1);
-		ok("seam11 - CSR reads back 0x00 on the free bus, as the probes saw",
-		   csr1 == 8'h00);
+		ok("seam11 - CSR shows REQ, so the polling loop can exit",
+		   csr1[`CSR_REQ]);
 
 		// Finish the transaction whichever way the DUT behaved. Under today's
 		// RTL the two DACK reads already ended it; once the pmatch gate lands

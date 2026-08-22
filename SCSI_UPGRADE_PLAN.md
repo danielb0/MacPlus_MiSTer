@@ -1081,11 +1081,102 @@ failures. Nothing in the probe deck could see that window.
 
 `seam11` is back to characterising the defect, `seam12` stays (it passes on the
 ungated RTL too, and is the regression guard for attempt 1). Gates are
-`disk 12/12, CD 35/35, seam 52/52, probes 28/28, reader 12/12`.
+`disk 12/12, CD 35/35, seam 51/51, probes 29/29, reader 13/13`.
 
 **Next capture answers, in one shot:** where the driver arms, where it starts
 pumping, what TCR holds, and whether any DACK access ever lands outside a data
 phase. A gate can then be written against measurements instead of a model.
+
+### SESSION END STATE — 2026-08-22 evening (read this first next session)
+
+**The wedge mechanism is confirmed on hardware. The fix is not done.** Three
+attempts; all three passed every bench; two were built and both broke the
+machine *worse* than the bug. The third is committed but **never built**.
+
+#### What is proven
+
+* The mechanism (review reading #3) is real, in sim and on hardware:
+  `ACK-in-STATUS=1`, `DACK-in-mismatch=1`, both watchdog counters 0, `cd rd=0`,
+  bus free while the driver polls, DACK reads returning `0x55` (ncr5380's idle
+  `din`). A DACK read ACKs the CHECK CONDITION status byte as if it were sector
+  data.
+* The driver's blind loop does **15+** DACK reads, not 2 — it does not stop when
+  DRQ drops. That is what *blind* means.
+* `BSR=0x90` vs `0x80` is settled: the IRQ latch was set and a reg-7 read
+  cleared it. This driver **does** read reg 7.
+* The bus-watchdog recovery from `b7e928e` works on hardware (first sighting).
+
+#### The three attempts
+
+| # | change | bench | hardware |
+|---|---|---|---|
+| 1 `bcb8a68` | gate on `bsr_pmatch` + level IRQ latch | green | hangs early, no ACK through a write data phase, wdog fires |
+| 2 `2187326` | gate on bus phase + level IRQ latch | green (incl. seam12) | hangs early, **byte-identical counters to #1** |
+| 3 *(working tree)* | gate on bus phase, **IRQ latch untouched** | green | **NEVER BUILT** |
+
+Attempt 2 was re-flashed over JTAG with the bitstream identity confirmed by
+md5 against its archive, and it failed again — so it is genuinely broken, not a
+stale-core artefact.
+
+#### The live hypothesis, and why attempt 3 exists
+
+Attempts 1 and 2 each changed **two** things: the DACK gate *and* the
+completion-IRQ latch (made level-triggered). Both captures show `BSR=0x98`
+mid-write — bit 4, IRQ, **set during a healthy write**, because the level form
+fires in COMMAND phase, long before any data phase. A driver that reads bit 4 as
+"transfer complete / error" would stop pumping right there, which is exactly
+what both captures show: ~8 bytes written, then polling forever while the target
+waits for an ACK that never comes.
+
+**So the gate may never have been the problem.** Attempt 3 is the isolating
+experiment: the gate alone, IRQ latch left edge-triggered. One variable.
+
+#### Exact state of the tree
+
+* HEAD `ac38fc9`. Uncommitted: `rtl/ncr5380.sv` (attempt 3) and
+  `rtl/build_tag.v` (stamped `ac38fc96`, regenerated per build — expected dirty).
+* Behavioural delta vs `ce70a45` is exactly three lines: `dreq`, `dma_ack` and
+  `bsr_dmarq` gained `& bus_data_phase`, where
+  `bus_data_phase = scsi_bsy & ~scsi_cd & ~scsi_msg`. `irq_latch` is untouched
+  (edge form). Verified with `git diff ce70a45 -- rtl/ncr5380.sv`.
+* Gates all green: `disk 12/12, CD 35/35, seam 51/51, probes 29/29, reader 13/13`.
+
+#### Hazards left behind
+
+* **A compile was killed mid Analysis & Synthesis** (18:24) after RTL was edited
+  underneath it — my error, and exactly the hazard already recorded in the JTAG
+  notes. `db/` and `incremental_db/` may be inconsistent. **Delete both before
+  the next compile.**
+* `output_files/MacPlus.rbf` and `.sof` are still **attempt 2** (17:39), and the
+  board is running attempt 2. Anything loaded from that path right now is the
+  broken build.
+* `sim/tb_dbg_probes.v` asserts RTL *behaviour*, so it has to be flipped every
+  time the gate is switched on or off. That is a design flaw in that bench — it
+  should assert instrument properties only. Worth fixing.
+
+#### New instrumentation, built but never exercised on hardware
+
+* `PDM3` — phase at the DMA arm, TCR and pmatch at the arm, **the phase of the
+  first DACK access after the arm**, DACK writes per arm, a sticky for any DACK
+  landing outside a data phase, TCR live. This is the window neither attempt
+  could see and the reason a third guess was refused.
+* `PBLD` — `rtl/build_tag.v` carries the git SHA, printed on every sample line
+  as `bitstream=xxxxxxxx`. Regenerate it from `git rev-parse --short=8 HEAD`
+  before every compile.
+
+#### Next session, in order
+
+1. `rm -rf db incremental_db` (the killed compile), then compile attempt 3.
+2. Flash it, boot with **no disc**, same config (SCSI HD boot).
+3. If it reaches "Welcome to Macintosh" and boots through — the gate was always
+   fine and the level IRQ latch was the regression. Then decide separately
+   whether the IRQ latch gap is worth closing.
+4. If it still hangs early — the gate itself is implicated after all, and PDM3
+   now says where the driver arms and where its first DACK lands. Read that
+   before touching anything.
+5. Standing fallback if this keeps costing build cycles: the CD-ROM target sits
+   behind `cd_enable` and the core is fully working with it off. Shipping
+   Phase 1 without Phase 2 remains a legitimate outcome.
 
 ### Gates
 

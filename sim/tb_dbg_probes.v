@@ -245,20 +245,33 @@ module tb_dbg_probes;
 		   f_dack_arm == 2 && f_dack_tot == 2);
 		ok("probe - PDMA reports no bus-watchdog fire",  f_wdog   == 0);
 		ok("probe - PDMA reports no io-stall fire",      f_iowdog == 0);
-		ok("probe - PDMA phase mask is CMD+STATUS+MESSAGE+IDLE, no DATA",
-		   f_phases == 6'b110011);
+		ok("probe - PDMA phase mask is CMD+STATUS, and no DATA phase",
+		   f_phases == 6'b010010);
 		ok("probe - PDMA saw REQ while the target sat in STATUS", f_req_stat);
 		ok("probe - PDM2 flags the DACK read taken during a mismatch", f_dack_mis);
 		ok("probe - PDM2 flags REQ+DMA meeting a mismatch", f_drq_mis);
-		ok("probe - PDM2 catches ACK pulsing in STATUS (the byte moved)",
-		   f_ack_stat);
-		ok("probe - PDM2 reports the IRQ never latched", !f_irq_seen);
-		ok("probe - PDM2 phase ring reads IDLE, MESSAGE, STATUS, CMD",
-		   f_ring[2:0] == 3'd0 && f_ring[5:3] == 3'd5 &&
-		   f_ring[8:6] == 3'd4 && f_ring[11:9] == 3'd1);
-		ok("probe - the transaction really did end (bench premise)", !dut.scsi_bsy);
-		ok("probe - the two DACK reads returned STATUS then MESSAGE",
-		   b1 == 8'h02 && b2 == 8'h00);
+		ok("probe - PDM2 reports NO ACK in STATUS -- the gate is holding",
+		   !f_ack_stat);
+		ok("probe - PDM2 reports the IRQ never latched (known gap, edge form)",
+		   !f_irq_seen);
+		ok("probe - PDM2 phase ring reads STATUS, CMD (newest first)",
+		   f_ring[2:0] == 3'd4 && f_ring[5:3] == 3'd1);
+		ok("probe - the target is still holding the bus, still asking",
+		   dut.scsi_bsy && dut.scsi_req);
+		ok("probe - both DACK reads returned the STATUS byte, unconsumed",
+		   b1 == 8'h02 && b2 == 8'h02);
+
+		// Finish it the way the driver now has to: the register path.
+		reg_wr_(`W_MR, 8'h00);
+		recv_reg_byte(b1);
+		recv_reg_byte(b2);
+		begin : rel
+			integer g;
+			g = 0;
+			while (dut.scsi_bsy && g < 4000) begin @(posedge clk); g = g + 1; end
+		end
+		ok("probe - the register path still completes it (status then message)",
+		   !dut.scsi_bsy && b1 == 8'h02 && b2 == 8'h00);
 
 		// ---- PDM3: the arm-to-data-phase window ----------------------------
 		// Two attempts at gating the DMA handshake both passed every bench and
@@ -281,11 +294,6 @@ module tb_dbg_probes;
 		// ---- the epoch behaviour the old counter lacked --------------------
 		// A sticky bit that can never be cleared, or a counter that never
 		// re-arms, reads the same on every capture and measures nothing.
-		// Clear DMA mode first: dma_en survives a transaction, so a fresh
-		// selection into COMMAND phase re-asserts the mismatch bit immediately
-		// and legitimately. That is the RTL being honest, not the probe failing
-		// to clear -- but it makes for an ambiguous test.
-		reg_wr_(`W_MR, 8'h00);
 		select_cd;
 		repeat (4) @(posedge clk);
 		ok("probe - selection clears the per-transaction stickies",
