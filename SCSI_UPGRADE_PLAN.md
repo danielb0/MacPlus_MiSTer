@@ -1042,9 +1042,54 @@ Mutating the gate back to `bsr_pmatch` fails exactly three of its assertions.
 previous read or never written at all for writes. The probe deck does not tap
 TCR; add it if this comes back.
 
+### Reverted: two gate attempts, two hardware hangs (2026-08-22)
+
+Both attempts at inhibiting the DMA handshake outside the armed phase passed
+every bench in this tree and both hung the machine **earlier** than the bug they
+were fixing. The RTL is now back to its `ce70a45` behaviour — the CD-ROM
+no-media wedge is present again, deliberately, because a machine that reaches
+"Welcome to Macintosh" is a better base than one that does not boot at all.
+
+| attempt | gate | bench result | hardware |
+|---|---|---|---|
+| 1 | `bsr_pmatch` | all green | hangs early; no ACK all through a write data phase, bus watchdog fires |
+| 2 | `scsi_bsy & ~scsi_cd & ~scsi_msg` | all green, incl. the new seam12 | hangs early, **same counters, same PC** |
+
+Attempt 2 is the important one: `seam12` models a write data phase with a stale
+TCR and passes, yet hardware fails identically to attempt 1 — `writes:34`,
+`disk0 rd=113`, `PC=417454`, same phase ring. Either the failure is perfectly
+deterministic, or the board was not running the bitstream we think it was. That
+has to be ruled out before anything else is concluded.
+
+**What both attempts had in common, and why guessing a third time was refused:**
+no bench models *when the driver starts pumping relative to the target entering
+its data phase*. If the blind loop writes while the target is still in COMMAND,
+a gate that refuses those accesses drops bytes the ungated code silently
+accepted, and the transfer deadlocks — which is exactly the shape of both
+failures. Nothing in the probe deck could see that window.
+
+**So the deck now measures it.** New `PDM3`:
+
+| field | question |
+|---|---|
+| phase at the DMA arm | did the driver arm before the data phase existed? |
+| TCR at the arm, and pmatch at the arm | what phase did it *think* it armed for? |
+| phase of the **first** DACK access after the arm | where does the pump loop actually start? |
+| DACK **writes** since the arm | PDMA only counted reads, and read 0 on every write transfer |
+| a DACK landed outside a data phase | the sticky that any future gate must be keyed on |
+| TCR live | settles whether TCR is stale or never written |
+
+`seam11` is back to characterising the defect, `seam12` stays (it passes on the
+ungated RTL too, and is the regression guard for attempt 1). Gates are
+`disk 12/12, CD 35/35, seam 52/52, probes 28/28, reader 12/12`.
+
+**Next capture answers, in one shot:** where the driver arms, where it starts
+pumping, what TCR holds, and whether any DACK access ever lands outside a data
+phase. A gate can then be written against measurements instead of a model.
+
 ### Gates
 
-`disk 12/12, CD 35/35, seam 51/51, probes 23/23, reader 9/9` — run all five,
+`disk 12/12, CD 35/35, seam 52/52, probes 28/28, reader 12/12` — run all five,
 disk first. The last two cover the instrument, not the core:
 
 ```

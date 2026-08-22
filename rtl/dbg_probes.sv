@@ -58,7 +58,7 @@ module dbg_probes (
 
 	// Raw 5380 state, tapped in rtl/ncr5380.sv. Bit assignments are defined
 	// there; all counting, epochs and sticky logic live here.
-	input  wire [11:0] scsi_dbg
+	input  wire [15:0] scsi_dbg
 );
 
 	wire dbg_bsy    = scsi_dbg[0];
@@ -73,6 +73,7 @@ module dbg_probes (
 	wire dbg_armed  = scsi_dbg[9];
 	wire dbg_wdog   = scsi_dbg[10];
 	wire dbg_iowdog = scsi_dbg[11];
+	wire [3:0] dbg_tcr = scsi_dbg[15:12];
 
 	// ---- bus-cycle edges --------------------------------------------------
 	reg as_d;
@@ -304,6 +305,59 @@ module dbg_probes (
 		if (phase_now != phase_d) phase_ring <= {phase_ring[20:0], phase_now};
 	end
 
+	// ---- PDM3: the arm-to-data-phase window -------------------------------
+	// Two attempts at gating the DMA handshake both passed every bench here and
+	// both hung the machine on hardware. What no bench models is WHEN the
+	// driver starts pumping relative to the target entering its data phase: if
+	// it blind-writes while the target is still in COMMAND, a gate that refuses
+	// those accesses drops bytes the old ungated code silently accepted, and
+	// the transfer deadlocks. That window is what this measures.
+	wire dack_wr = as_rise & sel_lat & ~rw_lat & dack_lat;
+	wire dack_any = dack_rd | dack_wr;
+
+	reg  [7:0] dack_wr_arm  = 0;   // DACK writes since the arm (reads are in PDMA)
+	reg  [2:0] phase_at_arm = 0;   // target phase at the moment DMA was armed
+	reg        pmatch_at_arm = 0;
+	reg  [2:0] phase_1st_dack = 0; // phase at the FIRST DACK access after the arm
+	reg        seen_1st_dack = 0;
+	reg        st_dack_nondata = 0; // a DACK access taken outside a data phase
+	reg  [3:0] tcr_at_arm = 0;
+
+	// "Data phase" as the bus reports it, the same condition bsr_eodma uses.
+	wire in_data_phase = dbg_bsy & ~dbg_cd & ~dbg_msg;
+
+	always @(posedge clk) begin
+		if (dma_arm) begin
+			dack_wr_arm    <= 8'd0;
+			phase_at_arm   <= phase_now;
+			pmatch_at_arm  <= dbg_pmatch;
+			tcr_at_arm     <= dbg_tcr;
+			seen_1st_dack  <= 1'b0;
+			phase_1st_dack <= 3'd0;
+		end else begin
+			if (dack_wr && ~&dack_wr_arm) dack_wr_arm <= dack_wr_arm + 8'd1;
+			if (dack_any && !seen_1st_dack) begin
+				seen_1st_dack  <= 1'b1;
+				phase_1st_dack <= phase_now;
+			end
+		end
+		if (new_sel) st_dack_nondata <= 1'b0;
+		else if (dack_any && !in_data_phase) st_dack_nondata <= 1'b1;
+	end
+
+	// PDM3 packing, mirrored in scripts/read_probes.tcl and sim/tb_dbg_probes.v:
+	//   [31:24] DACK writes since the arm   [23:20] TCR at the arm
+	//   [19:16] TCR now                     [15:13] target phase at the arm
+	//   [12]    pmatch at the arm           [11:9]  phase at the first DACK
+	//   [8]     a DACK happened at all      [7] a DACK landed outside a data phase
+	//   [6]     in a data phase now
+	reg [31:0] pdm3_r;
+	always @(posedge clk)
+		pdm3_r <= {dack_wr_arm, tcr_at_arm, dbg_tcr,
+		           phase_at_arm, pmatch_at_arm,
+		           phase_1st_dack, seen_1st_dack,
+		           st_dack_nondata, in_data_phase, 6'd0};
+
 	// PSCS keeps a nibble of the lifetime total for continuity; 15 means ">=15".
 	wire [3:0] dack_rd_nib = (dack_rd_tot > 8'd15) ? 4'd15 : dack_rd_tot[3:0];
 
@@ -422,5 +476,10 @@ module dbg_probes (
 		.instance_id ("PDM2"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
 	) cp_pdm2 (.probe(pdm2_r), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	altsource_probe #(
+		.instance_id ("PDM3"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_pdm3 (.probe(pdm3_r), .source(), .source_clk(clk), .source_ena(1'b1));
 
 endmodule

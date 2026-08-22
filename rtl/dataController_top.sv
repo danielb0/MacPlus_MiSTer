@@ -20,7 +20,7 @@ module dataController_top(
 	input [15:0] cpuDataIn,
 	// Raw 5380 state for the JTAG probe deck (rtl/dbg_probes.sv). Unused, and
 	// pruned, in a build without the deck.
-	output [11:0] scsi_dbg,
+	output [15:0] scsi_dbg,
 
 	input [3:0] cpuAddrRegHi, // A12-A9
 	input [2:0] cpuAddrRegMid, // A6-A4

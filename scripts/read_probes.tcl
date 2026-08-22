@@ -179,6 +179,18 @@ for {set n 0} {$n < $samples} {incr n} {
 	set lv_pm    [expr {($pdm2 >> 24) & 1}]
 	set ring     [expr { $pdm2 & 0xffffff}]
 
+	# PDM3: the arm-to-data-phase window. Layout in rtl/dbg_probes.sv.
+	set pdm3 [b2i [rd PDM3]]
+	set dack_wr  [expr {($pdm3 >> 24) & 0xff}]
+	set tcr_arm  [expr {($pdm3 >> 20) & 0xf}]
+	set tcr_now  [expr {($pdm3 >> 16) & 0xf}]
+	set ph_arm   [expr {($pdm3 >> 13) & 0x7}]
+	set pm_arm   [expr {($pdm3 >> 12) & 1}]
+	set ph_1st   [expr {($pdm3 >>  9) & 0x7}]
+	set seen_1st [expr {($pdm3 >>  8) & 1}]
+	set nondata  [expr {($pdm3 >>  7) & 1}]
+	set in_data  [expr {($pdm3 >>  6) & 1}]
+
 	set phname {IDLE CMD DATA-OUT DATA-IN STATUS MESSAGE ?6 ?7}
 	set seen ""
 	for {set b 0} {$b < 6} {incr b} {
@@ -195,6 +207,16 @@ for {set n 0} {$n < $samples} {incr n} {
 	puts [format "  PDM2  sticky: DACK-in-mismatch=%d REQ+DMA-in-mismatch=%d ACK-in-STATUS=%d IRQ-latched=%d REQ-in-STATUS=%d REQ-in-MESSAGE=%d" 	             $dack_mis $drq_mis $ack_stat $irq_seen $req_stat $req_msg]
 	puts [format "        live: BSY=%d REQ=%d DMA_EN=%d PMATCH=%d" $lv_bsy $lv_req $lv_dma $lv_pm]
 	puts [format "        phase ring (newest first): %s" [string trim $ringstr]]
+	puts [format "  PDM3  at the DMA arm: phase=%s TCR=%X pmatch=%d" 	             [lindex $phname $ph_arm] $tcr_arm $pm_arm]
+	if {$seen_1st} {
+		puts [format "        first DACK access after the arm was in phase %s" 		             [lindex $phname $ph_1st]]
+	} else {
+		puts "        no DACK access at all since the arm"
+	}
+	puts [format "        DACK writes since the arm: %s   TCR now=%X   in a data phase now=%d" 	             [expr {$dack_wr >= 255 ? ">=255" : $dack_wr}] $tcr_now $in_data]
+	if {$nondata} {
+		puts "        NOTE: a DACK access landed OUTSIDE a data phase this transaction."
+	}
 
 	# The reading this capture supports, stated outright so a capture cannot be
 	# quietly re-interpreted after the fact.

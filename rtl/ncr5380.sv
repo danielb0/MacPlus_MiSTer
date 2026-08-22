@@ -86,7 +86,7 @@ module ncr5380
 	// every counter, sticky bit and epoch lives in the probe deck, so this bus
 	// stays one flat vector of things that already exist and the debug logic
 	// stays in one file. Pruned entirely when the deck is not instantiated.
-	,output     [11:0] dbg_bus
+	,output     [15:0] dbg_bus
 );
 	parameter DEVS = 2;
 	// Index of the CD-ROM target within the DEVS arrays, or DEVS for "none".
@@ -99,9 +99,7 @@ module ncr5380
 	// Stall timeout for an HPS fetch that never completes; see scsi.v.
 	parameter IOWDOG_LOG = 24;
 
-	// DRQ is inhibited outside a data phase. See bsr_dmarq for why this is
-	// keyed on the BUS phase rather than on TCR.
-	assign dreq = scsi_req & dma_en & bus_data_phase;
+	assign dreq = scsi_req & dma_en;
 
 	reg  [7:0] mr;        /* Mode Register */
 	reg  [7:0] icr;       /* Initiator Command Register */
@@ -139,13 +137,7 @@ module ncr5380
 
 		if(~old_dma_wr & i_dma_wr) dma_wr <= 1;
 		if(~old_reg_wr & i_reg_wr) reg_wr <= 1;
-		// A DACK access only ACKs when the bus phase matches TCR. Without this
-		// term a blind pump loop reading the DACK window during a mismatch ACKs
-		// whatever the target is offering -- after a CHECK CONDITION that is the
-		// STATUS byte, then COMMAND COMPLETE, and the transaction ends while the
-		// driver thinks it is collecting sector data (seam11, and confirmed on
-		// hardware 2026-08-22: ACK-in-STATUS with no watchdog fire).
-		if((old_dma_wr & ~i_dma_wr) | (old_dma_rd & ~i_dma_rd)) dma_ack <= dma_en & bus_data_phase;
+		if((old_dma_wr & ~i_dma_wr) | (old_dma_rd & ~i_dma_rd)) dma_ack <= dma_en;
 	end
 
 	/* System bus reads */
@@ -229,26 +221,24 @@ module ncr5380
 	/* Bus and Status register */
 	/* BSR (read only). We don't do a few things... */
 	wire bsr_eodma = ~(scsi_bsy & ~scsi_cd & ~scsi_msg);	/* asserted whenever NOT in a data phase */
-	/* A real 5380 inhibits DRQ when REQ arrives with MSG/CD/IO not matching TCR,
-	 * and halts the DMA handshake with it. That inhibition is the exit ramp for
-	 * "the target CHECKed instead of entering the data phase": REQ stays visible
-	 * in CSR, the driver's poll loop exits, and the SCSI Manager handles the
-	 * phase change. Without it the blind pump loop ACKs the STATUS byte as if it
-	 * were sector data and the transaction ends invisibly (seam11; confirmed on
-	 * hardware 2026-08-22 as ACK-in-STATUS with no watchdog fire).
+	/* UNGATED, and known to be wrong -- this is the confirmed CD-ROM no-media
+	 * defect, reverted to on 2026-08-22 after two failed attempts at the gate.
+	 * A real 5380 inhibits DRQ and halts the DMA handshake when REQ arrives in a
+	 * phase the initiator did not arm for; without that, a blind pump loop ACKs
+	 * the STATUS byte as sector data and the transaction ends invisibly
+	 * (seam11).
 	 *
-	 * But it is keyed on the BUS PHASE, not on bsr_pmatch. Gating on TCR was
-	 * tried and broke every pseudo-DMA WRITE on hardware: the Plus driver does
-	 * not maintain TCR across a write data phase, so bsr_pmatch reads 0 all the
-	 * way through, no DACK write ever ACKs, and the target's bus watchdog fires
-	 * at 129 ms (measured: 8 DACK writes, wdog=1, ACK-in-STATUS=0, the machine
-	 * hanging before "Welcome to Macintosh"). The behaviour that actually has to
-	 * be prevented is a DACK access consuming a byte from a NON-DATA phase, and
-	 * that is exactly what this says. It is also the same condition bsr_eodma
-	 * reports, so the two cannot disagree.
+	 * Attempt 1 gated on bsr_pmatch: broke every pseudo-DMA WRITE, because the
+	 * Plus driver does not maintain TCR across a write data phase (seam12).
+	 * Attempt 2 gated on the bus phase (scsi_bsy & ~scsi_cd & ~scsi_msg): passes
+	 * every bench including seam12, and STILL hangs the machine early on
+	 * hardware in the same place, with the same counters. Whatever the driver
+	 * does between arming DMA and the target entering its data phase is not
+	 * modelled by any bench here, so the next move is to MEASURE that window
+	 * (phase-at-arm, DACK writes per arm, TCR) rather than to guess a third
+	 * time.
 	 */
-	wire bus_data_phase = scsi_bsy & ~scsi_cd & ~scsi_msg;
-	wire bsr_dmarq = scsi_req & dma_en & bus_data_phase;
+	wire bsr_dmarq = scsi_req & dma_en;
 	wire bsr_perr = 1'b0;	/* We don't do parity */
 	wire bsr_irq = irq_latch;	/* latched completion IRQ, cleared by a reg-7 read */
 	wire bsr_pmatch = 
@@ -379,21 +369,11 @@ module ncr5380
 				dma_armed <= 1'b1;
 			if (~old_rst_rd & rst_rd)
 				irq_latch <= 1'b0;
-			// LEVEL, not edge. The edge form (pmatch_d && !bsr_pmatch) only
-			// fires when the mismatch APPEARS after the arm. A driver that
-			// arms pseudo-DMA when the target is ALREADY in STATUS -- the
-			// no-media CHECK case -- produces no edge and no IRQ, so a driver
-			// waiting on BSR bit 4 waits forever. A real 5380 level-checks
-			// when DMA starts.
-			// The condition is "the target is asking from STATUS or MESSAGE"
-			// (cd & io), not "!bsr_pmatch": the latter also fires during
-			// COMMAND phase, latching a completion IRQ on a transaction that
-			// has not even reached its data phase yet (seen on hardware as
-			// BSR=0x98 during a healthy disk write).
-			// Gated on dma_armed rather than dma_en deliberately: the driver
-			// often clears MR.DMA_MODE just before the phase change, and
-			// gating on dma_en drops the IRQ (see dma_armed above, seam6).
-			if (dma_armed && scsi_req && scsi_cd && scsi_io) begin
+			// Edge-triggered, as before the 2026-08-22 attempts. The level
+			// forms tried there (!bsr_pmatch, then cd&io) both latched a
+			// completion IRQ on transactions that had not reached their data
+			// phase; BSR=0x98 mid-write on hardware. Restore and re-measure.
+			if (dma_armed && pmatch_d && !bsr_pmatch) begin
 				irq_latch <= 1'b1;
 				dma_armed <= 1'b0;
 			end
@@ -411,6 +391,7 @@ module ncr5380
 	 *   [4:0]   scsi_bsy, scsi_msg, scsi_cd, scsi_io, scsi_req  (raw, un-deferred)
 	 *   [9:5]   dma_en, dma_ack, bsr_pmatch, irq_latch, dma_armed
 	 *   [11:10] any target's bus-watchdog / io-stall abort
+	 *   [15:12] TCR, so a capture can say what phase the driver armed for
 	 * The five bus signals decode the target's phase exactly (see the phase
 	 * table in scsi.v), which is why no phase port is needed here.
 	 */
@@ -419,7 +400,8 @@ module ncr5380
 	// high while no target drives MSG/CD/IO -- which the probe deck's phase
 	// decode then reports as a spurious DATA phase. Cost us a misread on the
 	// 2026-08-22 hardware capture.
-	assign dbg_bus = { |target_iostall, |target_wdog,
+	assign dbg_bus = { tcr,
+	                   |target_iostall, |target_wdog,
 	                   dma_armed, irq_latch, bsr_pmatch, dma_ack, dma_en,
 	                   scsi_req, scsi_io, scsi_cd, scsi_msg, |target_bsy };
 

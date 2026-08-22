@@ -357,7 +357,7 @@ wire memoryLatch;
 // peripherals
 wire vid_alt, loadPixels, pixelOut, _hblank, _vblank, hsync, vsync;
 wire memoryOverlayOn, selectSCSI, selectSCC, selectIWM, selectVIA, selectRAM, selectROM, selectSEOverlay;
-wire [11:0] scsi_dbg;   // raw 5380 state, for rtl/dbg_probes.sv
+wire [15:0] scsi_dbg;   // raw 5380 state, for rtl/dbg_probes.sv
 wire [15:0] dataControllerDataOut;
 
 // audio
