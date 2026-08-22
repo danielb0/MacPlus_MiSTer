@@ -55,6 +55,7 @@ module tb_scsi_cdrom;
    reg         sd_buff_wr   = 1'b0;
 
    reg  [2:0]  cd_ms_mode   = 3'd0;   // MODE SENSE content bisect
+   reg  [3:0]  cd_vendor_dbg = 4'd0;  // Apple vendor-command bisect
 
    localparam [2:0] TARGET_ID = 3'd3;   // AppleCD SC factory default
 
@@ -68,6 +69,7 @@ module tb_scsi_cdrom;
       .cd_enable(cd_enable),
       .cd_dbg(3'd0),
       .cd_ms_mode(cd_ms_mode),
+      .cd_vendor_dbg(cd_vendor_dbg),
       .sel(sel),
       .atn(atn),
       .bsy(bsy),
@@ -400,6 +402,28 @@ module tb_scsi_cdrom;
             $display("       (bus wedged - resetting and remounting; later results are still independent)");
             do_reset;
             mount_image(IMG_BLOCKS);
+         end
+      end
+   endtask
+
+   integer vend_bad;
+   // A suppressed command must be REJECTED (ILLEGAL REQUEST), not merely
+   // watchdog-aborted after an unread data phase. BOTH return CHECK, so status
+   // alone cannot tell them apart -- checking status only, cd33 passed even with
+   // suppression disabled (mutation A). The sense key is the discriminator.
+   task check_rejected;
+      input [63:0] tag;
+      begin
+         if (status_byte != 8'h02) begin
+            $display("       %0s: status %h, expected CHECK", tag, status_byte);
+            vend_bad = vend_bad + 1;
+         end else begin
+            get_sense;
+            if (buf_in[2] !== 8'h05) begin
+               $display("       %0s: sense key %h, expected 05 ILLEGAL REQUEST",
+                        tag, buf_in[2]);
+               vend_bad = vend_bad + 1;
+            end
          end
       end
    endtask
@@ -1338,6 +1362,110 @@ module tb_scsi_cdrom;
          ok = (bad == 0);
       end
       report(ok, "cd32 - Apple vendor commands satisfy allocations past their caps");
+
+      // --- cd33: the vendor-command bisect switch itself -------------------
+      // PROVE THE INSTRUMENT BEFORE TRUSTING IT. The CD command ladder shipped
+      // untested and its levels 1-2 turned out to be broken, which made two
+      // hardware results unreadable. Each state must suppress EXACTLY its own
+      // opcode -- verified by the SENSE KEY, so that a served-but-unread data
+      // phase (which the watchdog also ends in CHECK) cannot be mistaken for a
+      // rejection. Mutation A proved that distinction is load-bearing.
+      begin : cd33
+         vend_bad = 0;
+
+         // state 0: every vendor opcode is served (the shipping configuration)
+         cd_vendor_dbg = 4'd0;
+         select_target; send_cdb(8'hc1,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
+         read_blind(12); finish_command;
+         if (status_byte != 8'h00) begin
+            $display("       state0: c1 status %h, expected GOOD", status_byte);
+            vend_bad = vend_bad + 1; end
+
+         cd_vendor_dbg = 4'd1;
+         select_target; send_cdb(8'hc1,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
+         finish_command; check_rejected("state1 c1");
+         // ...and a vendor command this state does NOT name is still served
+         select_target; send_cdb(8'hc2,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
+         read_blind(12); finish_command;
+         if (status_byte != 8'h00) begin
+            $display("       state1: c2 status %h, expected GOOD (not suppressed)",
+                     status_byte); vend_bad = vend_bad + 1; end
+
+         cd_vendor_dbg = 4'd2;
+         select_target; send_cdb(8'hc2,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
+         finish_command; check_rejected("state2 c2");
+
+         cd_vendor_dbg = 4'd3;
+         select_target; send_cdb(8'hcc,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
+         finish_command; check_rejected("state3 cc");
+
+         cd_vendor_dbg = 4'd5;
+         select_target; send_cdb(8'h42,8'h02,8'h40,8'h01,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
+         finish_command; check_rejected("state5 42");
+
+         cd_vendor_dbg = 4'd6;
+         select_target; send_cdb(8'h43,0,0,0,0,0,0,8'h02,8'd88,8'h00,0,0, 10);
+         finish_command; check_rejected("state6 43");
+
+         cd_vendor_dbg = 4'd7;
+         select_target; send_cdb(8'h44,0,0,0,8'h12,8'h34,0,8'h00,8'd16,8'h00,0,0, 10);
+         finish_command; check_rejected("state7 44");
+
+         // state 8 suppresses all four Apple opcodes at once
+         cd_vendor_dbg = 4'd8;
+         select_target; send_cdb(8'hc1,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
+         finish_command; check_rejected("state8 c1");
+         select_target; send_cdb(8'hcc,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
+         finish_command; check_rejected("state8 cc");
+
+         // INQUIRY is never a vendor command: it must survive every state
+         select_target; send_cdb(8'h12,0,0,0,8'd32,0,0,0,0,0,0,0, 6);
+         read_data_phase(32); finish_command;
+         if (status_byte != 8'h00) begin
+            $display("       state8: INQUIRY status %h, expected GOOD", status_byte);
+            vend_bad = vend_bad + 1; end
+
+         cd_vendor_dbg = 4'd0;
+         ok = (vend_bad == 0);
+      end
+      report(ok, "cd33 - vendor bisect suppresses exactly one opcode per state");
+
+      // --- cd34: state 9, unknown opcodes complete GOOD ---------------------
+      // The one thing a suppression bisect cannot test: whether the driver is
+      // wedged on an opcode we REJECT rather than one we answer. The probe
+      // opcode must be one whose CDB actually COMPLETES: 0xe0 (group 7) was
+      // tried first and never completes, so the bus watchdog aborted it and
+      // BOTH states returned CHECK -- the state-0 leg passed for the wrong
+      // reason. 0x16 RESERVE UNIT is group 0, completes at 6 bytes, and is
+      // implemented by neither core.
+      begin : cd34
+         integer bad;
+         bad = 0;
+
+         cd_vendor_dbg = 4'd0;
+         select_target; send_cdb(8'h16,0,0,0,0,0,0,0,0,0,0,0, 6); finish_command;
+         if (status_byte != 8'h02) begin
+            $display("       state0: e0 status %h, expected CHECK", status_byte);
+            bad = bad + 1; end
+
+         cd_vendor_dbg = 4'd9;
+         select_target; send_cdb(8'h16,0,0,0,0,0,0,0,0,0,0,0, 6); finish_command;
+         if (status_byte != 8'h00) begin
+            $display("       state9: e0 status %h, expected GOOD", status_byte);
+            bad = bad + 1; end
+
+         // a real command must still behave normally in state 9
+         select_target; send_cdb(8'h12,0,0,0,8'd32,0,0,0,0,0,0,0, 6);
+         read_data_phase(32); finish_command;
+         if ((status_byte != 8'h00) || (buf_in[0] != 8'h05)) begin
+            $display("       state9: INQUIRY status %h byte0 %h",
+                     status_byte, buf_in[0]); bad = bad + 1; end
+
+         cd_vendor_dbg = 4'd0;
+         ok = (bad == 0);
+      end
+      report(ok, "cd34 - state 9 completes an unimplemented opcode with GOOD");
+
 
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);

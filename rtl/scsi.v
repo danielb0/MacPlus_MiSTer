@@ -36,6 +36,7 @@ module scsi
 	// PAYLOAD (bytes 14+). States 4-6 suppress exactly one page's payload, so
 	// the state that boots names the page.
 	input [2:0] cd_ms_mode,
+	input [3:0] cd_vendor_dbg,
 	input 	  sel,
 	input 	  atn, // initiator requests to send a message
 	output 	  bsy, // target holds bus
@@ -1018,7 +1019,33 @@ wire  cmd_ok_cd_dbg = cmd_inquiry
                    || ((cd_dbg >= 3'd6) && cmd_read);
 
 wire  cmd_ok_cd_sel = ((cd_dbg == 3'd0) || (cd_dbg == 3'd7)) ? cmd_ok_cd : cmd_ok_cd_dbg;
-wire  cmd_ok = (CDROM != 0) ? cmd_ok_cd_sel : cmd_ok_hd;
+
+// Apple vendor-command bisect (status[28:25]). The MODE SENSE page bisect
+// showed the magic page 0x30 body is a GATE: serve it and the driver commits
+// to the Apple vendor path, then wedges. Six content/length fixes later the
+// wedge is unchanged, so this suppresses ONE vendor command at a time to name
+// which one the driver cannot get past.
+//   0 off   1 -C1 TOC   2 -C2 subQ   3 -CC astat   4 -CE actl
+//   5 -42 subch10   6 -43 TOC10   7 -44 header   8 -all four Apple opcodes
+//   9 unknown opcodes complete GOOD instead of CHECK CONDITION
+// State 9 is the one a suppression bisect cannot reach: it tests whether the
+// driver wedges on an opcode we REJECT rather than one we answer. A suppressed
+// command CHECKs, which is an artificial drive state -- read these as boundary
+// evidence only, never as mechanism (the ladder lesson).
+wire  cd_vend_all  = (cd_vendor_dbg == 4'd8);
+wire  cd_vend_supp =
+        (((cd_vendor_dbg == 4'd1) || cd_vend_all) && cmd_cd_toc)   ||
+        (((cd_vendor_dbg == 4'd2) || cd_vend_all) && cmd_cd_subq)  ||
+        (((cd_vendor_dbg == 4'd3) || cd_vend_all) && cmd_cd_astat) ||
+        (((cd_vendor_dbg == 4'd4) || cd_vend_all) && cmd_cd_actl)  ||
+        ((cd_vendor_dbg == 4'd5) && cmd_cd_subq43) ||
+        ((cd_vendor_dbg == 4'd6) && cmd_cd_toc43)  ||
+        ((cd_vendor_dbg == 4'd7) && cmd_cd_hdr);
+// Unknown-opcode-OK: cmd_ok=1 while no data-phase clause matches, so the
+// dispatch falls through to STATUS_OUT -- a complete, zero-length GOOD.
+wire  cd_vend_unk_ok = (cd_vendor_dbg == 4'd9);
+wire  cmd_ok_cd_bis  = cd_vend_unk_ok ? 1'b1 : (cmd_ok_cd_sel && !cd_vend_supp);
+wire  cmd_ok = (CDROM != 0) ? cmd_ok_cd_bis : cmd_ok_hd;
 
 // Media-dependent commands fail with the AppleCD no-disc sense while no image
 // is mounted. MAME's return_no_cd uses SK_NOT_READY + the vendor ASC 0xB0 --
