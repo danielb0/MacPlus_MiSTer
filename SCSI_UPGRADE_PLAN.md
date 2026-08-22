@@ -1004,9 +1004,47 @@ read has since cleared it. Both earlier readings were true, at different moments
 still in STATUS still asking, REQ visible in CSR so the poll loop can exit, and
 the IRQ latched. The register path still completes the transaction.
 
+### The fix was keyed on the wrong signal (2026-08-22, same day)
+
+Gating the DMA handshake on `bsr_pmatch` **broke every pseudo-DMA write**. The
+board hung earlier than before, before "Welcome to Macintosh". The capture:
+
+```
+PSCW  last WRITE reg=ODR (DACK)         PRG  wr ODR (DACK) 00  x8
+PDMA  DACK reads since the DMA arm: 0   watchdog fires: bus=1  io-stall=0
+PDM2  ACK-in-STATUS=0  IRQ-latched=1    phase ring: IDLE STATUS DATA-IN CMD ...
+```
+
+`dma_ack <= dma_en & bsr_pmatch` with `DMA_EN=1` and eight DACK writes that
+produced no ACK leaves only one possibility: **`bsr_pmatch` was 0 for the whole
+write data phase**. The Plus driver does not maintain TCR across a write, so a
+gate keyed on TCR refuses every handshake, the target waits, and its bus
+watchdog fires at 129 ms — `wdog=1` in the capture, which is also the first time
+that recovery path has been seen working on hardware.
+
+**Re-keyed onto the bus phase**: `bus_data_phase = scsi_bsy & ~scsi_cd &
+~scsi_msg`. What must never happen is a DACK access ACKing a byte from a
+NON-data phase; that is the confirmed defect, and it can be said directly
+without depending on the driver's TCR discipline. It is the same condition
+`bsr_eodma` already reports, so the two cannot disagree. The completion-IRQ
+latch was re-keyed the same way — on "the target is asking from STATUS or
+MESSAGE" (`cd & io`) rather than `!bsr_pmatch`, which also fired during COMMAND
+phase and latched a completion IRQ on a transaction that had not reached its
+data phase (visible as `BSR=0x98` mid-write).
+
+**`seam12` is the test that should have existed first.** `seam11` only ever
+covered the READ direction, which is why nothing caught this before a 16-minute
+build and a hardware round trip. seam12 drives a WRITE(6) data phase with TCR
+deliberately left at `0x01`, and requires the transfer to complete anyway.
+Mutating the gate back to `bsr_pmatch` fails exactly three of its assertions.
+
+**Open question, not needed for the fix:** whether TCR is stale from the
+previous read or never written at all for writes. The probe deck does not tap
+TCR; add it if this comes back.
+
 ### Gates
 
-`disk 12/12, CD 35/35, seam 44/44, probes 23/23, reader 9/9` — run all five,
+`disk 12/12, CD 35/35, seam 51/51, probes 23/23, reader 9/9` — run all five,
 disk first. The last two cover the instrument, not the core:
 
 ```

@@ -99,8 +99,9 @@ module ncr5380
 	// Stall timeout for an HPS fetch that never completes; see scsi.v.
 	parameter IOWDOG_LOG = 24;
 
-	// DRQ is inhibited on a phase mismatch, like a real 5380. See bsr_dmarq.
-	assign dreq = scsi_req & dma_en & bsr_pmatch;
+	// DRQ is inhibited outside a data phase. See bsr_dmarq for why this is
+	// keyed on the BUS phase rather than on TCR.
+	assign dreq = scsi_req & dma_en & bus_data_phase;
 
 	reg  [7:0] mr;        /* Mode Register */
 	reg  [7:0] icr;       /* Initiator Command Register */
@@ -144,7 +145,7 @@ module ncr5380
 		// STATUS byte, then COMMAND COMPLETE, and the transaction ends while the
 		// driver thinks it is collecting sector data (seam11, and confirmed on
 		// hardware 2026-08-22: ACK-in-STATUS with no watchdog fire).
-		if((old_dma_wr & ~i_dma_wr) | (old_dma_rd & ~i_dma_rd)) dma_ack <= dma_en & bsr_pmatch;
+		if((old_dma_wr & ~i_dma_wr) | (old_dma_rd & ~i_dma_rd)) dma_ack <= dma_en & bus_data_phase;
 	end
 
 	/* System bus reads */
@@ -228,12 +229,26 @@ module ncr5380
 	/* Bus and Status register */
 	/* BSR (read only). We don't do a few things... */
 	wire bsr_eodma = ~(scsi_bsy & ~scsi_cd & ~scsi_msg);	/* asserted whenever NOT in a data phase */
-	// A real 5380 inhibits DRQ when REQ arrives with MSG/CD/IO not matching TCR,
-	// and halts the DMA handshake with it. That inhibition is the exit ramp for
-	// "the target CHECKed instead of entering the data phase": REQ stays visible
-	// in CSR, the driver's poll loop exits, and the SCSI Manager handles the
-	// phase change. Without the pmatch term the loop never gets that signal.
-	wire bsr_dmarq = scsi_req & dma_en & bsr_pmatch;
+	/* A real 5380 inhibits DRQ when REQ arrives with MSG/CD/IO not matching TCR,
+	 * and halts the DMA handshake with it. That inhibition is the exit ramp for
+	 * "the target CHECKed instead of entering the data phase": REQ stays visible
+	 * in CSR, the driver's poll loop exits, and the SCSI Manager handles the
+	 * phase change. Without it the blind pump loop ACKs the STATUS byte as if it
+	 * were sector data and the transaction ends invisibly (seam11; confirmed on
+	 * hardware 2026-08-22 as ACK-in-STATUS with no watchdog fire).
+	 *
+	 * But it is keyed on the BUS PHASE, not on bsr_pmatch. Gating on TCR was
+	 * tried and broke every pseudo-DMA WRITE on hardware: the Plus driver does
+	 * not maintain TCR across a write data phase, so bsr_pmatch reads 0 all the
+	 * way through, no DACK write ever ACKs, and the target's bus watchdog fires
+	 * at 129 ms (measured: 8 DACK writes, wdog=1, ACK-in-STATUS=0, the machine
+	 * hanging before "Welcome to Macintosh"). The behaviour that actually has to
+	 * be prevented is a DACK access consuming a byte from a NON-DATA phase, and
+	 * that is exactly what this says. It is also the same condition bsr_eodma
+	 * reports, so the two cannot disagree.
+	 */
+	wire bus_data_phase = scsi_bsy & ~scsi_cd & ~scsi_msg;
+	wire bsr_dmarq = scsi_req & dma_en & bus_data_phase;
 	wire bsr_perr = 1'b0;	/* We don't do parity */
 	wire bsr_irq = irq_latch;	/* latched completion IRQ, cleared by a reg-7 read */
 	wire bsr_pmatch = 
@@ -366,14 +381,19 @@ module ncr5380
 				irq_latch <= 1'b0;
 			// LEVEL, not edge. The edge form (pmatch_d && !bsr_pmatch) only
 			// fires when the mismatch APPEARS after the arm. A driver that
-			// arms pseudo-DMA when the target is ALREADY in a mismatched
-			// phase -- the no-media CHECK case -- produces no edge and no
-			// IRQ, so a driver waiting on BSR bit 4 waits forever. A real
-			// 5380 level-checks phase match when DMA starts.
+			// arms pseudo-DMA when the target is ALREADY in STATUS -- the
+			// no-media CHECK case -- produces no edge and no IRQ, so a driver
+			// waiting on BSR bit 4 waits forever. A real 5380 level-checks
+			// when DMA starts.
+			// The condition is "the target is asking from STATUS or MESSAGE"
+			// (cd & io), not "!bsr_pmatch": the latter also fires during
+			// COMMAND phase, latching a completion IRQ on a transaction that
+			// has not even reached its data phase yet (seen on hardware as
+			// BSR=0x98 during a healthy disk write).
 			// Gated on dma_armed rather than dma_en deliberately: the driver
 			// often clears MR.DMA_MODE just before the phase change, and
 			// gating on dma_en drops the IRQ (see dma_armed above, seam6).
-			if (dma_armed && scsi_req && !bsr_pmatch) begin
+			if (dma_armed && scsi_req && scsi_cd && scsi_io) begin
 				irq_latch <= 1'b1;
 				dma_armed <= 1'b0;
 			end

@@ -95,10 +95,17 @@ module tb_ncr5380_seam;
 	integer hps_acks = 0;
 	reg     saw_io_rd = 0;
 
+	// Disk slot 0 gets its own trivial always-ack server: seam12 needs a WRITE
+	// target, and the CD is read-only.
+	always @(posedge clk) begin : hps_disk
+		if (reset) io_ack[0] <= 1'b0;
+		else       io_ack[0] <= (io_rd[0] | io_wr[0]) & ~io_ack[0];
+	end
+
 	always @(posedge clk) begin : hps
 		integer wait_n;
 		if (reset) begin
-			io_ack  <= 0;
+			io_ack[CD_DEV] <= 0;
 			wait_n   = 0;
 		end else begin
 			if (io_rd[CD_DEV] | io_wr[CD_DEV]) saw_io_rd <= 1'b1;
@@ -265,6 +272,16 @@ module tb_ncr5380_seam;
 		end
 	endtask
 
+	// Write one byte through the DACK window (the pseudo-DMA send path).
+	task dma_write_byte(input [7:0] b);
+		begin
+			@(negedge clk); bus_cs = 1; dack = 1; wdata = b; iow = 1;
+			@(negedge clk);
+			@(negedge clk); iow = 0; dack = 0; bus_cs = 0;
+			@(negedge clk);
+		end
+	endtask
+
 	// Wait for BSR.DRQ, bounded. Returns 1 if it ever asserted.
 	task wait_drq(output got);
 		integer guard;
@@ -328,7 +345,8 @@ module tb_ncr5380_seam;
 	integer   s11_free_clks;
 
 	always @(posedge clk) if (s11_watch) begin
-		if (dut.target[CD_DEV].target.wdog_abort) s11_abort <= 1;
+		if (dut.target[CD_DEV].target.wdog_abort ||
+		    dut.target[0].target.wdog_abort) s11_abort <= 1;
 		if (dut.scsi_ack && (dut.target[CD_DEV].target.phase == 3'd4))
 			s11_ack_status <= 1;
 		if (!dut.scsi_cd && dut.scsi_io && dut.scsi_req) s11_data_phase <= 1;
@@ -631,6 +649,80 @@ module tb_ncr5380_seam;
 			while (dut.scsi_bsy && g < 4000) begin @(posedge clk); g = g + 1; end
 		end
 		ok("seam11 - bus released before the next test", !dut.scsi_bsy);
+
+		// =============== seam12: pseudo-DMA WRITE with a stale TCR ==========
+		// The regression that gating the DMA handshake on bsr_pmatch caused on
+		// real hardware, and that seam11 could not see because it only covers
+		// the READ direction.
+		//
+		// The Plus driver does NOT reprogram TCR for a write data phase -- the
+		// hardware capture showed pmatch reading 0 for the whole transfer. A
+		// gate keyed on TCR therefore refuses every ACK, the target waits for a
+		// handshake that never comes, and its bus watchdog fires at 129 ms.
+		// Measured on the DE10 as: 8 DACK writes, wdog=1, ACK-in-STATUS=0, and
+		// the machine hanging BEFORE "Welcome to Macintosh".
+		//
+		// So this deliberately leaves TCR at 0x01 (data IN) across a data OUT
+		// phase and requires the transfer to work anyway.
+		img_size = 32'd2048;
+		img_mounted[0] = 1'b1;
+		@(posedge clk); @(posedge clk);
+		img_mounted[0] = 1'b0;
+		repeat (50) @(posedge clk);
+
+		s11_abort = 0; s11_watch = 1;
+		select_target(8'h40);                 // disk at ID 6
+		send_cmd_byte(8'h0A);                 // WRITE(6), LBA 0, 1 block
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h01);
+		send_cmd_byte(8'h00);
+		reg_write(`W_ICR, 8'h00);
+		reg_write(`W_TCR, 8'h01);             // STALE: says data IN, this is OUT
+		reg_write(`W_MR,  8'h02);
+		reg_write(`W_DMAS, 8'h00);            // Start DMA Send
+		wait_raw_req;
+
+		ok("seam12 - premise: the target is in a WRITE data phase",
+		   dut.target[0].target.phase == 3'd3);
+		reg_read(`R_BSR, bsr1);
+		ok("seam12 - premise: TCR does NOT match it (this is the hardware case)",
+		   !bsr1[`BSR_PMATCH]);
+		ok("seam12 - DRQ is still offered, because the BUS is in a data phase",
+		   bsr1[`BSR_DRQ]);
+
+		begin : s12
+			integer n;
+			for (n = 0; n < 8; n = n + 1) begin
+				dma_write_byte(8'hA5);
+				repeat (4) @(posedge clk);
+			end
+		end
+		ok("seam12 - the DACK writes DO handshake despite the stale TCR",
+		   dut.target[0].target.data_cnt >= 8);
+		ok("seam12 - and no watchdog fired", !s11_abort);
+		s11_watch = 0;
+
+		// Finish it: pump the rest of the block, then take status and message.
+		begin : s12done
+			integer n, g;
+			for (n = 8; n < 512; n = n + 1) begin
+				g = 0;
+				while (!dut.scsi_req && g < 4000) begin @(posedge clk); g = g + 1; end
+				dma_write_byte(8'hA5);
+			end
+		end
+		reg_write(`W_MR, 8'h00);
+		if (dut.scsi_bsy) recv_byte(stat);
+		if (dut.scsi_bsy) recv_byte(msg);
+		begin : rel12
+			integer g;
+			g = 0;
+			while (dut.scsi_bsy && g < 8000) begin @(posedge clk); g = g + 1; end
+		end
+		ok("seam12 - the WRITE completes with GOOD status", stat == 8'h00);
+		ok("seam12 - bus released", !dut.scsi_bsy);
 
 		// =============== seam9: a fetch that never completes ================
 		// io_busy holds REQ low (scsi.v:239) AND resets the bus watchdog every
