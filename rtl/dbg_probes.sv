@@ -145,9 +145,10 @@ module dbg_probes (
 			end
 		end
 
-	// PSCS: [31:24]=rd_cnt [23:16]=rd_val [15:12]={dack,reg} [7:0]=wr_cnt
+	// PSCS: [31:24]=rd_cnt [23:16]=rd_val [15:12]={dack,reg}
+	//       [11:8]=DACK-read count [7:0]=wr_cnt
 	reg [31:0] pscs_r;
-	always @(posedge clk) pscs_r <= {rd_cnt, rd_val, rd_sel, 4'd0, wr_cnt};
+	always @(posedge clk) pscs_r <= {rd_cnt, rd_val, rd_sel, dack_rd_cnt, wr_cnt};
 
 	// PSCW: [31:24]=wr_cnt [23:16]=wr_val [15:12]={dack,reg} [7:0]=rd_cnt
 	reg [31:0] pscw_r;
@@ -158,12 +159,26 @@ module dbg_probes (
 	// conversation that led to it. This keeps the last eight, newest first, so
 	// the CDB handover, the arming writes and any status read can be read back
 	// as a sequence. Each entry is {rw, dack, reg[2:0], 3'b0, value[7:0]}.
+	// A wedged driver polls CSR/BSR thousands of times a second, so recording
+	// every access flooded the ring with eight identical poll entries and threw
+	// away the history that mattered. Filter plain CSR/BSR reads out: what is
+	// left is the CDB handover, the arming writes, and any CDR/DACK read -- the
+	// events that say how far the transaction actually got.
+	wire acc_is_poll = rw_lat & ~dack_lat &
+	                   ((reg_lat == 3'd4) | (reg_lat == 3'd5));
 	reg [127:0] acc_hist;
 	always @(posedge clk)
-		if (as_rise & sel_lat)
+		if (as_rise & sel_lat & ~acc_is_poll)
 			acc_hist <= {acc_hist[111:0],
 			             rw_lat, dack_lat, reg_lat, 3'd0,
 			             rw_lat ? din_d[15:8] : dout_d[15:8]};
+
+	// Count DACK reads separately: a pseudo-DMA read consumes a byte with no
+	// register write at all, so it is invisible in PSCW. If the driver ever
+	// collected a status byte that way, this is the only thing that shows it.
+	reg [3:0] dack_rd_cnt;
+	always @(posedge clk)
+		if (as_rise & sel_lat & rw_lat & dack_lat) dack_rd_cnt <= dack_rd_cnt + 4'd1;
 
 	// ---- PIOS / PIO2: is an HPS sector fetch stalled? ----------------------
 	// rd_stuck saturates while cd_io_rd stays continuously asserted. A

@@ -131,7 +131,7 @@ for {set n 0} {$n < $samples} {incr n} {
 	puts [format "  PIOS  cd fetch stuck=%-3d lba=%d" [expr {($pios >> 24) & 0xff}] [expr {$pios & 0xffffff}]]
 	puts [format "  PIO2  cd rd=%d ack=%d  disk0 rd=%d   live: cd_rd=%d cd_wr=%d cd_ack=%d d0_rd=%d d0_ack=%d" [expr {($pio2 >> 24) & 0xff}] [expr {($pio2 >> 16) & 0xff}] [expr {($pio2 >> 8) & 0xff}] [expr {($pio2 >> 4) & 1}] [expr {($pio2 >> 3) & 1}] [expr {($pio2 >> 2) & 1}] [expr {($pio2 >> 1) & 1}] [expr {$pio2 & 1}]]
 	# The access ring, newest first. Entry = {rw,dack,reg,3'b0,val}.
-	puts "  PRG   recent SCSI register accesses (newest first):"
+	puts [format "  PRG   recent non-poll SCSI accesses (newest first); DACK reads so far: %d" [expr {($pscs >> 8) & 0xf}]]
 	foreach pr {PRG0 PRG1 PRG2 PRG3} {
 		set w [b2i [rd $pr]]
 		foreach half {0 16} {
