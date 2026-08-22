@@ -76,11 +76,7 @@ module ncr5380
 
 	// CD-ROM drive present on the bus (see scsi.v's cd_enable). Only meaningful
 	// when CD_DEV is in range; low makes the bus identical to a disks-only build.
-	input              cd_enable,
-	input        [2:0] cd_dbg,
-	input        [2:0] cd_ms_mode,
-	input        [3:0] cd_vendor_dbg
-	,input       [1:0] cd_sense_mode
+	input              cd_enable
 
 	// Debug tap for the JTAG probe deck (rtl/dbg_probes.sv). Raw state only --
 	// every counter, sticky bit and epoch lives in the probe deck, so this bus
@@ -461,10 +457,6 @@ module ncr5380
 				// is evaluated.
 				.bus_busy( |target_bsy ),
 				.cd_enable( (i == CD_DEV) ? cd_enable : 1'b0 ),
-				.cd_dbg   ( cd_dbg ),
-				.cd_ms_mode( cd_ms_mode ),
-				.cd_vendor_dbg( cd_vendor_dbg ),
-				.cd_sense_mode( cd_sense_mode ),
 				.sel    ( scsi_sel ),
 				.atn    ( scsi_atn ),
 

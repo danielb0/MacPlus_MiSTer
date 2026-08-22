@@ -237,7 +237,11 @@ set_global_assignment -name VERILOG_FILE rtl/scsi.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ncr5380.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/dbg_probes.sv
 set_global_assignment -name VERILOG_FILE rtl/build_tag.v
-set_global_assignment -name VERILOG_MACRO "USE_SCSI_ISSP=1"
+# JTAG probe deck (rtl/dbg_probes.sv). OFF for a release build -- the deck and
+# its taps are pruned entirely when the macro is absent, so this costs nothing.
+# Re-enable it to debug on hardware; it found the 2026-08-22 CD wedge and its
+# benches (sim/tb_dbg_probes.v, sim/test_read_probes.tcl) stay green either way.
+# set_global_assignment -name VERILOG_MACRO "USE_SCSI_ISSP=1"
 set_global_assignment -name VERILOG_FILE rtl/floppy_track_encoder.v
 set_global_assignment -name VERILOG_FILE rtl/floppy_track_decoder.v
 set_global_assignment -name VERILOG_FILE rtl/floppy_write_committer.v

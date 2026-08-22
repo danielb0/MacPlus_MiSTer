@@ -69,8 +69,6 @@ module tb_ncr5380_seam;
 	reg             sd_buff_wr = 0;
 
 	reg             cd_enable = 1;
-	reg       [2:0] cd_dbg = 0;      // 0 = all commands enabled
-	reg       [2:0] cd_ms_mode = 0;  // 0 = full MODE SENSE response
 
 	// WDOG_LOG(11) ~= 20us and IOWDOG_LOG(14) ~= 0.5ms, so both timeouts are
 	// reachable in simulation. Synthesis keeps the real 129ms / 516ms periods.
@@ -82,7 +80,7 @@ module tb_ncr5380_seam;
 		.io_lba(io_lba), .io_rd(io_rd), .io_wr(io_wr), .io_ack(io_ack),
 		.sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout),
 		.sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr),
-		.cd_enable(cd_enable), .cd_dbg(cd_dbg), .cd_ms_mode(cd_ms_mode), .cd_vendor_dbg(4'd0), .cd_sense_mode(2'd0)
+		.cd_enable(cd_enable)
 	);
 
 	// ---- minimal HPS sector server ---------------------------------------

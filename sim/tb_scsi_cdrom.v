@@ -54,9 +54,6 @@ module tb_scsi_cdrom;
    wire [15:0] sd_buff_din;
    reg         sd_buff_wr   = 1'b0;
 
-   reg  [2:0]  cd_ms_mode   = 3'd0;   // MODE SENSE content bisect
-   reg  [3:0]  cd_vendor_dbg = 4'd0;
-   reg  [1:0]  cd_sense_mode = 2'd0;  // no-media sense bisect  // Apple vendor-command bisect
 
    localparam [2:0] TARGET_ID = 3'd3;   // AppleCD SC factory default
 
@@ -68,10 +65,6 @@ module tb_scsi_cdrom;
       .sys_rst(sys_rst),
       .bus_busy(bus_busy),
       .cd_enable(cd_enable),
-      .cd_dbg(3'd0),
-      .cd_ms_mode(cd_ms_mode),
-      .cd_vendor_dbg(cd_vendor_dbg),
-      .cd_sense_mode(cd_sense_mode),
       .sel(sel),
       .atn(atn),
       .bsy(bsy),
@@ -1117,188 +1110,6 @@ module tb_scsi_cdrom;
       report(ok, "cd28 - MODE SENSE satisfies an OVER-armed blind transfer");
 
       // ==================================================================
-      // Test 29: the MODE SENSE content bisect itself. An instrument that has
-      // never been exercised is not evidence -- the debug ladder shipped with
-      // levels 1 and 2 silently gating out REQUEST SENSE, which would have
-      // made a hang there unreadable. So prove this one before trusting it.
-      //
-      // Bare mode must: declare 4 bytes of mode data (byte 0 = 3), declare NO
-      // block descriptor (byte 3 = 0), carry no page bytes, and still satisfy
-      // the initiator's full armed allocation -- the transfer length must be
-      // identical to full mode, so that length is held constant across the
-      // bisect and only CONTENT varies.
-      // ==================================================================
-      do_reset; mount_image(IMG_BLOCKS);
-      begin : t29
-         integer bad, k;
-         bad = 0;
-         cd_ms_mode = 3'd1;
-         // over-armed, and for a page that has real content in full mode
-         select_target;
-         send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
-         read_blind(255);
-         finish_command;
-         if (blind_short || (blind_got != 255)) begin
-            $display("       bare: armed 255 got %0d short=%b", blind_got, blind_short);
-            bad = bad + 1;
-         end
-         if (buf_in[0] !== 8'd3)    begin $display("       bare: byte0=%02x want 03", buf_in[0]); bad=bad+1; end
-         if (buf_in[3] !== 8'd0)    begin $display("       bare: byte3=%02x want 00 (no block desc)", buf_in[3]); bad=bad+1; end
-         if (buf_in[2] !== 8'h80)   begin $display("       bare: byte2=%02x want 80 (WP)", buf_in[2]); bad=bad+1; end
-         // nothing past the 4-byte header may be non-zero
-         for (k = 4; k < 255; k = k + 1)
-            if (buf_in[k] !== 8'h00) bad = bad + 1;
-
-         // and the switch must be a true no-op when clear: full mode unchanged
-         cd_ms_mode = 3'd0;
-         select_target;
-         send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
-         read_blind(255);
-         finish_command;
-         if (blind_short || (blind_got != 255) || (buf_in[0] !== 8'd27) ||
-             (buf_in[3] !== 8'd8) || (buf_in[12] !== 8'h0e)) begin
-            $display("       full: b0=%02x b3=%02x b12=%02x got %0d (want 1b/08/0e/255)",
-                     buf_in[0], buf_in[3], buf_in[12], blind_got);
-            bad = bad + 1;
-         end
-         ok = (bad == 0);
-      end
-      report(ok, "cd29 - MODE SENSE bare-header bisect is correct and reverts cleanly");
-
-      // ==================================================================
-      // Test 30: the two middle bisect states. Each must be a response a real
-      // drive could legitimately give, and each must differ from its neighbour
-      // in exactly ONE component -- otherwise a hardware result cannot be
-      // attributed. Transfer length is held constant across all states so that
-      // length is never the variable under test.
-      //
-      //   state 2: header + block descriptor, no pages  (mode data length 11)
-      //   state 3: state 2 + page code and declared length, payload zeroed
-      // ==================================================================
-      do_reset; mount_image(IMG_BLOCKS);
-      begin : t30
-         integer bad, k;
-         reg [7:0] desc2 [4:11];
-         bad = 0;
-
-         // ---- state 2: header + block descriptor, nothing after byte 11
-         cd_ms_mode = 3'd2;
-         select_target;
-         send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
-         read_blind(255); finish_command;
-         if (blind_short || (blind_got != 255)) begin
-            $display("       s2: armed 255 got %0d short=%b", blind_got, blind_short); bad=bad+1; end
-         if (buf_in[0] !== 8'd11) begin $display("       s2: byte0=%02x want 0b", buf_in[0]); bad=bad+1; end
-         if (buf_in[3] !== 8'd8)  begin $display("       s2: byte3=%02x want 08", buf_in[3]); bad=bad+1; end
-         if (buf_in[10] !== 8'h08)begin $display("       s2: byte10=%02x want 08", buf_in[10]); bad=bad+1; end
-         for (k = 12; k < 255; k = k + 1)
-            if (buf_in[k] !== 8'h00) bad = bad + 1;   // no page may appear
-         for (k = 4; k <= 11; k = k + 1) desc2[k] = buf_in[k];
-
-         // ---- state 3: adds ONLY the page shell; payload must stay zero
-         cd_ms_mode = 3'd3;
-         select_target;
-         send_cdb(8'h1a,8'h00,8'h0e,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
-         read_blind(255); finish_command;
-         if (buf_in[0] !== 8'd27) begin $display("       s3: byte0=%02x want 1b", buf_in[0]); bad=bad+1; end
-         if (buf_in[3] !== 8'd8)  begin $display("       s3: byte3=%02x want 08", buf_in[3]); bad=bad+1; end
-         if (buf_in[12] !== 8'h0e)begin $display("       s3: byte12=%02x want 0e", buf_in[12]); bad=bad+1; end
-         if (buf_in[13] !== 8'h0e)begin $display("       s3: byte13=%02x want 0e", buf_in[13]); bad=bad+1; end
-         for (k = 14; k < 255; k = k + 1)
-            if (buf_in[k] !== 8'h00) bad = bad + 1;   // payload must be zeroed
-
-         // the block descriptor must be IDENTICAL in states 2 and 3, so that a
-         // difference between them on hardware is attributable to the page
-         // shell alone -- that is the whole point of a one-component step
-         for (k = 4; k <= 11; k = k + 1)
-            if (buf_in[k] !== desc2[k]) begin
-               $display("       s3: descriptor byte %0d = %02x, state 2 had %02x",
-                        k, buf_in[k], desc2[k]);
-               bad = bad + 1;
-            end
-
-         // ---- an unknown page in state 3 must not sprout a page shell
-         cd_ms_mode = 3'd3;
-         select_target;
-         send_cdb(8'h1a,8'h00,8'h01,8'h00,8'd64,8'h00,0,0,0,0,0,0, 6);
-         read_blind(64); finish_command;
-         if (buf_in[0] !== 8'd11) begin $display("       s3/unknown: byte0=%02x want 0b", buf_in[0]); bad=bad+1; end
-         for (k = 12; k < 64; k = k + 1)
-            if (buf_in[k] !== 8'h00) bad = bad + 1;
-
-         cd_ms_mode = 3'd0;
-         ok = (bad == 0);
-      end
-      report(ok, "cd30 - bisect states 2 and 3 each add exactly one component");
-
-      // ==================================================================
-      // Test 31: the per-page payload states. Hardware exonerated the block
-      // descriptor and the page code/length byte (states 1-3 all boot, full
-      // hangs), so the fault is in a page BODY. States 4/5/6 suppress exactly
-      // one page's body each; the state that boots names the page.
-      //
-      // The properties that make that inference valid, and so must hold here:
-      //  - a state suppresses its OWN page's body and no other page's
-      //  - byte 12 and byte 13 still come from the REAL response in all of
-      //    them, so the body is the only thing that varies
-      //  - a suppressed body is genuinely all zero
-      // ==================================================================
-      do_reset; mount_image(IMG_BLOCKS);
-      begin : t31
-         integer bad, k, s, p;
-         reg [7:0] pg  [0:2];
-         integer   tot [0:2];
-         reg [7:0] b13 [0:2];
-         pg[0]=8'h30; tot[0]=36; b13[0]=8'h00;
-         pg[1]=8'h0e; tot[1]=28; b13[1]=8'h0e;
-         pg[2]=8'h2a; tot[2]=38; b13[2]=8'h18;
-         bad = 0;
-
-         for (s = 0; s < 3; s = s + 1) begin
-            cd_ms_mode = 3'd4 + s[2:0];
-            for (p = 0; p < 3; p = p + 1) begin
-               select_target;
-               send_cdb(8'h1a,8'h00,pg[p],8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
-               read_blind(255);
-               finish_command;
-               if (buf_in[0] !== (tot[p]-1)) begin
-                  $display("       s%0d/p%02x: byte0=%02x want %02x", 4+s, pg[p], buf_in[0], tot[p]-1);
-                  bad = bad + 1; end
-               if (buf_in[3] !== 8'd8) begin
-                  $display("       s%0d/p%02x: byte3=%02x want 08", 4+s, pg[p], buf_in[3]);
-                  bad = bad + 1; end
-               if (buf_in[12] !== pg[p]) begin
-                  $display("       s%0d/p%02x: byte12=%02x", 4+s, pg[p], buf_in[12]);
-                  bad = bad + 1; end
-               if (buf_in[13] !== b13[p]) begin
-                  $display("       s%0d/p%02x: byte13=%02x want %02x", 4+s, pg[p], buf_in[13], b13[p]);
-                  bad = bad + 1; end
-               if (s == p)
-                  for (k = 14; k < tot[p]; k = k + 1)
-                     if (buf_in[k] !== 8'h00) begin
-                        $display("       s%0d/p%02x: body byte %0d = %02x, want 00", 4+s, pg[p], k, buf_in[k]);
-                        bad = bad + 1; end
-            end
-         end
-
-         // a NON-targeted page must keep its real body: page 0x30 still says
-         // "APPLE" while the 0x0E state is selected
-         cd_ms_mode = 3'd5;
-         select_target;
-         send_cdb(8'h1a,8'h00,8'h30,8'h00,8'd255,8'h00,0,0,0,0,0,0, 6);
-         read_blind(255); finish_command;
-         if ((buf_in[14] !== "A") || (buf_in[15] !== "P") || (buf_in[18] !== "E")) begin
-            $display("       s5/p30: body suppressed but should not be (%02x %02x %02x)",
-                     buf_in[14], buf_in[15], buf_in[18]);
-            bad = bad + 1;
-         end
-
-         cd_ms_mode = 3'd0;
-         ok = (bad == 0);
-      end
-      report(ok, "cd31 - per-page body states suppress one page each, shells intact");
-
-      // ==================================================================
       // Test 32: the Apple vendor commands, armed PAST their internal caps.
       //
       // cd25 claims to sweep over-armed allocations, and it does -- but only
@@ -1365,158 +1176,68 @@ module tb_scsi_cdrom;
       end
       report(ok, "cd32 - Apple vendor commands satisfy allocations past their caps");
 
-      // --- cd33: the vendor-command bisect switch itself -------------------
-      // PROVE THE INSTRUMENT BEFORE TRUSTING IT. The CD command ladder shipped
-      // untested and its levels 1-2 turned out to be broken, which made two
-      // hardware results unreadable. Each state must suppress EXACTLY its own
-      // opcode -- verified by the SENSE KEY, so that a served-but-unread data
-      // phase (which the watchdog also ends in CHECK) cannot be mistaken for a
-      // rejection. Mutation A proved that distinction is load-bearing.
+      // --- cd33: every Apple vendor opcode is served ------------------------
+      // What used to be state 0 of the vendor-command bisect. The bisect knob
+      // is gone; this is the configuration that ships, so it is what gets
+      // tested.
       begin : cd33
          vend_bad = 0;
-
-         // state 0: every vendor opcode is served (the shipping configuration)
-         cd_vendor_dbg = 4'd0;
          select_target; send_cdb(8'hc1,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
          read_blind(12); finish_command;
          if (status_byte != 8'h00) begin
-            $display("       state0: c1 status %h, expected GOOD", status_byte);
+            $display("       c1 status %h, expected GOOD", status_byte);
             vend_bad = vend_bad + 1; end
-
-         cd_vendor_dbg = 4'd1;
-         select_target; send_cdb(8'hc1,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
-         finish_command; check_rejected("state1 c1");
-         // ...and a vendor command this state does NOT name is still served
          select_target; send_cdb(8'hc2,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
          read_blind(12); finish_command;
          if (status_byte != 8'h00) begin
-            $display("       state1: c2 status %h, expected GOOD (not suppressed)",
-                     status_byte); vend_bad = vend_bad + 1; end
-
-         cd_vendor_dbg = 4'd2;
-         select_target; send_cdb(8'hc2,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
-         finish_command; check_rejected("state2 c2");
-
-         cd_vendor_dbg = 4'd3;
-         select_target; send_cdb(8'hcc,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
-         finish_command; check_rejected("state3 cc");
-
-         cd_vendor_dbg = 4'd5;
-         select_target; send_cdb(8'h42,8'h02,8'h40,8'h01,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
-         finish_command; check_rejected("state5 42");
-
-         cd_vendor_dbg = 4'd6;
-         select_target; send_cdb(8'h43,0,0,0,0,0,0,8'h02,8'd88,8'h00,0,0, 10);
-         finish_command; check_rejected("state6 43");
-
-         cd_vendor_dbg = 4'd7;
-         select_target; send_cdb(8'h44,0,0,0,8'h12,8'h34,0,8'h00,8'd16,8'h00,0,0, 10);
-         finish_command; check_rejected("state7 44");
-
-         // state 8 suppresses all four Apple opcodes at once
-         cd_vendor_dbg = 4'd8;
-         select_target; send_cdb(8'hc1,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
-         finish_command; check_rejected("state8 c1");
-         select_target; send_cdb(8'hcc,0,0,0,0,0,0,8'h00,8'd12,8'h00,0,0, 10);
-         finish_command; check_rejected("state8 cc");
-
-         // INQUIRY is never a vendor command: it must survive every state
-         select_target; send_cdb(8'h12,0,0,0,8'd32,0,0,0,0,0,0,0, 6);
-         read_data_phase(32); finish_command;
-         if (status_byte != 8'h00) begin
-            $display("       state8: INQUIRY status %h, expected GOOD", status_byte);
+            $display("       c2 status %h, expected GOOD", status_byte);
             vend_bad = vend_bad + 1; end
-
-         cd_vendor_dbg = 4'd0;
          ok = (vend_bad == 0);
       end
-      report(ok, "cd33 - vendor bisect suppresses exactly one opcode per state");
+      report(ok, "cd33 - Apple vendor opcodes are served, not rejected");
 
-      // --- cd34: state 9, unknown opcodes complete GOOD ---------------------
-      // The one thing a suppression bisect cannot test: whether the driver is
-      // wedged on an opcode we REJECT rather than one we answer. The probe
-      // opcode must be one whose CDB actually COMPLETES: 0xe0 (group 7) was
-      // tried first and never completes, so the bus watchdog aborted it and
-      // BOTH states returned CHECK -- the state-0 leg passed for the wrong
-      // reason. 0x16 RESERVE UNIT is group 0, completes at 6 bytes, and is
-      // implemented by neither core.
+      // --- cd34: an unimplemented opcode CHECKs -----------------------------
+      // 0x16 RESERVE UNIT is group 0, completes at 6 bytes, and is implemented
+      // by neither core -- so it reaches the reject path instead of being
+      // aborted by the bus watchdog, which is why 0xe0 was unusable here.
       begin : cd34
          integer bad;
          bad = 0;
-
-         cd_vendor_dbg = 4'd0;
          select_target; send_cdb(8'h16,0,0,0,0,0,0,0,0,0,0,0, 6); finish_command;
          if (status_byte != 8'h02) begin
-            $display("       state0: e0 status %h, expected CHECK", status_byte);
+            $display("       16 status %h, expected CHECK", status_byte);
             bad = bad + 1; end
-
-         cd_vendor_dbg = 4'd9;
-         select_target; send_cdb(8'h16,0,0,0,0,0,0,0,0,0,0,0, 6); finish_command;
-         if (status_byte != 8'h00) begin
-            $display("       state9: e0 status %h, expected GOOD", status_byte);
-            bad = bad + 1; end
-
-         // a real command must still behave normally in state 9
          select_target; send_cdb(8'h12,0,0,0,8'd32,0,0,0,0,0,0,0, 6);
          read_data_phase(32); finish_command;
          if ((status_byte != 8'h00) || (buf_in[0] != 8'h05)) begin
-            $display("       state9: INQUIRY status %h byte0 %h",
-                     status_byte, buf_in[0]); bad = bad + 1; end
-
-         cd_vendor_dbg = 4'd0;
+            $display("       INQUIRY status %h byte0 %h", status_byte, buf_in[0]);
+            bad = bad + 1; end
          ok = (bad == 0);
       end
-      report(ok, "cd34 - state 9 completes an unimplemented opcode with GOOD");
+      report(ok, "cd34 - an unimplemented opcode CHECKs, and INQUIRY still works");
 
-      // --- cd35: the no-media sense selector --------------------------------
-      // Prove the instrument before it ships. Each state must actually change
-      // the sense the target reports for a command issued against an empty
-      // drive -- otherwise a hardware bisect over these states means nothing.
+      // --- cd35: the no-media sense this target ships -----------------------
+      // SK_NOT_READY + vendor ASC 0xB0, from MAME's return_no_cd. MacOS
+      // BRANCHES on this value, so it is not a free choice.
       begin : cd35
          integer bad;
          bad = 0;
-
-         // Unmount: img_blocks = 0 with a mount strobe is "no media".
          @(posedge clk); #1;
          img_blocks  = 32'd0;
          img_mounted = 1'b1;
          @(posedge clk); #1;
          img_mounted = 1'b0;
          repeat (600) begin @(posedge clk); #1; end
-
-         cd_sense_mode = 2'd0;
          simple_cmd6(8'h00,0,0,0,0,0);        // TEST UNIT READY -> CHECK
          get_sense;
          if ((buf_in[2] !== 8'h02) || (buf_in[12] !== 8'hb0)) begin
-            $display("       mode0: key %h asc %h, expected 02/B0",
+            $display("       key %h asc %h, expected 02/B0",
                      buf_in[2], buf_in[12]); bad = bad + 1; end
-
-         cd_sense_mode = 2'd1;
-         simple_cmd6(8'h00,0,0,0,0,0);
-         get_sense;
-         if ((buf_in[2] !== 8'h02) || (buf_in[12] !== 8'h3a)) begin
-            $display("       mode1: key %h asc %h, expected 02/3A",
-                     buf_in[2], buf_in[12]); bad = bad + 1; end
-
-         cd_sense_mode = 2'd2;
-         simple_cmd6(8'h00,0,0,0,0,0);
-         get_sense;
-         if ((buf_in[2] !== 8'h06) || (buf_in[12] !== 8'h28)) begin
-            $display("       mode2: key %h asc %h, expected 06/28",
-                     buf_in[2], buf_in[12]); bad = bad + 1; end
-
-         cd_sense_mode = 2'd3;
-         simple_cmd6(8'h00,0,0,0,0,0);
-         get_sense;
-         if ((buf_in[2] !== 8'h02) || (buf_in[12] !== 8'h04)) begin
-            $display("       mode3: key %h asc %h, expected 02/04",
-                     buf_in[2], buf_in[12]); bad = bad + 1; end
-
-         cd_sense_mode = 2'd0;
          mount_image(IMG_BLOCKS);             // restore for any later test
          ok = (bad == 0);
       end
-      report(ok, "cd35 - no-media sense selector changes key/ASC per state");
+      report(ok, "cd35 - an empty drive reports NOT READY + ASC B0");
+
 
 
 

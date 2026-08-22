@@ -1,7 +1,5 @@
 // build_tag.v -- REGENERATED BEFORE EVERY COMPILE, do not hand-edit.
-//
-// Written by the compile command as:
-//   git rev-parse --short=8 HEAD  ->  the constant below
+// Written by scripts/stamp_build_tag.ps1 from: git rev-parse --short=8 HEAD
 //
 // Why this exists: on 2026-08-22 two different RTL fixes produced byte-for-byte
 // identical probe captures, and there was no way to tell from the board whether
@@ -10,5 +8,5 @@
 // loaded, not on when it was compiled. A capture must be able to name its own
 // bitstream. Read back on the PBLD probe and printed by read_probes.tcl.
 module build_tag(output [31:0] tag);
-	assign tag = 32'hac38fc96;
+	assign tag = 32'hbde27691;
 endmodule

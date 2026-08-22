@@ -73,8 +73,7 @@ module tb_dbg_probes;
 		.io_lba(io_lba), .io_rd(io_rd), .io_wr(io_wr), .io_ack(io_ack),
 		.sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout),
 		.sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr),
-		.cd_enable(1'b1), .cd_dbg(3'd0), .cd_ms_mode(3'd0),
-		.cd_vendor_dbg(4'd0), .cd_sense_mode(2'd0),
+		.cd_enable(1'b1),
 		.dbg_bus(scsi_dbg)
 	);
 

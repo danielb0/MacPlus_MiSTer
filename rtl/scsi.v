@@ -23,7 +23,6 @@ module scsi
 	// driver chokes on WITHOUT a rebuild; 7 = everything, same as 0. Every
 	// command outside the enabled set answers CHECK CONDITION, which is a
 	// legitimate SCSI response, so the bus stays healthy at every level.
-	input [2:0] cd_dbg,
 	// MODE SENSE content bisect (CDROM targets only). Hardware proved the
 	// MECHANISM of answering 0x1a is fine -- state 1 boots with every command
 	// enabled -- so the fault is in our response BYTES. These states add one
@@ -35,9 +34,6 @@ module scsi
 	// and the page code/length byte are exonerated and the fault is in a page
 	// PAYLOAD (bytes 14+). States 4-6 suppress exactly one page's payload, so
 	// the state that boots names the page.
-	input [2:0] cd_ms_mode,
-	input [3:0] cd_vendor_dbg,
-	input [1:0] cd_sense_mode,
 	input 	  sel,
 	input 	  atn, // initiator requests to send a message
 	output 	  bsy, // target holds bus
@@ -463,56 +459,8 @@ function [7:0] cd_mode_sense_byte;
 	end
 endfunction
 
-// The minimum a conforming target may return: a 4-byte header declaring no
-// block descriptor and no pages. Every dependency is a function ARGUMENT --
-// a continuous assignment calling a function takes its sensitivity from the
-// call's arguments, not from signals read inside the body.
-function [7:0] cd_ms_bisect_byte;
-	input [31:0] cnt;
-	input [1:0]  m;
-	input [5:0]  page;
-	input [31:0] cap;
-	reg          known;
-	begin
-		known = (page == 6'h30) || (page == 6'h0E) || (page == 6'h2A);
-		cd_ms_bisect_byte =
-			// ---- 4-byte mode parameter header (every state)
-			(cnt == 32'd0)?((m == 2'd1) ? 8'd3 :
-			                (m == 2'd2) ? 8'd11 :
-			                (page == 6'h30) ? 8'd35 :
-			                (page == 6'h0E) ? 8'd27 :
-			                (page == 6'h2A) ? 8'd37 : 8'd11):
-			(cnt == 32'd2)?8'h80:                        // WP
-			(cnt == 32'd3)?((m == 2'd1) ? 8'd0 : 8'd8):  // block desc length
-			(m == 2'd1)?8'h00:                           // state 1 ends here
-			// ---- 8-byte block descriptor (states 2, 3)
-			(cnt == 32'd5 )?cap[23:16]:
-			(cnt == 32'd6 )?cap[15:8]:
-			(cnt == 32'd7 )?cap[7:0]:
-			(cnt == 32'd10)?8'h08:                       // block length 2048
-			(m == 2'd2)?8'h00:                           // state 2 ends here
-			// ---- page SHELL only: code + declared length, payload zeroed
-			(cnt == 32'd12)?(known ? {2'd0, page} : 8'h00):
-			(cnt == 32'd13)?((page == 6'h0E) ? 8'h0E :
-			                 (page == 6'h2A) ? 8'h18 : 8'h00):
-			8'h00;
-	end
-endfunction
-
-// States 3..6 serve the full response with one page's PAYLOAD suppressed --
-// byte 12 (page code) and byte 13 (declared length) still come from the real
-// response, so the only thing that changes is the body. State 3 suppresses
-// every page, 4/5/6 suppress one each.
-wire cd_ms_kill_body = (cd_ms_mode == 3'd3) ||
-                       ((cd_ms_mode == 3'd4) && (cd_page_r == 6'h30)) ||
-                       ((cd_ms_mode == 3'd5) && (cd_page_r == 6'h0E)) ||
-                       ((cd_ms_mode == 3'd6) && (cd_page_r == 6'h2A));
-
 wire [7:0] mode_sense_dout =
 		(CDROM == 0) ? hd_mode_sense_dout :
-		((cd_ms_mode == 3'd1) || (cd_ms_mode == 3'd2))
-		    ? cd_ms_bisect_byte(data_cnt, cd_ms_mode[1:0], cd_page_r, capacity) :
-		(cd_ms_kill_body && (data_cnt >= 32'd14)) ? 8'h00 :
 		cd_mode_sense_byte(data_cnt, cd_page_r, capacity);
 wire [7:0] hd_mode_sense_dout =
 		(data_cnt == 32'd3 )?8'd8:
@@ -1018,58 +966,15 @@ wire  cmd_ok_cd = cmd_read || cmd_inquiry || cmd_test_unit_ready ||
 		  cmd_cd_toc43 || cmd_cd_subq43 || cmd_cd_hdr ||
 		  cmd_cd_prevent || cmd_cd_startstop || cmd_cd_setspeed;
 
-// Debug ladder. Each level adds one command class on top of the previous.
-//   1 INQUIRY   2 +TEST UNIT READY   3 +REQUEST SENSE
-//   4 +READ CAPACITY   5 +MODE SENSE   6 +READ
-wire  cmd_ok_cd_dbg = cmd_inquiry
-                   || ((cd_dbg >= 3'd2) && cmd_test_unit_ready)
-                   || ((cd_dbg >= 3'd3) && cmd_request_sense)
-                   || ((cd_dbg >= 3'd4) && cmd_read_capacity)
-                   || ((cd_dbg >= 3'd5) && cmd_mode_sense)
-                   || ((cd_dbg >= 3'd6) && cmd_read);
-
-wire  cmd_ok_cd_sel = ((cd_dbg == 3'd0) || (cd_dbg == 3'd7)) ? cmd_ok_cd : cmd_ok_cd_dbg;
-
-// Apple vendor-command bisect (status[28:25]). The MODE SENSE page bisect
-// showed the magic page 0x30 body is a GATE: serve it and the driver commits
-// to the Apple vendor path, then wedges. Six content/length fixes later the
-// wedge is unchanged, so this suppresses ONE vendor command at a time to name
-// which one the driver cannot get past.
-//   0 off   1 -C1 TOC   2 -C2 subQ   3 -CC astat   4 -CE actl
-//   5 -42 subch10   6 -43 TOC10   7 -44 header   8 -all four Apple opcodes
-//   9 unknown opcodes complete GOOD instead of CHECK CONDITION
-// State 9 is the one a suppression bisect cannot reach: it tests whether the
-// driver wedges on an opcode we REJECT rather than one we answer. A suppressed
-// command CHECKs, which is an artificial drive state -- read these as boundary
-// evidence only, never as mechanism (the ladder lesson).
-wire  cd_vend_all  = (cd_vendor_dbg == 4'd8);
-wire  cd_vend_supp =
-        (((cd_vendor_dbg == 4'd1) || cd_vend_all) && cmd_cd_toc)   ||
-        (((cd_vendor_dbg == 4'd2) || cd_vend_all) && cmd_cd_subq)  ||
-        (((cd_vendor_dbg == 4'd3) || cd_vend_all) && cmd_cd_astat) ||
-        (((cd_vendor_dbg == 4'd4) || cd_vend_all) && cmd_cd_actl)  ||
-        ((cd_vendor_dbg == 4'd5) && cmd_cd_subq43) ||
-        ((cd_vendor_dbg == 4'd6) && cmd_cd_toc43)  ||
-        ((cd_vendor_dbg == 4'd7) && cmd_cd_hdr);
-// Unknown-opcode-OK: cmd_ok=1 while no data-phase clause matches, so the
-// dispatch falls through to STATUS_OUT -- a complete, zero-length GOOD.
-wire  cd_vend_unk_ok = (cd_vendor_dbg == 4'd9);
-wire  cmd_ok_cd_bis  = cd_vend_unk_ok ? 1'b1 : (cmd_ok_cd_sel && !cd_vend_supp);
-
-// No-media sense bisect (status[16:15]). Our answer to a command against an
-// empty drive is SK_NOT_READY + vendor ASC 0xB0, from MAME return_no_cd.
-// MacOS demonstrably BRANCHES on this value -- MAME records that 0x3A makes
-// it hammer the user to format the disc -- and the LC, whose driver copes,
-// runs a later System than the 7.1.2 seen wedging here. So the code is a real
-// variable, and a small enough space to bisect rather than guess at.
-//   0 = B0 NOT READY (shipping)   1 = 3A NOT READY (medium not present)
-//   2 = 28 UNIT ATTENTION (medium may have changed)
-//   3 = 04 NOT READY (LUN becoming ready)
-wire [3:0] cd_nomedia_key = (cd_sense_mode == 2'd2) ? 4'h6 : 4'h2;
-wire [7:0] cd_nomedia_asc = (cd_sense_mode == 2'd1) ? 8'h3a :
-                            (cd_sense_mode == 2'd2) ? 8'h28 :
-                            (cd_sense_mode == 2'd3) ? 8'h04 : 8'hb0;
-wire  cmd_ok = (CDROM != 0) ? cmd_ok_cd_bis : cmd_ok_hd;
+// Our answer to a command against an empty drive: SK_NOT_READY + the vendor
+// ASC 0xB0, from MAME's return_no_cd. MacOS demonstrably BRANCHES on this
+// value -- MAME records that 0x3A makes it hammer the user to format the disc
+// -- so it is not a free choice. 0xB0 is what the AppleCD driver expects and
+// what this target ships; 3A/28/04 were each tried from the OSD during the
+// wedge hunt and none of them was the fault. See SCSI_UPGRADE_PLAN.md.
+wire [3:0] cd_nomedia_key = 4'h2;   // NOT READY
+wire [7:0] cd_nomedia_asc = 8'hb0;
+wire  cmd_ok = (CDROM != 0) ? cmd_ok_cd : cmd_ok_hd;
 
 // Media-dependent commands fail with the AppleCD no-disc sense while no image
 // is mounted. MAME's return_no_cd uses SK_NOT_READY + the vendor ASC 0xB0 --
@@ -1128,7 +1033,7 @@ always @(posedge clk) begin
 			sense_asc <= 8'h20; // invalid command operation code
 		end else if (cd_no_media) begin
 			sense_key <= cd_nomedia_key;
-			sense_asc <= cd_nomedia_asc;  // selectable; see cd_sense_mode
+			sense_asc <= cd_nomedia_asc;
 		end else if (cd_hdr_msf_rej) begin
 			sense_key <= 4'h5;  // ILLEGAL REQUEST
 			sense_asc <= 8'h24; // invalid field in CDB

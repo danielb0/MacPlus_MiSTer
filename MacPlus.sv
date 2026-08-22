@@ -71,10 +71,6 @@ localparam CONF_STR = {
 	// equivalent slot plainly, and an `h` prefix hid the item outright.
 	"SC4,ISO,Mount CD-ROM;",
 	"OI,CD-ROM Drive,Enabled,Disabled;",
-	"OJL,CD Debug,Off,INQ,+TUR,+SENSE,+CAP,+MODE,+READ,All;",
-	"OMO,CD MODE SENSE,Full,Hdr,Hdr+desc,+pg shell,-p30 body,-p0E body,-p2A body,Full;",
-	"OPS,CD Vendor Cmd,Off,-C1 toc,-C2 subq,-CC astat,-CE actl,-42 subch,-43 toc10,-44 hdr,-All Apple,Unk=GOOD;",
-	"OFG,CD NoMedia Sense,B0 NotRdy,3A NotRdy,28 UnitAtt,04 NotRdy;",
 	"-;",
 	"O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
@@ -188,24 +184,6 @@ assign sd_buff_din[4] = scsi_sd_buff_din[SCSI_CD_DEV];
 // target misbehaves on hardware.
 wire cd_enable = ~status[18];
 
-// CD command-set debug ladder - see scsi.v. Off (0) is normal operation; the
-// intermediate levels let the CD command set be bisected from the OSD without
-// rebuilding, to find which command a guest driver chokes on.
-wire [2:0] cd_dbg = status[21:19];
-
-// MODE SENSE content bisect. The debug ladder proved the guest boots at level
-// 4 and hangs from level 5 up -- a one-command delta, MODE SENSE -- and the
-// hang survived the allocation-length fix, so the byte COUNT is not the
-// discriminator. This switch answers MODE SENSE with the bare 4-byte mode
-// parameter header instead of our block descriptor and pages, keeping the
-// transfer length identical. It boots => the fault is in our response
-// CONTENT. It still hangs => the fault is the mechanism of answering 0x1a at
-// all (phase/REQ handling or the ncr5380 seam), not the bytes.
-wire [2:0] cd_ms_mode = status[24:22];
-// Apple vendor-command bisect; see cmd_ok_cd_bis in rtl/scsi.v.
-wire [3:0] cd_vendor_dbg = status[28:25];
-// No-media sense bisect; see cd_nomedia_asc in rtl/scsi.v.
-wire [1:0] cd_sense_mode = status[16:15];
 // sd_buff_din[2]/[3] driven below by each drive's floppy_sd_writer (Phase 4) -
 // only ever consulted by hps_io during a sd_wr session for that slot, which
 // only the writer ever asserts, so no mux against the loader is needed here.
@@ -711,10 +689,6 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.img_mounted({img_mounted[4], img_mounted[1:0]}),
 	.img_size(img_size[40:9]),
 	.cd_enable(cd_enable),
-	.cd_dbg(cd_dbg),
-	.cd_ms_mode(cd_ms_mode),
-	.cd_vendor_dbg(cd_vendor_dbg),
-	.cd_sense_mode(cd_sense_mode),
 	.io_lba(scsi_sd_lba),
 	.io_rd(scsi_sd_rd),
 	.io_wr(scsi_sd_wr),

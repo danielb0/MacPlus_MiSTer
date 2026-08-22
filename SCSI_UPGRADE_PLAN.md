@@ -1415,6 +1415,32 @@ underlying numbers were always self-consistent (attempt 2's frozen accesses were
 but the label was, and it is now `DATA>init(READ)` / `DATA>targ(WRITE)`, with two
 tests pinning the direction (reader 18 -> 20).
 
+#### The CD path proved positively, not just by absence of a hang
+
+```
+PIO2  cd rd=172 ack=172   disk0 rd=191      PIOS  cd fetch stuck=0
+PDMA  watchdog fires: bus=0  io-stall=0
+PDM2  DACK-in-mismatch=0  ACK-in-STATUS=0
+```
+
+**172 sector fetches asked for and 172 answered.** Every wedged capture in this
+investigation read `cd rd=0` — the CD target never once reached the HPS. This is
+the counter that separates "working" from "not hanging yet".
+
+Both halves of the original bug report are now clear:
+
+| case | before | after |
+|---|---|---|
+| no disc, boot | hangs 5/5 | boots consistently |
+| disc mounted into a running Mac | intermittent hang | mounts immediately, 172 sectors read |
+
+Note the disc is **ejected on restart**, which is correct: `mounted` has no reset
+term and is cleared only by `cd_eject_pulse`, so the Mac's Shutdown Manager
+issued a real EJECT — a physical AppleCD SC would spit the caddy out. It does
+not come back on a core reset either, because the AppleCD driver mounts on the
+insertion *edge* (`scsi.v` ~376) and a reset produces no new `img_mounted`
+pulse. Cosmetic, outside the path changed here, and recorded rather than fixed.
+
 #### Still open
 
 * **With a disc mounted** the wedge was intermittent, via the same `cd_no_media`
@@ -1434,7 +1460,42 @@ C:/iverilog/bin/iverilog.exe -g2005-sv -o sim/out/tb_dbg_probes.vvp sim/tb_dbg_p
 tclsh sim/test_read_probes.tcl
 ```
 
-### Debug scaffolding to remove when this closes
+### Debug scaffolding: removed (2026-08-22)
+
+Removed now that the wedge is fixed and the CD path is proved (browsed and
+loaded files from a mounted disc, `cd rd=172 ack=172`).
+
+**Gone from the OSD** — four bisect ladders and their `status` bits:
+`OJL` CD Debug (21:19), `OMO` CD MODE SENSE (24:22), `OPS` CD Vendor Cmd
+(28:25), `OFG` CD NoMedia Sense (16:15). Those bits are now free.
+
+**Gone from the RTL** — `cd_dbg`, `cd_ms_mode`, `cd_vendor_dbg`,
+`cd_sense_mode` and everything they gated, collapsed to the level-0 behaviour
+that shipped: `cd_ms_bisect_byte`, `cd_ms_kill_body`, `cmd_ok_cd_dbg`,
+`cmd_ok_cd_sel`, `cd_vend_all/_supp/_unk_ok`, `cmd_ok_cd_bis`. `cmd_ok` is now
+just `(CDROM != 0) ? cmd_ok_cd : cmd_ok_hd`, and the no-media sense is the
+constant `02/B0` it always shipped as. ~5 kB out of `scsi.v`, plus the ports
+through `ncr5380.sv` and `dataController_top.sv`.
+
+**Kept, deliberately, against the earlier plan:** `rtl/dbg_probes.sv`, its taps
+and both its benches. `USE_SCSI_ISSP` is **commented out in `MacPlus.qsf`**
+instead of deleted, so the deck and its taps are pruned from a release build and
+cost nothing — but re-enabling it is one line rather than a rebuild of the whole
+instrument. It found this bug, its benches stay green with the macro off, and
+three of the four instrument defects that made this hunt expensive were only
+caught because the deck was under test. Delete it later if it ever gets in the
+way; do not delete it to tidy up.
+
+**Bench changes.** `cd29`/`cd30`/`cd31` characterised the MODE SENSE bisect and
+went with it — the shipping response is covered independently by `cd22`, `cd23`,
+`cd24` and `cd28`. `cd33`/`cd34`/`cd35` each had a state-0 leg asserting real
+shipping behaviour, so they were rewritten to keep exactly that: vendor opcodes
+are served, an unimplemented opcode CHECKs, an empty drive reports `02/B0`.
+CD gate is 32 tests, down from 35, with no loss of shipping coverage.
+
+Gates after removal: `disk 12/12, CD 32/32, seam 56/56, probes 31/31,
+reader 20/20`. **UNBUILT — needs a compile and a hardware re-test.**
+
 
 OSD: `status[21:19]` CD Debug ladder, `status[24:22]` MODE SENSE bisect,
 `status[28:25]` vendor-command bisect, `status[16:15]` no-media sense bisect.
