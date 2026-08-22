@@ -1469,11 +1469,16 @@ tclsh sim/test_read_probes.tcl
 
 ### Soak: System 7.1 installed from CD onto a 20 MB disk (2026-08-22)
 
-**It worked**, including "Building file: System" — the Installer assembling the
+**It worked, and the Mac BOOTS from the installed volume** — including "Building file: System" — the Installer assembling the
 System suitcase resource by resource. That is thousands of small CD reads
 interleaved with appends and resource-map rewrites on the disk, i.e. the
 catalog/metadata-heavy small-write workload nothing had stressed until now. The
 best write-path validation we have, and better than the 32 MB bulk copy.
+
+Booting from it is the end-to-end proof the write path is byte-correct: a System
+file boots only if every byte landed, and the boot re-reads the whole thing cold,
+past any disk cache. **Phase 1's write path is now hardware-validated**, which no
+amount of reading could establish.
 
 Sampled mid-install and the deck read it correctly as healthy: register writes
 climbing 33 -> 221 between samples, CDB tails advancing (`20 E3` -> `20 E4` ->
