@@ -1467,6 +1467,44 @@ C:/iverilog/bin/iverilog.exe -g2005-sv -o sim/out/tb_dbg_probes.vvp sim/tb_dbg_p
 tclsh sim/test_read_probes.tcl
 ```
 
+### Soak: System 7.1 installed from CD onto a 20 MB disk (2026-08-22)
+
+**It worked**, including "Building file: System" — the Installer assembling the
+System suitcase resource by resource. That is thousands of small CD reads
+interleaved with appends and resource-map rewrites on the disk, i.e. the
+catalog/metadata-heavy small-write workload nothing had stressed until now. The
+best write-path validation we have, and better than the 32 MB bulk copy.
+
+Sampled mid-install and the deck read it correctly as healthy: register writes
+climbing 33 -> 221 between samples, CDB tails advancing (`20 E3` -> `20 E4` ->
+`20 E6`), `cd rd == ack` throughout, no watchdog of either kind, CPU PC scattered
+across real code. This is also the first live confirmation of the reworked
+verdict logic — it printed "bus ACTIVE" where the old code would have printed
+FALSIFIED in capitals at a perfectly healthy machine.
+
+**Open question, not diagnosed:** installing the System 7.1 CD's own CD-ROM
+driver set left the CD unmountable; reverting to the previously installed
+versions fixed it. The disc is pure HFS (Apple Partition Map, one `Apple_HFS`
+partition, no ISO 9660), so the `File Access` extensions are not involved in
+mounting it, and our TOC/subchannel coverage is reasonable — `0xC1`/`0x43` READ
+TOC, `0xC2`/`0x42` subchannel, `0xCC` audio status, `0xCE` audio control, `0x44`
+READ HEADER in LBA form. Missing: actual playback (`0x45`/`0x47`/`0x4B`) and
+MSF-form READ HEADER, none of which should block an HFS mount.
+
+So the likelier cause is a **driver version mismatch** — Apple CD-ROM and Foreign
+File Access must be version-consistent, and installing the 7.1-era set over a
+newer one broke real Macs too. Not established either way. One capture during a
+failing mount would show the CDB and the sense we return and settle it; worth
+doing only if it recurs or before shipping.
+
+**Instrumentation gaps this soak exposed** (both worth closing if the deck is
+re-enabled for more work):
+
+* **No disk write counter.** `PIO2` carries `d0_rd_cnt` only, so `disk0 rd` sits
+  frozen through a heavy write and looks alarming while meaning nothing.
+* **No disk LBA.** `PIOS` carries `cd_io_lba` only, which is why the io-stall
+  wedge above could not be pinned to an address.
+
 ### Soak test found a SECOND wedge, unrelated to the first (2026-08-22)
 
 Copying ~32 MB from CD to a hard disk hung the machine. **Not the bug we fixed** —
