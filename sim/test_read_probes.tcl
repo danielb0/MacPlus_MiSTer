@@ -122,6 +122,36 @@ set out [capture]
 ok "armed with zero DACK reads reads back as FALSIFIED" \
    [string match "*FALSIFIED*" $out]
 
+# ---- a bitstream OLDER than this working tree ------------------------------
+# The reader used to return 0 for any probe missing from the running design,
+# so a capture from a build predating PDM3 rendered a complete, confident and
+# entirely fictional PDM3 block, and PBLD read 00000000 -- indistinguishable
+# from a real build whose tag was never stamped. Observed on hardware
+# 2026-08-22: the board had only 14 ISSP instances (no PDM3, no PBLD) and the
+# capture claimed the driver armed in IDLE and never pumped.
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PDMA PDM2}
+set out [capture]
+
+ok "reader refuses to invent a PDM3 block the bitstream cannot provide" \
+   [expr {[string match "*PDM3  ABSENT*" $out] &&
+          ![string match "*at the DMA arm: phase=*" $out] &&
+          ![string match "*no DACK access at all since the arm*" $out]}]
+ok "reader distinguishes an ABSENT tag probe from an unstamped tag" \
+   [expr {[string match "*bitstream=UNKNOWN*" $out] &&
+          ![string match "*bitstream=00000000*" $out]}]
+ok "reader raises an unmissable incomplete-capture banner" \
+   [expr {[string match "*INCOMPLETE CAPTURE*" $out] &&
+          [string match "*PBLD*" $out] && [string match "*PDM3*" $out]}]
+ok "reader still decodes the probes that ARE present" \
+   [string match "*DACK reads since the DMA arm:*" $out]
+
+# ...and a complete bitstream must NOT raise the banner.
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PDMA PDM2 PDM3 PBLD}
+set out [capture]
+ok "reader stays quiet when every probe is present" \
+   [expr {![string match "*INCOMPLETE CAPTURE*" $out] &&
+          ![string match "*PDM3  ABSENT*" $out]}]
+
 puts ""
 puts "READER: $fails of $tests failing"
 if {$fails == 0} {

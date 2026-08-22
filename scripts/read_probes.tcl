@@ -11,6 +11,7 @@
 # USE_SCSI_ISSP macro is set in MacPlus.qsf.
 
 array set ipairs {}
+array set absent {}
 set samples 1
 set delay   0.5
 if {$argc >= 1} { set samples [lindex $argv 0] }
@@ -58,6 +59,12 @@ if {[llength $info] == 0} {
 	puts "ERROR: no ISSP instances. Is the USE_SCSI_ISSP build actually loaded?"
 	exit 1
 }
+# Start from a clean slate: a stale idx() entry from an earlier run would make
+# have{} claim a probe exists that this bitstream does not carry.
+array unset idx
+array unset absent
+array set idx {}
+array set absent {}
 foreach inst $info {
 	# {index source_width probe_width instance_name}
 	set idx([lindex $inst 3]) [lindex $inst 0]
@@ -68,9 +75,19 @@ puts ""
 # One session for the whole run, rather than one per probe read.
 start_insystem_source_probe -hardware_name $hw -device_name $dev
 
+# A probe that is NOT in the running bitstream must never be reported as data.
+# It used to return 0, and every field derived from it printed as a confident
+# number: a capture from a build predating PDM3 rendered a full PDM3 block
+# reading "at the DMA arm: phase=IDLE ... no DACK access at all since the arm",
+# which is pure fiction, and PBLD read 00000000, which looks like an unstamped
+# tag rather than an absent probe. Same failure mode as the 4-bit wrap counter
+# that cost this investigation a day. Absent probes are now declared, and the
+# blocks that depend on them are suppressed rather than invented.
+proc have {name} { global idx; return [info exists idx($name)] }
+
 proc rd {name} {
-	global idx
-	if {![info exists idx($name)]} { return 0 }
+	global idx absent
+	if {![info exists idx($name)]} { set absent($name) 1; return 0 }
 	set bits [read_probe_data -instance_index $idx($name)]
 	if {$bits eq ""} { return 0 }
 	return [expr 0b$bits]
@@ -114,8 +131,17 @@ for {set n 0} {$n < $samples} {incr n} {
 	return $n
 }
 
-	set pbld [b2i [rd PBLD]]
-	puts [format "sample %d   bitstream=%08X" $n $pbld]
+	if {[have PBLD]} {
+		set pbld [b2i [rd PBLD]]
+		if {$pbld == 0} {
+			puts [format "sample %d   bitstream=UNSTAMPED (PBLD present, tag reads 0 -- rtl/build_tag.v did not make it into the build)" $n]
+		} else {
+			puts [format "sample %d   bitstream=%08X" $n $pbld]
+		}
+	} else {
+		set absent(PBLD) 1
+		puts [format "sample %d   bitstream=UNKNOWN -- this build has NO PBLD probe, so it predates ac38fc9" $n]
+	}
 	puts [format "  PIFA  fetch#%3d  PC=%06X      <- where the CPU is" $if_cnt $if_addr]
 	puts [format "  PACT  bus cycles %d" $pact]
 	puts [format "  PSCS  last READ  reg=%-12s val=%02X  (reads:%d)" \
@@ -208,15 +234,22 @@ for {set n 0} {$n < $samples} {incr n} {
 	puts [format "  PDM2  sticky: DACK-in-mismatch=%d REQ+DMA-in-mismatch=%d ACK-in-STATUS=%d IRQ-latched=%d REQ-in-STATUS=%d REQ-in-MESSAGE=%d" 	             $dack_mis $drq_mis $ack_stat $irq_seen $req_stat $req_msg]
 	puts [format "        live: BSY=%d REQ=%d DMA_EN=%d PMATCH=%d" $lv_bsy $lv_req $lv_dma $lv_pm]
 	puts [format "        phase ring (newest first): %s" [string trim $ringstr]]
-	puts [format "  PDM3  at the DMA arm: phase=%s TCR=%X pmatch=%d" 	             [lindex $phname $ph_arm] $tcr_arm $pm_arm]
-	if {$seen_1st} {
-		puts [format "        first DACK access after the arm was in phase %s" 		             [lindex $phname $ph_1st]]
+	if {[have PDM3]} {
+		puts [format "  PDM3  at the DMA arm: phase=%s TCR=%X pmatch=%d" 	             [lindex $phname $ph_arm] $tcr_arm $pm_arm]
+		if {$seen_1st} {
+			puts [format "        first DACK access after the arm was in phase %s" 		             [lindex $phname $ph_1st]]
+		} else {
+			puts "        no DACK access at all since the arm"
+		}
+		puts [format "        DACK writes since the arm: %s   TCR now=%X   in a data phase now=%d" 	             [expr {$dack_wr >= 255 ? ">=255" : $dack_wr}] $tcr_now $in_data]
+		if {$nondata} {
+			puts "        NOTE: a DACK access landed OUTSIDE a data phase this transaction."
+		}
 	} else {
-		puts "        no DACK access at all since the arm"
-	}
-	puts [format "        DACK writes since the arm: %s   TCR now=%X   in a data phase now=%d" 	             [expr {$dack_wr >= 255 ? ">=255" : $dack_wr}] $tcr_now $in_data]
-	if {$nondata} {
-		puts "        NOTE: a DACK access landed OUTSIDE a data phase this transaction."
+		puts "  PDM3  ABSENT from this bitstream -- this build predates 13cdd79."
+		puts "        The arm-to-data-phase window is NOT measured here. Do not"
+		puts "        infer anything about where the driver armed or where its"
+		puts "        first DACK landed from this capture."
 	}
 
 	# The reading this capture supports, stated outright so a capture cannot be
@@ -242,6 +275,18 @@ for {set n 0} {$n < $samples} {incr n} {
 
 end_insystem_source_probe
 
+if {[array size absent] > 0} {
+	puts ""
+	puts "############################################################"
+	puts "# INCOMPLETE CAPTURE -- probes missing from this bitstream: #"
+	puts "#   [lsort [array names absent]]"
+	puts "# The running core is OLDER than the probe deck in this"
+	puts "# working tree. Every field derived from those probes has"
+	puts "# been SUPPRESSED, not printed as zero. Flash the build you"
+	puts "# meant to test before drawing any conclusion."
+	puts "############################################################"
+	puts ""
+}
 puts "Instruction words collected (feed to a 68000 disassembler):"
 foreach a [lsort -integer [array names ipairs]] {
 	puts [format "   %04X: %04X" $a $ipairs($a)]

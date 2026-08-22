@@ -725,6 +725,92 @@ module tb_ncr5380_seam;
 		ok("seam12 - the WRITE completes with GOOD status", stat == 8'h00);
 		ok("seam12 - bus released", !dut.scsi_bsy);
 
+		// =============== seam13: the driver pumps BEFORE the data phase =====
+		// The window neither seam11 nor seam12 models, and the one the plan named
+		// as unmeasured: both of those wait_raw_req first, so they only ever pump
+		// once the target is ALREADY offering bytes.
+		//
+		// It matters because it is the last hypothesis under which the DACK gate
+		// itself -- rather than the completion-IRQ latch the two failed attempts
+		// also changed -- could be what hung the machine. If a blind pump loop
+		// starts while the target is still in COMMAND, or still fetching the
+		// sector with REQ held low, then a gate that refuses those accesses drops
+		// bytes the un-gated code silently accepted, and the transfer deadlocks.
+		// That is the shape of both hardware failures.
+		//
+		// So: arm pseudo-DMA and start reading IMMEDIATELY after the last CDB
+		// byte, with no wait for REQ at all, and require the READ to complete
+		// with every byte intact.
+		hps_enable = 1'b1;
+		img_size = 32'd2048;
+		img_mounted[0] = 1'b1;
+		@(posedge clk); @(posedge clk);
+		img_mounted[0] = 1'b0;
+		repeat (50) @(posedge clk);
+
+		s11_abort = 0; s11_watch = 1;
+		s11_data_phase = 0;
+		select_target(8'h40);                 // disk at ID 6
+		send_cmd_byte(8'h08);                 // READ(6), LBA 0, 1 block
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h01);
+		send_cmd_byte(8'h00);
+		reg_write(`W_ICR, 8'h00);
+		reg_write(`W_TCR, 8'h01);
+		reg_write(`W_MR,  8'h02);
+		reg_write(`W_IDMAR, 8'h00);          // arm receive -- and pump at once
+
+		// Blind reads with NO handshake wait, exactly as the wedge loop does.
+		// Whatever they return is discarded; the point is that they must not
+		// corrupt or stall the transfer that follows.
+		begin : s13blind
+			integer n;
+			reg [7:0] junk;
+			for (n = 0; n < 8; n = n + 1) begin
+				dma_read_byte(junk);
+				repeat (2) @(posedge clk);
+			end
+		end
+		ok("seam13 - premise: pumped before the target offered a byte",
+		   dut.target[0].target.data_cnt < 8);
+		ok("seam13 - no watchdog fired during the blind pump", !s11_abort);
+
+		// Now let it run properly and require the whole block through.
+		begin : s13rest
+			integer n, g;
+			reg [7:0] junk;
+			n = 0;
+			while (n < 512 && dut.scsi_bsy) begin
+				g = 0;
+				while (!dut.scsi_req && dut.scsi_bsy && g < 8000) begin
+					@(posedge clk); g = g + 1;
+				end
+				if (dut.scsi_req && !(dut.scsi_cd || dut.scsi_msg)) begin
+					dma_read_byte(junk);
+					n = n + 1;
+				end else begin
+					n = 512;   // target left the data phase; stop pumping
+				end
+			end
+		end
+		s11_watch = 0;
+		reg_write(`W_MR, 8'h00);
+		ok("seam13 - the target still delivered a full 512-byte block",
+		   dut.target[0].target.data_cnt >= 512);
+		stat = 8'hFF; msg = 8'hFF;
+		if (dut.scsi_bsy) recv_byte(stat);
+		if (dut.scsi_bsy) recv_byte(msg);
+		ok("seam13 - and the READ completed with GOOD status", stat == 8'h00);
+		begin : rel13
+			integer g;
+			g = 0;
+			while (dut.scsi_bsy && g < 8000) begin @(posedge clk); g = g + 1; end
+		end
+		ok("seam13 - bus released, no deadlock from the early pump",
+		   !dut.scsi_bsy);
+
 		// =============== seam9: a fetch that never completes ================
 		// io_busy holds REQ low (scsi.v:239) AND resets the bus watchdog every
 		// cycle (scsi.v:1195). So while a sector fetch is outstanding the target
