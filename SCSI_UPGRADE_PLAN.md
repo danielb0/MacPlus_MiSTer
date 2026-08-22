@@ -1178,13 +1178,84 @@ experiment: the gate alone, IRQ latch left edge-triggered. One variable.
    behind `cd_enable` and the core is fully working with it off. Shipping
    Phase 1 without Phase 2 remains a legitimate outcome.
 
+### Audit before the third build: one link in the argument does not hold (2026-08-22, later)
+
+Re-read the two failed attempts against the commits rather than the prose, because
+attempt 3 was about to be built on the strength of a hypothesis nobody had checked.
+
+**The stated reason for expecting attempt 3 to work is not supported by the evidence.**
+The session-end summary says "attempts 1 and 2 each changed two things ... both
+captures show `BSR=0x98` mid-write, because the level form fires in COMMAND phase".
+That is true of attempt 1 and **false of attempt 2**:
+
+| attempt | gate | IRQ latch condition | fires in COMMAND (CD=1, IO=0)? |
+|---|---|---|---|
+| 1 `bcb8a68` | `bsr_pmatch` | `dma_armed && scsi_req && !bsr_pmatch` | **yes** |
+| 2 `2187326` | `bus_data_phase` | `dma_armed && scsi_req && scsi_cd && scsi_io` | **no** — `io` is 0 |
+| 3 `3426398` | `bus_data_phase` | `dma_armed && pmatch_d && !bsr_pmatch` (edge, untouched) | n/a |
+
+Attempt 2's latch cannot fire in COMMAND phase, so the `BSR=0x98` explanation
+belongs to attempt 1's capture only and was generalised to both when the summary
+was written. Tracing it back: it appears at its origin (the attempt-2 write-up,
+where it is correctly attributed to attempt 1 and given as the *reason* for
+re-keying) and then again in the summary as though it were an attempt-2
+observation. No attempt-2 capture showing `0x98` is recorded anywhere.
+
+**So the important fact is the one that is still unexplained.** Attempts 1 and 2
+differ in *both* changed terms, and produced byte-identical hardware state
+(`writes:34`, `disk0 rd=113`, `PC=417454`, same phase ring). Two materially
+different RTL variants failing byte-identically has two readings, and the plan
+only records one:
+
+* **H-A (recorded):** both level latches set BSR bit 4 too early — via different
+  phases — and the driver's response to "transfer complete" arriving early is the
+  same either way, so the downstream counters match. Survives the correction, but
+  now rests on a mechanism nobody has demonstrated for attempt 2.
+* **H-B (not recorded):** the board ran the *same* bitstream both times, so
+  attempt 2 was never actually exercised. The md5 check that was done proves
+  which **file** was programmed; it does not prove the FPGA was still running it
+  at capture time, because the core reloads `output_files/MacPlus.rbf` from SD
+  whenever it is re-selected.
+
+H-B has never been testable before. It is now: `PBLD` stamps the git SHA into
+every capture line. **`bitstream=` is the first field to read in the next capture,
+before any conclusion is drawn from any other field.** If it does not match the
+build that was just flashed, nothing else in that capture means anything — and
+the same is retroactively true of the attempt-2 capture.
+
+Both hypotheses take the same next step, so this does not change the plan; it
+changes what the next capture has to be checked for first.
+
+**Fixed while here, all five gates green (`disk 12/12, CD 35/35, seam 51/51,
+probes 31/31, reader 13/13`):**
+
+* `bus_data_phase` was declared at column 0, *after* its first use in `dreq`.
+  Hoisted above the first use; `bsr_eodma` now derives from it (`~bus_data_phase`)
+  instead of repeating the expression, so the comment's claim that "the two
+  cannot disagree" is structurally true rather than a promise.
+* **`PBLD` was not covered by any bench, and `rtl/build_tag.v` was not in the
+  probes gate's compile line** — the instrument meant to settle H-B was itself
+  unproven, against the standing rule that instruments are proven before they are
+  trusted. Two tests added (`probes` is now 31); without `rtl/build_tag.v` the
+  bench no longer elaborates at all, so the file cannot silently drop out again.
+* **The tag was stamped `ac38fc96` while HEAD was `3426398e`** — it was hand-
+  edited and then committed, so it named the *previous* commit. A capture that
+  misnames its own build is worse than no tag. `scripts/stamp_build_tag.ps1` now
+  generates it from `git rev-parse --short=8 HEAD`, warns if design files are
+  dirty, and is to be run immediately before each compile, leaving `build_tag.v`
+  dirty in the tree by design.
+
+**Compile hazard confirmed, not yet cleared:** `compile_log.txt` ends mid-word
+(`Warni`), so the 18:24 Analysis & Synthesis really was killed. `db/` (700 files)
+and `incremental_db/` must be deleted before the next compile.
+
 ### Gates
 
-`disk 12/12, CD 35/35, seam 52/52, probes 28/28, reader 12/12` — run all five,
+`disk 12/12, CD 35/35, seam 51/51, probes 31/31, reader 13/13` — run all five,
 disk first. The last two cover the instrument, not the core:
 
 ```
-C:/iverilog/bin/iverilog.exe -g2005-sv -o sim/out/tb_dbg_probes.vvp sim/tb_dbg_probes.v rtl/dbg_probes.sv rtl/ncr5380.sv rtl/scsi.v && C:/iverilog/bin/vvp.exe sim/out/tb_dbg_probes.vvp
+C:/iverilog/bin/iverilog.exe -g2005-sv -o sim/out/tb_dbg_probes.vvp sim/tb_dbg_probes.v rtl/dbg_probes.sv rtl/ncr5380.sv rtl/scsi.v rtl/build_tag.v && C:/iverilog/bin/vvp.exe sim/out/tb_dbg_probes.vvp
 tclsh sim/test_read_probes.tcl
 ```
 

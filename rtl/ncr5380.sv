@@ -99,6 +99,12 @@ module ncr5380
 	// Stall timeout for an HPS fetch that never completes; see scsi.v.
 	parameter IOWDOG_LOG = 24;
 
+	// The one definition of "the target is offering bytes for a data phase".
+	// Declared here because dreq, dma_ack, bsr_dmarq and bsr_eodma all key off
+	// it; see bsr_dmarq below for why the DMA handshake is gated on the BUS
+	// phase rather than on TCR.
+	wire bus_data_phase = scsi_bsy & ~scsi_cd & ~scsi_msg;
+
 	assign dreq = scsi_req & dma_en & bus_data_phase;
 
 	reg  [7:0] mr;        /* Mode Register */
@@ -225,7 +231,7 @@ module ncr5380
 
 	/* Bus and Status register */
 	/* BSR (read only). We don't do a few things... */
-	wire bsr_eodma = ~(scsi_bsy & ~scsi_cd & ~scsi_msg);	/* asserted whenever NOT in a data phase */
+	wire bsr_eodma = ~bus_data_phase;	/* asserted whenever NOT in a data phase */
 	/* A real 5380 inhibits DRQ, and halts the DMA handshake, when REQ arrives
 	 * in a phase the initiator did not arm for. That inhibition is the exit ramp
 	 * for "the target CHECKed instead of entering the data phase": REQ stays
@@ -239,15 +245,17 @@ module ncr5380
 	 * write data phase (seam12). This is the same condition bsr_eodma reports,
 	 * so the two cannot disagree.
 	 *
-	 * NOTE, 2026-08-22: this is the review's PRIMARY finding, implemented on its
-	 * own. The earlier two attempts also made the completion-IRQ latch
-	 * level-triggered at the same time, and that latch fired during COMMAND
-	 * phase -- BSR=0x98 mid-write on hardware, i.e. the driver was told a
-	 * transfer had completed before its data phase had even started. Both
-	 * failures are consistent with the driver giving up on that, not with the
-	 * gate. One change at a time from here.
+	 * NOTE, 2026-08-22: this is the review's PRIMARY finding, implemented ALONE.
+	 * The two earlier attempts each changed this gate AND the completion-IRQ
+	 * latch (both made it level-triggered, on different conditions), and both
+	 * hung the machine earlier than the bug. Attempt 1's latch (!bsr_pmatch)
+	 * demonstrably fires in COMMAND phase -- BSR=0x98 mid-write on hardware.
+	 * Attempt 2's (cd & io) cannot, so that capture's identical counters are
+	 * still UNEXPLAINED; see the plan. Hence: gate alone, latch untouched, one
+	 * variable. Read `bitstream=` in the next capture before concluding
+	 * anything -- two different builds reporting byte-identical state is also
+	 * what a stale core looks like, and PBLD exists to rule that out.
 	 */
-wire bus_data_phase = scsi_bsy & ~scsi_cd & ~scsi_msg;
 	wire bsr_dmarq = scsi_req & dma_en & bus_data_phase;
 	wire bsr_perr = 1'b0;	/* We don't do parity */
 	wire bsr_irq = irq_latch;	/* latched completion IRQ, cleared by a reg-7 read */

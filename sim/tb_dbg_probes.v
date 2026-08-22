@@ -341,6 +341,18 @@ module tb_dbg_probes;
 			reg_wr_(`W_MR,  8'h00);
 		end
 
+		// ---- the instrument that names its own bitstream --------------------
+		// PBLD exists because two different RTL fixes once produced byte-for-byte
+		// identical hardware captures, and nothing on the board could say whether
+		// the second build had actually been loaded. That question is still open,
+		// so the probe that answers it is itself under test: rtl/build_tag.v must
+		// be in the compile set (this bench will not elaborate without it) and its
+		// value must reach the PBLD probe unmodified and non-zero.
+		ok("probe - PBLD carries the build tag to the probe unmodified",
+		   probes.cp_pbld.probe === probes.build_tag_w);
+		ok("probe - and the build tag is stamped, not left at zero",
+		   probes.build_tag_w !== 32'h0 && probes.build_tag_w !== 32'hxxxxxxxx);
+
 		$display("");
 		$display("PROBES: %0d of %0d failing", fails, tests);
 		if (fails == 0) $display("PROBE DECK GATE: PASS - the instrument measures what it claims");
