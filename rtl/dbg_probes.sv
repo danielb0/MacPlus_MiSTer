@@ -15,14 +15,17 @@
 // FPGA-ONLY: instantiated from MacPlus.sv behind `USE_SCSI_ISSP`, so the
 // altsource_probe primitive never reaches a simulator.
 //
-// Probe deck (5 instances -- deliberately lean; MacLC notes a ~20 hub-node
-// ceiling above which the name table reads back corrupted):
+// Probe deck (8 instances -- MacLC notes a ~20 hub-node ceiling above which
+// the name table reads back corrupted, so there is room but not much):
 //
-//   PIFA  instruction-fetch sampler: where is the CPU?
+//   PIFA  instruction-fetch sampler: WHERE is the CPU?
+//   PIFD  {addr16, opcode16} at each fetch: WHAT is it executing there?
 //   PACT  bus-cycle counter: is the CPU alive at all?
 //   PSCS  last SCSI register READ  (the poll target + the value it returned)
 //   PSCW  last SCSI register WRITE (the register the driver last programmed)
 //   PODR  last four bytes written to the data register -- the CDB tail
+//   PIOS  {rd_stuck, cd_io_lba} -- is an HPS fetch stalled, and for which LBA?
+//   PIO2  CD/disk io_rd vs io_ack counts + live handshake bits
 // ---------------------------------------------------------------------------
 module dbg_probes (
 	input  wire        clk,
@@ -35,7 +38,18 @@ module dbg_probes (
 	input  wire [15:0] cpuDataOut,     // CPU -> bus (writes)
 	input  wire [15:0] cpuDataIn,      // bus -> CPU (reads; dataControllerDataOut)
 
-	input  wire        selectSCSI
+	input  wire        selectSCSI,
+
+	// HPS sector-fetch handshake for the CD target (top-level signals, no
+	// threading needed). A read that is requested and never acknowledged holds
+	// io_busy, which holds REQ low AND continuously resets the bus watchdog --
+	// a hang with no recovery by construction (rtl/scsi.v:239 and :1195).
+	input  wire        cd_io_rd,
+	input  wire        cd_io_wr,
+	input  wire        cd_io_ack,
+	input  wire [31:0] cd_io_lba,
+	input  wire        d0_io_rd,
+	input  wire        d0_io_ack
 );
 
 	// ---- bus-cycle edges --------------------------------------------------
@@ -43,6 +57,17 @@ module dbg_probes (
 	always @(posedge clk) as_d <= _cpuAS;
 	wire as_fall = as_d & ~_cpuAS;     // address/decode valid
 	wire as_rise = ~as_d & _cpuAS;     // data valid, cycle ending
+
+	// Bus data, delayed one clock. Sampling at AS-rise reads the mux AFTER the
+	// cycle may have stopped selecting its source, which is why the first cut
+	// of this probe returned impossible BSR values (perr/berr are hardwired 0
+	// yet read back set). Use the value from the clock BEFORE the edge, while
+	// AS was still asserted.
+	reg [15:0] din_d, dout_d;
+	always @(posedge clk) begin
+		din_d  <= cpuDataIn;
+		dout_d <= cpuDataOut;
+	end
 
 	// ---- PIFA: instruction-fetch sampler ----------------------------------
 	// Captures cpuAddr only on real instruction fetches (AS falling, read,
@@ -62,6 +87,20 @@ module dbg_probes (
 		end
 	reg [31:0] pifa_r;
 	always @(posedge clk) pifa_r <= {if_cnt, if_addr};
+
+	// ---- PIFD: the instruction WORD at each fetch --------------------------
+	// PIFA says where the CPU is looping; this says what it is executing there.
+	// Sampled repeatedly over a stable wedge loop, the {addr, opcode} pairs
+	// reconstruct the loop so it can be disassembled instead of guessed at.
+	reg        if_pend;
+	reg [15:0] if_addr_l;
+	always @(posedge clk) begin
+		if (if_cycle) begin if_pend <= 1'b1; if_addr_l <= cpuAddr[15:0]; end
+		else if (if_pend & as_rise) if_pend <= 1'b0;
+	end
+	reg [31:0] pifd_r;
+	always @(posedge clk)
+		if (if_pend & as_rise) pifd_r <= {if_addr_l, din_d};
 
 	// ---- PACT: bus-cycle counter (liveness) -------------------------------
 	reg [31:0] as_cycles;
@@ -91,16 +130,16 @@ module dbg_probes (
 		if (as_rise & sel_lat) begin
 			if (rw_lat) begin
 				rd_cnt <= rd_cnt + 8'd1;
-				rd_val <= cpuDataIn[15:8];      // SCSI byte rides D15-D8
+				rd_val <= din_d[15:8];          // SCSI byte rides D15-D8
 				rd_sel <= {dack_lat, reg_lat};
 			end else begin
 				wr_cnt <= wr_cnt + 8'd1;
-				wr_val <= cpuDataOut[15:8];
+				wr_val <= dout_d[15:8];
 				wr_sel <= {dack_lat, reg_lat};
 				// Non-DACK writes to register 0 are the output data register:
 				// during COMMAND phase that stream IS the CDB.
 				if (!dack_lat && (reg_lat == 3'd0))
-					odr_hist <= {odr_hist[23:0], cpuDataOut[15:8]};
+					odr_hist <= {odr_hist[23:0], dout_d[15:8]};
 			end
 		end
 
@@ -111,6 +150,40 @@ module dbg_probes (
 	// PSCW: [31:24]=wr_cnt [23:16]=wr_val [15:12]={dack,reg} [7:0]=rd_cnt
 	reg [31:0] pscw_r;
 	always @(posedge clk) pscw_r <= {wr_cnt, wr_val, wr_sel, 4'd0, rd_cnt};
+
+	// ---- PIOS / PIO2: is an HPS sector fetch stalled? ----------------------
+	// rd_stuck saturates while cd_io_rd stays continuously asserted. A
+	// saturated value with rd_cnt > ack_cnt is a fetch the HPS never answered,
+	// which is the no-recovery hang described above.
+	reg  [7:0] rd_stuck;
+	reg        cd_rd_d, cd_ack_d, d0_rd_d;
+	reg [15:0] stuck_div;
+	always @(posedge clk) begin
+		cd_rd_d  <= cd_io_rd;
+		cd_ack_d <= cd_io_ack;
+		d0_rd_d  <= d0_io_rd;
+		if (!cd_io_rd) begin
+			rd_stuck  <= 8'd0;
+			stuck_div <= 16'd0;
+		end else begin
+			stuck_div <= stuck_div + 16'd1;
+			if (&stuck_div && ~&rd_stuck) rd_stuck <= rd_stuck + 8'd1;
+		end
+	end
+
+	reg [7:0] cd_rd_cnt, cd_ack_cnt, d0_rd_cnt;
+	always @(posedge clk) begin
+		if (~cd_rd_d  &  cd_io_rd)  cd_rd_cnt  <= cd_rd_cnt  + 8'd1;
+		if (~cd_ack_d &  cd_io_ack) cd_ack_cnt <= cd_ack_cnt + 8'd1;
+		if (~d0_rd_d  &  d0_io_rd)  d0_rd_cnt  <= d0_rd_cnt  + 8'd1;
+	end
+
+	reg [31:0] pios_r, pio2_r;
+	always @(posedge clk) begin
+		pios_r <= {rd_stuck, cd_io_lba[23:0]};
+		pio2_r <= {cd_rd_cnt, cd_ack_cnt, d0_rd_cnt,
+		           3'd0, cd_io_rd, cd_io_wr, cd_io_ack, d0_io_rd, d0_io_ack};
+	end
 
 	// ---- probe instances ---------------------------------------------------
 	altsource_probe #(
@@ -137,5 +210,20 @@ module dbg_probes (
 		.instance_id ("PODR"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
 	) cp_podr (.probe(odr_hist), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	altsource_probe #(
+		.instance_id ("PIFD"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_pifd (.probe(pifd_r), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	altsource_probe #(
+		.instance_id ("PIOS"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_pios (.probe(pios_r), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	altsource_probe #(
+		.instance_id ("PIO2"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_pio2 (.probe(pio2_r), .source(), .source_clk(clk), .source_ena(1'b1));
 
 endmodule

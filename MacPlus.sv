@@ -1031,7 +1031,13 @@ dbg_probes dbg_probes_inst
 	._cpuRW     ( _cpuRW                 ),
 	.cpuDataOut ( cpuDataOut             ),
 	.cpuDataIn  ( dataControllerDataOut  ),
-	.selectSCSI ( selectSCSI             )
+	.selectSCSI ( selectSCSI             ),
+	.cd_io_rd   ( scsi_sd_rd[SCSI_CD_DEV] ),
+	.cd_io_wr   ( scsi_sd_wr[SCSI_CD_DEV] ),
+	.cd_io_ack  ( sd_ack[4]               ),
+	.cd_io_lba  ( scsi_sd_lba[SCSI_CD_DEV]),
+	.d0_io_rd   ( scsi_sd_rd[0]           ),
+	.d0_io_ack  ( sd_ack[0]               )
 );
 `endif
 

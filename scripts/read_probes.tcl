@@ -10,6 +10,7 @@
 # Probe deck is defined in rtl/dbg_probes.sv and built only when the
 # USE_SCSI_ISSP macro is set in MacPlus.qsf.
 
+array set ipairs {}
 set samples 1
 set delay   0.5
 if {$argc >= 1} { set samples [lindex $argv 0] }
@@ -78,6 +79,9 @@ proc rd {name} {
 proc b2i {v} { return $v }
 
 for {set n 0} {$n < $samples} {incr n} {
+	set pifd [b2i [rd PIFD]]
+	set pios [b2i [rd PIOS]]
+	set pio2 [b2i [rd PIO2]]
 	set pifa [b2i [rd PIFA]]
 	set pact [b2i [rd PACT]]
 	set pscs [b2i [rd PSCS]]
@@ -120,6 +124,12 @@ for {set n 0} {$n < $samples} {incr n} {
 	puts [format "  PODR  last 4 data-reg writes = %02X %02X %02X %02X  <- CDB tail, newest last" \
 	             [expr ($podr >> 24) & 0xff] [expr ($podr >> 16) & 0xff] \
 	             [expr ($podr >>  8) & 0xff] [expr  $podr        & 0xff]]
+	set fd_a [expr {($pifd >> 16) & 0xffff}]
+	set fd_o [expr { $pifd        & 0xffff}]
+	set ipairs($fd_a) $fd_o
+	puts [format "  PIFD  %04X: %04X                  <- instruction word there" $fd_a $fd_o]
+	puts [format "  PIOS  cd fetch stuck=%-3d lba=%d" [expr {($pios >> 24) & 0xff}] [expr {$pios & 0xffffff}]]
+	puts [format "  PIO2  cd rd=%d ack=%d  disk0 rd=%d   live: cd_rd=%d cd_wr=%d cd_ack=%d d0_rd=%d d0_ack=%d" [expr {($pio2 >> 24) & 0xff}] [expr {($pio2 >> 16) & 0xff}] [expr {($pio2 >> 8) & 0xff}] [expr {($pio2 >> 4) & 1}] [expr {($pio2 >> 3) & 1}] [expr {($pio2 >> 2) & 1}] [expr {($pio2 >> 1) & 1}] [expr {$pio2 & 1}]]
 	puts ""
 
 	if {$n + 1 < $samples} { after [expr {int($delay * 1000)}] }
@@ -127,9 +137,17 @@ for {set n 0} {$n < $samples} {incr n} {
 
 end_insystem_source_probe
 
+puts "Instruction words collected (feed to a 68000 disassembler):"
+foreach a [lsort -integer [array names ipairs]] {
+	puts [format "   %04X: %04X" $a $ipairs($a)]
+}
+puts ""
 puts "How to read this:"
 puts "  * PIFA fetch# ADVANCING between samples  -> CPU is alive and looping;"
 puts "    PC values name the loop. FROZEN -> CPU is stalled on the bus itself."
 puts "  * PSCS repeating the same register with an unchanging value is a poll"
 puts "    that never satisfies -- that register and value name the wedge."
 puts "  * PODR shows the tail of the last CDB the driver handed the target."
+puts "  * PIOS stuck>0 with PIO2 cd_rd=1 and rd>ack = a fetch the HPS never"
+puts "    answered. That holds io_busy, which holds REQ low AND resets the bus"
+puts "    watchdog every cycle -- a hang with no recovery (scsi.v:239, :1195)."
