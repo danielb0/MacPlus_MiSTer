@@ -633,8 +633,6 @@ endfunction
 // functions already return 0 past their payload). A fixed-size response that
 // ignores a larger allocation strands a blind host exactly like the page 0x0E
 // under-serve did. Op 10 streams whole 4-byte descriptors.
-wire [31:0] cd_toc_len = (c1_op_r == 2'b10) ? {cd_alloc10_r[31:2], 2'b00}
-                       : ((cd_alloc10_r < 32'd64) ? cd_alloc10_r : 32'd64);
 
 // ---- standard READ TOC (0x43), format 0, MSF form ------------------------
 // 20 bytes: 4-byte header, track 1 descriptor, lead-out (0xAA) descriptor.
@@ -860,13 +858,21 @@ wire [31:0] data_len =
 		 // blind-transfer primitive arms the FULL allocation and pumps for it,
 		 // so a target that goes to STATUS early leaves the host armed with
 		 // data that never comes (the LC chased this to a boot wedge).
-		 cmd_cd_toc?cd_toc_len:
-		 cmd_cd_toc43?((cd_alloc10_r < 32'd512) ? cd_alloc10_r : 32'd512):
-		 cmd_cd_subq43?((cd_alloc10_r < 32'd64) ? cd_alloc10_r : 32'd64):
-		 cmd_cd_subq?((cd_alloc10_r < 32'd64) ? cd_alloc10_r : 32'd64):   // READ Q SUBCODE (9 real)
-		 cmd_cd_astat?((cd_alloc10_r < 32'd64) ? cd_alloc10_r : 32'd64):  // AUDIO STATUS (6 real)
-		 cmd_cd_hdr?((cd_alloc10_r < 32'd16) ? cd_alloc10_r : 32'd16):
-		 cmd_cd_actl?{24'd0, cd_alloc10_r[7:0]}:  // AUDIO CONTROL: DataOut, discarded
+		 // Every one of these serves EXACTLY the allocation, which is what the
+		 // comment above has always claimed and what the code did not do. The
+		 // caps that used to be here -- min(alloc, 512/64/16), and cd_toc_len's
+		 // round-DOWN to a multiple of 4 -- are the same defect class proved on
+		 // hardware for MODE SENSE, and cd32 shows all seven under-serving. One
+		 // byte short deadlocks a blind initiator exactly as 227 short does.
+		 // The byte functions already return 8'h00 past their real payload, so
+		 // the extra length is zero fill.
+		 cmd_cd_toc?cd_alloc10_r:
+		 cmd_cd_toc43?cd_alloc10_r:
+		 cmd_cd_subq43?cd_alloc10_r:
+		 cmd_cd_subq?cd_alloc10_r:    // READ Q SUBCODE (9 real)
+		 cmd_cd_astat?cd_alloc10_r:   // AUDIO STATUS (6 real)
+		 cmd_cd_hdr?cd_alloc10_r:
+		 cmd_cd_actl?cd_alloc10_r:    // AUDIO CONTROL: DataOut, discarded
 		 ((CDROM != 0) && cmd_mode_select)?alloc_len:  // alloc 0 = no data (not 256)
 		 // MODE SENSE serves the FULL allocation, padded with zeros past the
 		 // real page data. The clamp that used to be here -- min(alloc,

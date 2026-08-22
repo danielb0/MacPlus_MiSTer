@@ -1272,6 +1272,73 @@ module tb_scsi_cdrom;
       end
       report(ok, "cd31 - per-page body states suppress one page each, shells intact");
 
+      // ==================================================================
+      // Test 32: the Apple vendor commands, armed PAST their internal caps.
+      //
+      // cd25 claims to sweep over-armed allocations, and it does -- but only
+      // past each command's REAL payload, never past the cap in data_len. So
+      // min(alloc, cap) was a no-op in every existing test, exactly as
+      // min(alloc, cd_ms_len) was for MODE SENSE before cd28. Same blind spot,
+      // same class, and this one is now reachable: the magic page on MODE SENSE
+      // page 0x30 makes the driver commit to the Apple path, so these commands
+      // are the ones a real driver actually issues.
+      //
+      // Also covers cd_toc_len's ROUND-DOWN: for the 2'b10 form it serves
+      // {alloc[31:2], 2'b00}, so any allocation that is not a multiple of 4
+      // under-serves by 1..3 bytes -- and 1 byte short deadlocks a blind
+      // initiator exactly as 227 bytes short does.
+      // ==================================================================
+      do_reset; mount_image(IMG_BLOCKS);
+      begin : t32
+         integer bad;
+         bad = 0;
+
+         // --- READ TOC (0xc1), non-MSF form: cap 64
+         select_target; send_cdb(8'hc1,0,0,0,0,0,0,8'h00,8'd100,8'h00,0,0, 10);
+         read_blind(100); finish_command;
+         if (blind_short || (blind_got != 100)) begin
+            $display("       c1 op0: armed 100 got %0d short=%b", blind_got, blind_short); bad=bad+1; end
+
+         // --- READ TOC (0xc1), 2'b10 form with a NON-multiple-of-4 allocation
+         select_target; send_cdb(8'hc1,0,0,0,0,0,0,8'h00,8'd6,8'h80,0,0, 10);
+         read_blind(6); finish_command;
+         if (blind_short || (blind_got != 6)) begin
+            $display("       c1 op2: armed 6 got %0d short=%b (round-down)", blind_got, blind_short); bad=bad+1; end
+
+         // --- READ Q SUBCODE (0xc2): cap 64
+         select_target; send_cdb(8'hc2,0,0,0,0,0,0,8'h00,8'd100,8'h00,0,0, 10);
+         read_blind(100); finish_command;
+         if (blind_short || (blind_got != 100)) begin
+            $display("       c2: armed 100 got %0d short=%b", blind_got, blind_short); bad=bad+1; end
+
+         // --- AUDIO STATUS (0xcc): cap 64
+         select_target; send_cdb(8'hcc,0,0,0,0,0,0,8'h00,8'd100,8'h00,0,0, 10);
+         read_blind(100); finish_command;
+         if (blind_short || (blind_got != 100)) begin
+            $display("       cc: armed 100 got %0d short=%b", blind_got, blind_short); bad=bad+1; end
+
+         // --- READ TOC (0x43): cap 512
+         select_target; send_cdb(8'h43,0,0,0,0,0,0,8'h02,8'd88,8'h00,0,0, 10);
+         read_blind(600); finish_command;
+         if (blind_short || (blind_got != 600)) begin
+            $display("       43: armed 600 got %0d short=%b", blind_got, blind_short); bad=bad+1; end
+
+         // --- READ SUBCHANNEL (0x42): cap 64
+         select_target; send_cdb(8'h42,8'h02,8'h40,8'h01,0,0,0,8'h00,8'd100,8'h00,0,0, 10);
+         read_blind(100); finish_command;
+         if (blind_short || (blind_got != 100)) begin
+            $display("       42: armed 100 got %0d short=%b", blind_got, blind_short); bad=bad+1; end
+
+         // --- READ HEADER (0x44): cap 16
+         select_target; send_cdb(8'h44,0,0,0,8'h12,8'h34,0,8'h00,8'd40,8'h00,0,0, 10);
+         read_blind(40); finish_command;
+         if (blind_short || (blind_got != 40)) begin
+            $display("       44: armed 40 got %0d short=%b", blind_got, blind_short); bad=bad+1; end
+
+         ok = (bad == 0);
+      end
+      report(ok, "cd32 - Apple vendor commands satisfy allocations past their caps");
+
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);
       $display("");
