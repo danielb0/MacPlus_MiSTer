@@ -1491,11 +1491,48 @@ TOC, `0xC2`/`0x42` subchannel, `0xCC` audio status, `0xCE` audio control, `0x44`
 READ HEADER in LBA form. Missing: actual playback (`0x45`/`0x47`/`0x4B`) and
 MSF-form READ HEADER, none of which should block an HFS mount.
 
-So the likelier cause is a **driver version mismatch** — Apple CD-ROM and Foreign
-File Access must be version-consistent, and installing the 7.1-era set over a
-newer one broke real Macs too. Not established either way. One capture during a
-failing mount would show the CDB and the sense we return and settle it; worth
-doing only if it recurs or before shipping.
+A driver **version mismatch** was the first guess and is now unlikely: the user
+installed the complete, self-consistent 7.1-era set, not a partial one.
+
+#### KNOWN ISSUE (candidate, unproven): older Apple CD drivers may reject our drive identity
+
+We answer INQUIRY as **`SONY` / `CD-ROM CDU-8004` / rev `1.9a`**
+(`cd_inquiry_byte`, [scsi.v:292](rtl/scsi.v:292)).
+
+Apple's CD-ROM driver was **drive-specific**: it checked the INQUIRY vendor and
+product strings and refused to bind to a drive it did not recognise. That is why
+third-party CD drives on classic Macs needed a patched Apple driver or a
+third-party one (FWB CD-ROM Toolkit and similar). It is the most common reason a
+Mac sees a CD drive on the bus and still will not mount anything from it.
+
+The AppleCD SC was a rebadged **Sony CDU-8002**; the CDU-8004 is a later unit.
+System 7.1 is 1992, so its driver plausibly predates the model string we report
+and rejects it, while a later driver knows it and binds. That fits the evidence:
+a *complete and consistent* older set failing looks like a whitelist rejection,
+whereas a version mismatch would more likely crash or half-work.
+
+**Confidence:** the mechanism (Apple drivers whitelisted drive identities) is
+well established. Which exact strings each driver version accepted is NOT known
+here. So this is a strong hypothesis, not a finding.
+
+**Two ways to settle it, cheapest first:**
+
+1. Reinstall the failing driver set and capture during a mount attempt. The CDB
+   tail plus the sense we return names what it asked and what we said. If the
+   driver simply never issues a second command after INQUIRY, that is the
+   whitelist, confirmed without touching the RTL.
+2. Change the product string to `CDU-8002` and rebuild. If the 7.1 drivers then
+   mount, proven.
+
+**Authenticity angle (plan section 2):** a CDU-8004 in a Mac Plus is an
+anachronism its own era-appropriate software does not recognise. `CDU-8002` — the
+actual AppleCD SC mechanism — is arguably the more correct identity for this
+machine regardless of whether it fixes the mount. Worth deciding deliberately
+rather than inheriting MacLC's choice, since the LC is a later machine running a
+later System.
+
+**Not a bug in the SCSI path.** The core works with the driver versions currently
+installed; this only limits which period driver sets can be used.
 
 **Instrumentation gaps this soak exposed** (both worth closing if the deck is
 re-enabled for more work):
