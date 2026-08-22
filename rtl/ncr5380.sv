@@ -202,15 +202,15 @@ module ncr5380
 	end
 
 	/* CSR (read only). We don't do parity */
-	assign csr = { scsi_rst, scsi_bsy, scsi_req, scsi_msg,
+	assign csr = { scsi_rst, scsi_bsy, scsi_req & ~req_deferred, scsi_msg,
 	               scsi_cd, scsi_io, scsi_sel, 1'b0 };	
 
 	/* Bus and Status register */
 	/* BSR (read only). We don't do a few things... */
-	wire bsr_eodma = 1'b0;	/* We don't do EOP */
+	wire bsr_eodma = ~(scsi_bsy & ~scsi_cd & ~scsi_msg);	/* asserted whenever NOT in a data phase */
 	wire bsr_dmarq = scsi_req & dma_en;
 	wire bsr_perr = 1'b0;	/* We don't do parity */
-	wire bsr_irq = 1'b0;	        /* XXX ? Does MacOS use this ? */
+	wire bsr_irq = irq_latch;	/* latched completion IRQ, cleared by a reg-7 read */
 	wire bsr_pmatch = 
 	         tcr[`TCR_A_MSG] == scsi_msg &&
 	         tcr[`TCR_A_CD ] == scsi_cd  &&
@@ -243,7 +243,7 @@ module ncr5380
 	/* Mux target signals */
 	reg scsi_cd, scsi_io, scsi_msg, scsi_req;
 
-	always begin
+	always @* begin
 		integer i;
 		scsi_cd = 0;
 		scsi_io = 0;
@@ -261,6 +261,86 @@ module ncr5380
 			end
 		end
 	end
+
+	/* ---- 5380 completion semantics (ported from MacLC_MiSTer) -------------
+	 * Three status behaviours the SCSI Manager and Apple's CD driver depend
+	 * on, all previously stubbed out here. MacLC's ncr5380.sv documents each
+	 * as a fix for a System 7 "Welcome to Macintosh" wedge.
+	 */
+
+	/* Register-space read strobes (never the DACK/pseudo-DMA window) */
+	wire csr_rd = bus_cs & ~dack & ior & (bus_rs == `RREG_CSR);
+	wire rst_rd = bus_cs & ~dack & ior & (bus_rs == `RREG_RST);
+
+	/* Deferred bus-visible REQ (Snow controller.rs `set_req` semantics).
+	 * The SCSI Manager's between-chunk settle loop
+	 *     btst #5,CSR / beq exit / btst #3,BSR / bne loop
+	 * exits only when a CSR read returns REQ=0. A real 5380 driving a real
+	 * drive gives it that window through the per-byte handshake; a target
+	 * that asserts REQ immediately on the Data -> Status transition never
+	 * does, and the loop spins forever -- the initiator hangs while the
+	 * target is behaving perfectly, which is why a bus watchdog cannot see
+	 * it. Hide each newly-asserted REQ from CSR until one full CSR read has
+	 * completed (that read returns 0 and disarms; the next shows 1).
+	 * BSR.DRQ and dreq are deliberately NOT deferred, so DRQ-polled transfer
+	 * loops and DACK pacing are unaffected.
+	 */
+	reg req_deferred;
+	reg old_req_bus_d;
+	reg old_csr_rd_d;
+	always @(posedge clk or posedge reset) begin
+		if (reset) begin
+			req_deferred  <= 1'b0;
+			old_req_bus_d <= 1'b0;
+			old_csr_rd_d  <= 1'b0;
+		end else begin
+			old_req_bus_d <= scsi_req;
+			old_csr_rd_d  <= csr_rd;
+			if (~old_req_bus_d & scsi_req)
+				req_deferred <= 1'b1;       // new REQ: hidden until a CSR read
+			else if (req_deferred & old_csr_rd_d & ~csr_rd)
+				req_deferred <= 1'b0;       // CSR read completed: reveal REQ
+			if (!scsi_req)
+				req_deferred <= 1'b0;
+		end
+	end
+
+	/* Completion-IRQ latch. `dma_armed` deliberately survives a DMA-mode
+	 * clear: the driver often clears MR.DMA_MODE just before the phase
+	 * change, so gating the latch on MR.DMA_MODE drops the IRQ and an async
+	 * driver sleeps on a completion that never arrives. Latched on the
+	 * target's DATA -> STATUS phase mismatch, cleared by a reg-7 read or a
+	 * bus reset. Polled through BSR bit 4 -- the Plus routes no 5380 IRQ to
+	 * the VIA, so no interrupt line is synthesised here.
+	 */
+	reg irq_latch;
+	reg dma_armed;
+	reg pmatch_d;
+	reg old_rst_rd;
+	always @(posedge clk or posedge reset) begin
+		if (reset) begin
+			irq_latch  <= 1'b0;
+			dma_armed  <= 1'b0;
+			pmatch_d   <= 1'b1;
+			old_rst_rd <= 1'b0;
+		end else begin
+			old_rst_rd <= rst_rd;
+			pmatch_d   <= bsr_pmatch;
+			if (reg_wr && (bus_rs == `WREG_DMAS || bus_rs == `WREG_IDMAR))
+				dma_armed <= 1'b1;
+			if (~old_rst_rd & rst_rd)
+				irq_latch <= 1'b0;
+			if (dma_armed && pmatch_d && !bsr_pmatch) begin
+				irq_latch <= 1'b1;
+				dma_armed <= 1'b0;
+			end
+			if (scsi_rst) begin
+				irq_latch <= 1'b0;
+				dma_armed <= 1'b0;
+			end
+		end
+	end
+
 
 	// input signals from targets
 	wire [DEVS-1:0] target_bsy;
