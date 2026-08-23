@@ -106,11 +106,61 @@ for the `0x4552` 'ER' boot-block signature.)
 Consequences:
 - Disks at **6/5** keep boot priority and existing users' setups are unchanged.
 - CD at **3** is scanned *after* both disks, so a bootable CD can never preempt a
-  bootable hard disk — but *can* still boot when no hard disk is bootable, which is
-  the desirable behaviour.
+  bootable hard disk. **The scan order is confirmed on hardware (2026-08-23):**
+  with ID 6 empty the machine boots from ID 5.
+- **CORRECTION (2026-08-23): the CD cannot boot at all.** This bullet used to
+  claim a bootable CD "*can* still boot when no hard disk is bootable, which is
+  the desirable behaviour". That was inferred from the scan order alone and never
+  tested. It is wrong, on two independent counts — see "The CD does not boot"
+  below.
 - ID 3 is also the AppleCD SC factory default.
 - The LC's layout (disks 0/1, CD 3) would have **inverted** this: the CD would be
   found before the disks. Rejected for the Plus.
+
+#### The CD does not boot — tested on hardware, 2026-08-23
+
+Two independent reasons, either one sufficient:
+
+**1. There is normally no disc present when the ROM scans.** MacOS shutdown ejects
+mounted volumes, the driver issues EJECT, and `rtl/scsi.v:374` drops `mounted`.
+The HPS-side image stays attached while the target reports no-disc until the user
+mounts again. So after a normal shutdown ID 3 is empty at the next boot scan.
+This is correct and period-accurate — an ejected drive has no disc.
+
+**2. The block size is incompatible with the Plus ROM.** The ROM's boot reader
+builds an `0x08` READ(6) CDB and expects a **512-byte** block carrying the `0x4552`
+'ER' signature. Our CD target correctly reports **2048-byte** logical blocks
+(`capacity` = `img_blocks[31:2] - 1` at `scsi.v:368`; MODE SENSE block length
+`0x000800` at `scsi.v:426`; READ(6) LBA/length scaled `<<2`). A one-block READ(6)
+therefore delivers 2048 bytes to an initiator expecting 512.
+
+Underneath both: the Plus ROM is from 1986 and Apple's first CD-ROM drive shipped
+in 1988. Real Plus hardware could not boot from CD either. By §2's authenticity
+rule this is the CORRECT behaviour, not a gap — do not "fix" it.
+
+**Observed, with the CD mounted manually and no bootable hard disk** (probe capture
+on `ea4167b2`):
+
+```
+PIOS  cd fetch stuck=0   lba=1024            <- CD logical block 256, reads==acks
+PDMA  watchdog fires since selection: bus=2  io-stall=0
+      phases visited: IDLE CMD DATA>init(READ) STATUS
+PDM2  sticky: DACK-in-mismatch=1  REQ+DMA-in-mismatch=1  REQ-in-STATUS=1
+PDM3  NOTE: a DACK access landed OUTSIDE a data phase this transaction.
+```
+
+The disc WAS read (fetches served, `io-stall=0`). A complete CMD -> DATA-in ->
+STATUS transaction ran, then initiator and target diverged on the data phase and
+the **bus watchdog fired twice**. That is the shape of an initiator taking 512
+bytes from a 2048-byte block — consistent with reason 2, though the capture does
+not prove it: `PODR` showed an all-zero CDB tail, so the opcode was not identified.
+Pinning it needs a log running across the reset.
+
+**It fails SAFELY, which is the result that matters.** `PIFA` fetch# advanced
+across samples, `PACT` bus cycles climbed, and the CPU sat looping at `PC=0x41740E`
+on `67FA` (a tight `BEQ.S` back-branch — the ROM's no-boot poll). The bus watchdog
+recovered the bus and the machine fell through to "no bootable device" instead of
+wedging. The `iowdog` work doing its job on a path it was not designed for.
 
 ### Not porting the LC's pseudo-DMA machinery
 
