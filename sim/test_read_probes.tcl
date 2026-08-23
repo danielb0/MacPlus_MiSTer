@@ -48,7 +48,7 @@ proc read_probe_data {args} {
 	return [tobin 0]
 }
 
-set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PDMA PDM2 PDM3 PBLD}
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PIO3 PIO4 PDMA PDM2 PDM3 PBLD}
 
 # ---- the capture the invisible-completion reading predicts -----------------
 # Field positions match the PDMA packing in rtl/dbg_probes.sv:
@@ -127,7 +127,7 @@ ok "armed with zero DACK reads reads back as FALSIFIED" \
 # target driving data out to the initiator, i.e. a READ, and PHASE_DATA_IN(3)
 # is a WRITE. Printing those raw names told a reader the exact opposite of what
 # the transfer was doing. Lock the direction so it cannot invert again.
-set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PDMA PDM2 PDM3 PBLD}
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PIO3 PIO4 PDMA PDM2 PDM3 PBLD}
 set probeval(PDM3) [expr {(0 << 24) | (1 << 20) | (1 << 16) | (2 << 13) | \
                           (1 << 12) | (3 << 9) | (1 << 8) | (0 << 7) | (1 << 6)}]
 set out [capture]
@@ -161,11 +161,38 @@ ok "reader still decodes the probes that ARE present" \
    [string match "*DACK reads since the DMA arm:*" $out]
 
 # ...and a complete bitstream must NOT raise the banner.
-set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PDMA PDM2 PDM3 PBLD}
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PIO3 PIO4 PDMA PDM2 PDM3 PBLD}
 set out [capture]
 ok "reader stays quiet when every probe is present" \
    [expr {![string match "*INCOMPLETE CAPTURE*" $out] &&
           ![string match "*PDM3  ABSENT*" $out]}]
+
+# ---- a bitstream predating the write-side probes ---------------------------
+# PIO3/PIO4 were added in the same build as the write-path fixes they exist to
+# observe, so every capture taken before that build lacks them. The reader must
+# say so rather than print "disk write stuck=0 lba=0" -- which reads exactly
+# like a healthy write path and would exonerate the very thing under suspicion.
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PDMA PDM2 PDM3 PBLD}
+set out [capture]
+ok "reader flags a bitstream with no write-side probes" \
+   [expr {[string match "*INCOMPLETE CAPTURE*" $out] &&
+          [string match "*PIO3*" $out] && [string match "*PIO4*" $out]}]
+ok "reader still decodes the read-side probes that ARE present" \
+   [string match "*PIOS  cd fetch stuck=*" $out]
+
+# ...and with them present, the write-side line is real and the banner is quiet.
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PIO3 PIO4 PDMA PDM2 PDM3 PBLD}
+set probeval(PIO3) [expr {(7 << 24) | 4242}]
+set probeval(PIO4) [expr {(9 << 24) | (5 << 16) | (2 << 8) | (1 << 2) | (0 << 1) | 0}]
+set out [capture]
+ok "reader decodes the stalled-flush LBA and stall age" \
+   [string match "*PIO3  disk write stuck=7   lba=4242*" $out]
+ok "reader decodes the disk write and ack counts" \
+   [string match "*PIO4  disk0 wr=9 ack=5*disk1 wr=2*" $out]
+ok "reader shows the live write handshake bit" \
+   [string match "*d0_wr=1 d0_ack=0 d1_wr=0*" $out]
+ok "reader warns that the disk ack count covers both directions" \
+   [string match "*ack covers rd+wr*" $out]
 
 puts ""
 puts "READER: $fails of $tests failing"

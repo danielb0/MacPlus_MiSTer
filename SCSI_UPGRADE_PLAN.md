@@ -1643,3 +1643,440 @@ RTL: `cd_dbg`, `cd_ms_mode`, `cd_vendor_dbg`, `cd_sense_mode`, `USE_SCSI_ISSP`,
 `dbg_abort` on `scsi.v`, `scsi_dbg` through `dataController_top`. Drop
 `sim/tb_dbg_probes.v` and `sim/test_read_probes.tcl` with them. Keep `cd28`/`cd32` (under-serve regression guards),
 `seam9`/`seam10`, and the seam bench itself.
+
+
+## 5.7 The three remaining defects — fix plan (2026-08-23)
+
+Everything above this point is Phase 1/2 history. This section is the plan for
+the three defects that are still open, written after the 2026-08-23 review and
+soak. Two of them were proven by inspection; the third was only ever *observed*,
+and its mechanism is now established deterministically in simulation (below).
+
+Nothing here changes the CD command set or the host-side 5380. All the fixes
+live in `rtl/scsi.v`.
+
+A fourth defect (D) turned up while writing the test for B, and is fixed here
+too — it is live in the committed code today, on the CD path.
+
+### Why these three are one change, not three
+
+Defects A and B are a matched pair. READ CAPACITY advertises one block more than
+the medium has (A), and nothing checks an incoming LBA against the medium at all
+(B). Separately each is survivable; together they are a deterministic landmine —
+block `img_blocks` is a block the driver is *told* is valid, and which can never
+be serviced. Fixing B without A would make the last real block unreachable;
+fixing A without B leaves every out-of-range access still hanging for half a
+second. They ship together or not at all.
+
+Defect C is the reason either of them presents as a *hang* rather than an error:
+the recovery path that is supposed to turn a stalled transfer into a clean SCSI
+error does not, on the write path, deliver its status at all.
+
+---
+
+### Defect A — READ CAPACITY returns the block COUNT, not the last LBA
+
+`rtl/scsi.v:365`. SCSI-1 defines READ CAPACITY's returned value as the address of
+the **last** logical block. The CD path already subtracts one; the disk path
+returns `img_blocks` unmodified, so a 40960-block image is advertised as ending
+at block 40960 — one past the end.
+
+This is not a discovery. The code comment admits it: a knowingly deferred Phase 1
+follow-up, left alone because "changing it here would alter what every existing
+user's driver sees, and Phase 2 is meant to be purely additive."
+
+**That argument does not survive contact with Defect B.** The concern was that an
+existing volume might have been formatted against the inflated capacity and would
+now find its last block outside the reported medium. But writing to that block has
+*never worked* — with no bounds check, a write to `img_blocks` goes to an HPS that
+cannot service it, and the command stalls for ~516 ms and then wedges (Defect C).
+No existing volume can be relying on data in a block that was never writable. The
+compatibility risk the comment defers to is empty.
+
+**Fix.** Report `img_blocks - 1` on the disk path, matching the CD path and the
+LC core.
+
+```verilog
+capacity <= (CDROM != 0) ? ({2'b00, img_blocks[31:2]} - 1'd1)
+                         : (img_blocks - 1'd1);
+```
+
+**Test (`tb_scsi_target.v` test13).** Mount 40960 blocks, READ CAPACITY, require
+the returned last-LBA to be 40959 and the block length to be 512. Fails today with
+`cap=40960`.
+
+---
+
+### Defect B — no LBA bounds check anywhere
+
+Nothing in `rtl/scsi.v` compares an incoming LBA against the mounted image size,
+and there is no ILLEGAL REQUEST / ASC 0x21 (LOGICAL BLOCK ADDRESS OUT OF RANGE)
+path. An out-of-range LBA is latched and handed straight to the HPS, which cannot
+service it; `io_busy` holds, `req` is suppressed, and the target sits on the bus
+holding BSY until the io-stall watchdog fires ~516 ms later — at which point
+Defect C decides whether the initiator ever learns what happened.
+
+A real drive fails the command immediately. So must this one.
+
+**Fix.** Bound-check the CDB at command completion, before the parameters are
+latched, and reject with CHECK CONDITION through the existing rejection path.
+
+The check must run on the *combinational* CDB fields, not on the `lba`/`tlen`
+registers: those latch on the same clock edge `cmd_cpl` is evaluated, so at
+decision time they still hold the previous command's values.
+
+```verilog
+// Bounds check the CDB before it is latched. cmd6/cmd10 fields are raw here --
+// on the CD path both `capacity` and the CDB address are in 2048-byte logical
+// blocks (the <<2 to HPS sectors happens at latch time), so one comparison is
+// correct for both personalities.
+wire [31:0] cdb_lba  = cmd6_cpl ? {11'd0, lba6} : lba10;
+wire [16:0] cdb_blks = cmd6_cpl ? {8'd0, tlen6} : {1'b0, tlen10};
+wire [32:0] cdb_end  = {1'b0, cdb_lba} + {16'd0, cdb_blks};  // one PAST the last
+wire lba_out_of_range = (cmd_read || cmd_write) && mounted && (cdb_blks != 0) &&
+                        (cdb_end > ({1'b0, capacity} + 33'd1));
+```
+
+Three details that are easy to get wrong:
+
+* **Zero-length transfers are legal.** A READ(10) with a transfer length of 0
+  moves no data and must not be an error, hence the `cdb_blks != 0` guard.
+* **The end, not the start.** A transfer that begins in range and runs off the
+  end is equally out of range. Checking only `cdb_lba` would let it through and
+  stall on the last sector instead of the first.
+* **33-bit arithmetic.** `cdb_lba` is 32 bits and the transfer length can be
+  65535, so the sum is widened before comparison; a 32-bit add would wrap and a
+  wildly out-of-range LBA would test as valid.
+
+Wire it into the two places a rejection already exists — the CMD_IN gate and the
+sense latch:
+
+```verilog
+if(cmd_ok && !cd_no_media && !cd_hdr_msf_rej && !lba_out_of_range) begin
+```
+
+```verilog
+end else if (lba_out_of_range) begin
+    sense_key <= 4'h5;  // ILLEGAL REQUEST
+    sense_asc <= 8'h21; // LOGICAL BLOCK ADDRESS OUT OF RANGE
+```
+
+placed after the `cd_no_media` branch, so an empty CD drive still reports no-disc
+rather than a bounds error.
+
+**Tests (`tb_scsi_target.v`).**
+
+| test | what it pins |
+|---|---|
+| test14 | READ at `img_blocks` → CHECK CONDITION, bus released |
+| test15 | the follow-up REQUEST SENSE reports `05/21` |
+| test16 | a READ that *starts* in range and runs past the end is also refused |
+| test17 | **the guard in the other direction** — the last valid block still reads byte-exact |
+| test18 | out-of-range WRITE refused *before any flush is issued* |
+
+test17 is the one that matters most. A bounds check that is itself off by one
+would amputate the last sector of every disk on the system — far worse than the
+defect it replaces. It passes today (there is no check to be wrong yet) and must
+still pass after.
+
+---
+
+### Defect C — the io-stall abort never delivers its status on a write
+
+**Status: mechanism now PROVEN in simulation.** The 2026-08-23 handoff recorded
+this as "observed once, mechanism unknown", and warned specifically against
+repeating the plan's earlier framing that the abort path simply fails to recover.
+That warning was right — the abort path *does* attempt clean recovery, and on the
+read path it succeeds. The write path is a different shape.
+
+#### What was already known, and why it was confusing
+
+`scsi.v` sets CHECK CONDITION and moves to `PHASE_STATUS_OUT` on abort, and the
+sense latch records key 0xB carrying the stalling opcode. `seam9` proves this
+works for a stalled read. Yet the hardware capture from 2026-08-22 showed the
+driver polling forever after an io-stall on a **disk write**.
+
+#### The mechanism
+
+A block WRITE's *last* flush is not issued during the data phase. `req_wr` has a
+tail clause that fires at `PHASE_STATUS_OUT`, so the final partial sector is
+flushed after the data phase has already ended:
+
+```verilog
+wire req_wr = ((((phase == PHASE_DATA_IN) && (data_cnt[8:0] == 0) && (data_cnt != 0))
+                || (phase == PHASE_STATUS_OUT)) && cmd_write && (data_len != 32'd0));
+```
+
+So when the HPS stalls on that flush, the target is stalled **while already in
+STATUS_OUT, with its status byte still undelivered**. And the abort branch keys
+on the phase:
+
+```verilog
+end else if (wdog_abort) begin
+    if ((phase == PHASE_STATUS_OUT) || (phase == PHASE_MESSAGE_OUT))
+        phase <= PHASE_IDLE;                 // "status already sent" -- FALSE HERE
+    else begin
+        status <= `STATUS_CHECK_CONDITION;
+        phase  <= PHASE_STATUS_OUT;
+    end
+end
+```
+
+That first branch exists to stop the abort looping on itself, and it is written on
+the assumption that being in STATUS_OUT means the status byte got out. On a
+stalled write it has not. The target drops BSY with **no status and no COMMAND
+COMPLETE message**, and the initiator waits for a completion that can never
+arrive. That is the "polled forever".
+
+Traced in the seam bench, with the disk slot's HPS answering nothing:
+
+```
+phase 1 -> 3  (CMD -> DATA_IN)
+phase 3 -> 4  (DATA_IN -> STATUS_OUT, data_cnt=512, wr_pending=1)
+              io_wr=1, io_busy holds, REQ suppressed
+phase 4 -> 0  (STATUS_OUT -> IDLE) -- status byte never sent
+```
+
+This also explains why the read path was never affected: a stalled read is stalled
+in `PHASE_DATA_OUT`, takes the `else` branch, and does send its CHECK CONDITION.
+
+#### The fix is two parts, and one part alone does not work
+
+**C1 — do not confuse "in STATUS_OUT" with "status delivered".** Track what was
+actually sent:
+
+```verilog
+reg status_done;   // the status byte for this command has been delivered
+always @(posedge clk) begin
+    if (phase == PHASE_IDLE) status_done <= 1'b0;
+    else if ((phase == PHASE_STATUS_OUT) && stb_adv) status_done <= 1'b1;
+end
+```
+
+`status_done` is used rather than the existing `status_sent` because
+`status_sent` is cleared the moment the phase leaves STATUS_OUT — so in
+MESSAGE_OUT it reads 0, and keying the abort on it would send the target *back*
+to STATUS_OUT to re-issue a status it had already delivered.
+
+**C2 — an aborted command must not arm a new HPS transaction.** C1 on its own is
+not enough, and this is the part that is easy to miss: the abort clears `io_wr`,
+but `req_wr`'s tail clause is still true (we are still in STATUS_OUT, still a
+write, still non-zero length), so the flush re-arms on the very next cycle,
+`io_busy` re-asserts, and REQ is suppressed again — the status still cannot get
+out, and 516 ms later the second abort finds `cmd_aborted` set and gives up. The
+net effect would be identical to today's bug, just slower.
+
+```verilog
+reg cmd_aborted;
+always @(posedge clk) begin
+    if (any_rst || (phase == PHASE_IDLE)) cmd_aborted <= 1'b0;
+    else if (wdog_abort)                  cmd_aborted <= 1'b1;
+end
+```
+
+gating both request generators:
+
+```verilog
+wire req_rd = ... && !cmd_aborted;
+wire req_wr = ... && !cmd_aborted;
+```
+
+The pending write data is discarded, which is the correct outcome for a command
+that is being failed — the driver gets CHECK CONDITION and retries. Discarding a
+sector we could not write is not data loss; silently wedging the bus is.
+
+The abort branch then becomes:
+
+```verilog
+end else if (wdog_abort) begin
+    if (status_done || cmd_aborted) phase <= PHASE_IDLE;
+    else begin
+        status <= `STATUS_CHECK_CONDITION;
+        phase  <= PHASE_STATUS_OUT;
+    end
+end
+```
+
+`cmd_aborted` in that condition is the loop guard: it is registered, so it is
+still 0 during the *first* abort (which therefore gets to send its status) and 1
+on any subsequent one (which releases the bus). One attempt to report the error,
+then let go — a target must never be able to hold BSY indefinitely, which is the
+whole reason the watchdogs exist.
+
+**C3 — clear the stalled request on any abort, not just an io-stall.** The
+existing clear is keyed on `iostall_abort`; widening it to `wdog_abort` costs
+nothing and closes the case where `wr_pending` is set but `io_busy` happens to be
+low (`data_cnt[9] != sd_buff_sel`), so the *bus* watchdog fires instead.
+
+**Test (`tb_ncr5380_seam.v` seam14).** A 1-block WRITE to the disk target with
+`hps_disk_enable` low, so the tail flush can never complete. Requires: the target
+still REQs after the stall aborts, the status byte is CHECK CONDITION, COMMAND
+COMPLETE follows, the bus is released, the stalled `io_wr` is cleared, and the
+next command still works. Three of those fail today.
+
+The test deliberately goes through the 5380 rather than driving `scsi.v` directly
+— what is under test is *what the initiator sees*, which is exactly the seam that
+[[test the seams]] says is where a defect like this survives.
+
+`seam14` also has to wait for a free bus before selecting: `seam10` leaves the CD
+target mid-CDB holding BSY, and `bus_busy` blocks selection of any other target.
+
+#### What this does NOT fix
+
+The stall itself. Whatever made an HPS write take longer than 516 ms on 2026-08-22
+is still unexplained, and the 2026-08-23 soak did not reproduce it (see the soak
+notes: a clean run there proves very little, because nothing had been fixed and
+the flash restore had reset exactly the SD garbage-collection state the leading
+hypothesis names). This fix changes an unrecoverable bus wedge into a failed
+command that the driver can retry. That is worth having on its own, and it is not
+a diagnosis.
+
+The `IOWDOG_LOG` 24 → 26 (~2 s) change floated in the handoff is **not** included.
+It is mitigation for a mechanism we have not identified, it makes the failure
+slower rather than rarer, and with C in place a stall now produces a clean error
+instead of a hang — which removes most of the reason to want a longer timeout.
+Revisit it only if a stall is ever seen to complete between 0.5 s and 2 s.
+
+---
+
+### Defect D — a REJECTED write flushes a stale sector (found by `test18`)
+
+Not on the original list. `test18` was written to check that an out-of-range
+WRITE is refused *before any flush is issued*, and it kept failing after the
+bounds check was in: the command was correctly refused, and a flush went out
+anyway.
+
+`req_wr`'s tail clause fires whenever the target is in `PHASE_STATUS_OUT` with
+`cmd_write` and a non-zero `data_len`. A **rejected** write reaches STATUS_OUT
+with both still set and no data phase behind them, so the tail flush writes
+whatever the sector buffer happens to hold — the previous command's data — to
+the LBA it had just declined to write.
+
+The existing `data_len != 0` guard covers only the zero-length case. `data_cnt`
+cannot be used as the discriminator either, which is what the first attempt at
+this tried: `data_cnt` keeps counting through STATUS_OUT and MESSAGE_OUT, so it
+is non-zero again the moment the status byte has gone out — which is precisely
+when the stale flush fires. The trace is unambiguous:
+
+```
+[t18] io_wr! lba=40960 phase=5 data_cnt=1
+```
+
+An explicit latch is needed: did a data-in phase actually happen?
+
+```verilog
+reg data_in_seen;
+always @(posedge clk) begin
+	if((phase == PHASE_IDLE) || (phase == PHASE_CMD_IN)) data_in_seen <= 0;
+	else if(phase == PHASE_DATA_IN) data_in_seen <= 1;
+end
+```
+
+**This is live in the committed code today, on the CD path.** `cmd_ok_cd`
+deliberately omits `cmd_write` so the read-only medium rejects writes — and that
+rejection is exactly the path that flushes a stale block into the mounted disc
+image. It has presumably never been hit because MacOS does not write to a CD
+volume, but a WRITE(6) sent to the CD target corrupts the image file. It is only
+reachable via the disk path now because the bounds check created the first
+rejected-write case there.
+
+Requiring `data_in_seen` on the STATUS_OUT clause covers every rejection path at
+once, present and future.
+
+---
+
+### Order of work
+
+1. **DONE** — failing tests first: `test13`–`test18` (disk), `seam14` (seam),
+   `cd36`/`cd37` (CD). 5 of 6 disk assertions, 3 of 7 seam assertions and `cd36`
+   failed against the pre-fix RTL; `test17` and `cd37` passed both before and
+   after, which is what makes them guards rather than decoration. Every
+   pre-existing test stayed green throughout.
+2. **DONE** — Fix C (`status_done`, `cmd_aborted`, widened abort clear).
+   seam 63/63, and `seam9` (the stalled *read*) still green.
+3. **DONE** — Fix A (capacity) and Fix B (bounds check + `data_in_seen`).
+4. **DONE** — all five gates green: `disk 18/18, CD 34/34, seam 63/63,
+   probes 31/31, reader 20/20`.
+5. **DONE** — Quartus `--analysis_and_elaboration`: **0 errors, 20 warnings**,
+   the standing baseline exactly. No new warnings from `scsi.v`.
+6. **NOT DONE — full compile and hardware.** Ask before the compile.
+
+### Gates
+
+Baseline before this work, all green: `disk 12/12, CD 32/32, seam 56/56,
+probes 31/31, reader 20/20`. After it: `disk 18/18, CD 34/34, seam 63/63,
+probes 37/37, reader 26/26` (the last two grew with the write-side probes below).
+
+**UNBUILT — needs a full compile and a hardware test.** Nothing here is done
+until hardware confirms it. The regression to watch for is a previously-working
+SCSI disk failing to mount or boot, which would point at Defect A.
+
+
+### The probe deck grows a write side (PIO3 / PIO4)
+
+Built in the SAME bitstream as the fixes above, deliberately. The 2026-08-23
+soak notes listed this as a still-open instrumentation gap "now shown to matter
+twice": `PIO2` carried `d0_rd_cnt` only, `PIOS` carried `cd_io_lba` only, so the
+deck had **no disk write counter and no disk LBA anywhere**. Defects C and D are
+both disk-*write* defects. Shipping the fixes on a deck that cannot observe the
+thing they fix would mean a second full compile the first time a wedge recurred.
+
+| probe | packing |
+|---|---|
+| `PIO3` | `{wr_stuck[7:0], d0_io_lba[23:0]}` — the write-side twin of `PIOS` |
+| `PIO4` | `{d0_wr_cnt, d0_ack_cnt, d1_wr_cnt, 5'd0, d0_io_wr, d0_io_ack, d1_io_wr}` |
+
+`d0_ack_cnt` counts `d0_io_ack` edges, which that slot shares between reads and
+flushes — so it is the COMBINED ack count and must be compared against
+`PIO2 disk0 rd + PIO4 disk0 wr`, not against either alone. `scripts/read_probes.tcl`
+prints that caveat inline, because it is exactly the kind of thing that gets
+misread at 1 a.m. looking at a dead machine. `d1_wr_cnt` closes the "no disk1
+counter at all" half of the same gap.
+
+**A no-reset bug in the existing deck, found by testing the new probes.**
+`cd_rd_cnt`, `cd_ack_cnt` and `d0_rd_cnt` only ever increment and had no
+power-up value, so in simulation they are **X forever** and every count the deck
+reports is X. Nothing caught it because no bench had ever asserted on `PIO2`.
+Same shape as the Phase 0 `io_rd`/`io_wr` finding. All six counters are now
+initialised to 0, which is what Altera fabric does anyway — so this changes
+nothing on hardware and makes the deck's own numbers trustworthy in sim.
+
+**Reader behaviour on an older bitstream.** `read_probes.tcl` marks a missing
+probe ABSENT and raises the INCOMPLETE CAPTURE banner, which now covers
+`PIO3`/`PIO4` automatically. That matters more than it sounds: a fictional
+`PIO3` block would print `disk write stuck=0 lba=0`, which reads exactly like a
+*healthy* write path and would exonerate the very thing under suspicion.
+`sim/test_read_probes.tcl` pins that.
+
+**Elaboration with the deck on: 0 errors, 23 warnings.** The three above the
+release baseline of 20 are the deck's own and were confirmed by diffing the
+warning sets with the macro on and off — a pre-existing `dbg_armed` note at
+`dbg_probes.sv:78`, `Net is missing source` from the megafunctions' unconnected
+`.source()` ports, and the connectivity-warning count rising 17 -> 35 for the
+same reason. **None come from the new probes.**
+
+Gates with the deck extended: `disk 18/18, CD 34/34, seam 63/63, probes 37/37,
+reader 26/26`.
+
+**This is a DEBUG build**: `USE_SCSI_ISSP=1` is uncommented in `MacPlus.qsf`.
+Comment it out again for a release build; the deck and all its taps are then
+pruned entirely.
+
+### Risk
+
+* **A changes what every existing driver sees.** Argued above to be safe because
+  the extra block was never writable. Still the single most likely thing to
+  surface on hardware, and the first thing to suspect if a previously-working
+  disk misbehaves after this build. It is a two-character revert.
+* **B rejects commands that previously hung.** Any driver that was relying on the
+  hang (none plausibly can be) sees a new error path. `test17` guards the real
+  risk, which is rejecting one block too many.
+* **C discards a pending write sector on abort.** Only on a path that previously
+  wedged the machine outright.
+* **D changes when a write flush is issued at all.** The new `data_in_seen`
+  condition is strictly narrower than what was there, and `test10`/`test11`
+  (single- and multi-sector writes, checked byte-exact against the block device)
+  are the guard that it did not become too narrow.
+* All four are `scsi.v`-local; the CD personality shares the bounds check and
+  the abort path, so the CD gate is a real regression check, not a formality --
+  `cd36` fails against the pre-fix RTL, which is how we know it is one.

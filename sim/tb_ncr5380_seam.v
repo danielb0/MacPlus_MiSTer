@@ -95,9 +95,13 @@ module tb_ncr5380_seam;
 
 	// Disk slot 0 gets its own trivial always-ack server: seam12 needs a WRITE
 	// target, and the CD is read-only.
+	// hps_disk_enable low = the disk slot's HPS never answers, which is what
+	// seam14 needs to stall a WRITE flush.
+	reg     hps_disk_enable = 1'b1;
 	always @(posedge clk) begin : hps_disk
 		if (reset) io_ack[0] <= 1'b0;
-		else       io_ack[0] <= (io_rd[0] | io_wr[0]) & ~io_ack[0];
+		else       io_ack[0] <= hps_disk_enable &
+		                        (io_rd[0] | io_wr[0]) & ~io_ack[0];
 	end
 
 	always @(posedge clk) begin : hps
@@ -928,6 +932,116 @@ module tb_ncr5380_seam;
 		repeat (1200) @(posedge clk);
 		ok("seam10 - the deferral ages out with no CSR access at all",
 		   !dut.req_deferred);
+
+		// =============== seam14: a WRITE flush that never completes =========
+		// seam9 covers a stalled READ, and it recovers cleanly: the stall
+		// happens in DATA_OUT, so the abort takes the "not in status yet"
+		// branch, sends CHECK CONDITION and the initiator sees a failed
+		// command. A stalled WRITE is a different shape and has never been
+		// tested.
+		//
+		// A block WRITE's LAST flush is issued at PHASE_STATUS_OUT (scsi.v's
+		// req_wr tail clause) -- so if the HPS never answers THAT one, the
+		// target is stalled while ALREADY in STATUS_OUT, with its status byte
+		// still undelivered. The abort branch keys on the phase, treats
+		// "in STATUS_OUT" as "status already sent", and drops straight to
+		// IDLE. BSY falls with no status and no COMMAND COMPLETE, and the
+		// initiator waits for a completion that can never arrive.
+		//
+		// That is the 2026-08-22 soak wedge: an io-stall on a disk write.
+		// seam10 leaves the CD target mid-CDB holding BSY; a busy bus blocks
+		// selection of any other target (scsi.v's bus_busy gate), so wait it out.
+		begin : s14idle
+			integer g;
+			g = 0;
+			while (dut.scsi_bsy && g < 20000) begin @(posedge clk); g = g + 1; end
+		end
+		hps_disk_enable = 1'b0;
+		img_size = 32'd2048;
+		img_mounted[0] = 1'b1;
+		@(posedge clk); @(posedge clk);
+		img_mounted[0] = 1'b0;
+		repeat (50) @(posedge clk);
+
+		select_target(8'h40);                 // disk at ID 6
+		send_cmd_byte(8'h0A);                 // WRITE(6), LBA 0, 1 block
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h01);
+		send_cmd_byte(8'h00);
+		reg_write(`W_ICR, 8'h00);
+		reg_write(`W_MR,  8'h02);
+		reg_write(`W_DMAS, 8'h00);            // Start DMA Send
+		wait_raw_req;
+
+		// Pump the whole 512-byte block. No flush can complete, but the data
+		// phase itself does not need one.
+		begin : s14pump
+			integer n, g;
+			for (n = 0; n < 512; n = n + 1) begin
+				g = 0;
+				while (!dut.scsi_req && g < 4000) begin @(posedge clk); g = g + 1; end
+				dma_write_byte(8'h5A);
+			end
+		end
+		reg_write(`W_MR, 8'h00);
+
+		repeat (20) @(posedge clk);
+		ok("seam14 - premise: the target reached STATUS with a flush pending",
+		   dut.target[0].target.phase == 3'd4);
+
+		// The target must still deliver a status byte. Poll for REQ across the
+		// io-stall timeout rather than calling recv_byte, which would block.
+		begin : s14req
+			integer g;
+			g = 0;
+			while (!dut.scsi_req && dut.scsi_bsy && g < 200000) begin
+				@(posedge clk); g = g + 1;
+			end
+		end
+		ok("seam14 - the target still REQs its status after the stall aborts",
+		   dut.scsi_req && dut.scsi_bsy);
+
+		stat = 8'hff; msg = 8'hff;
+		if (dut.scsi_req && dut.scsi_bsy) recv_byte(stat);
+		ok("seam14 - and that status is CHECK CONDITION, not silence",
+		   stat == 8'h02);
+
+		begin : s14msg
+			integer g;
+			g = 0;
+			while (!dut.scsi_req && dut.scsi_bsy && g < 200000) begin
+				@(posedge clk); g = g + 1;
+			end
+		end
+		if (dut.scsi_req && dut.scsi_bsy) recv_byte(msg);
+		ok("seam14 - followed by COMMAND COMPLETE", msg == 8'h00);
+
+		begin : s14rel
+			integer g;
+			g = 0;
+			while (dut.scsi_bsy && g < 200000) begin @(posedge clk); g = g + 1; end
+		end
+		ok("seam14 - bus released", !dut.scsi_bsy);
+
+		// And the stalled flush must not be left asserted to poison the next
+		// command -- the same requirement seam9 makes of a stalled read.
+		ok("seam14 - the stalled flush is cleared, not left asserted",
+		   !io_wr[0]);
+
+		hps_disk_enable = 1'b1;
+		select_target(8'h40);
+		send_cmd_byte(8'h12);                 // INQUIRY
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h00);
+		send_cmd_byte(8'h20);
+		send_cmd_byte(8'h00);
+		reg_write(`W_ICR, 8'h00);
+		recv_byte(dma_b);
+		ok("seam14 - the NEXT command still works after a stalled flush",
+		   dma_b == 8'h00);
 
 		$display("");
 		$display("SEAM: %0d of %0d failing", fails, tests);

@@ -1241,6 +1241,50 @@ module tb_scsi_cdrom;
 
 
 
+      // --- cd36: the LBA bounds check on the CD personality -----------------
+      // The bounds check added for the disk path (SCSI_UPGRADE_PLAN.md 5.7
+      // defect B) is shared: on the CD path both `capacity` and the CDB
+      // address are in 2048-byte logical blocks, so the same comparison has to
+      // be right in units it was not written against. An out-of-range CD read
+      // must CHECK, not stall the bus for half a second.
+      begin : cd36
+         integer bad;
+         bad = 0;
+         // READ(10) at CD_BLOCKS (182492 = 0x0002C8DC) -- one past the last
+         // valid logical block -- for 1 block.
+         select_target;
+         send_cdb(8'h28,8'h00,8'h00,8'h02,8'hc8,8'hdc,8'h00,8'h00,8'h01,8'h00,0,0, 10);
+         finish_command;
+         if (timed_out || (status_byte !== 8'h02)) begin
+            $display("       status %h timeout %b, expected CHECK CONDITION",
+                     status_byte, timed_out); bad = bad + 1; end
+         get_sense;
+         if ((buf_in[2] !== 8'h05) || (buf_in[12] !== 8'h21)) begin
+            $display("       key %h asc %h, expected 05/21",
+                     buf_in[2], buf_in[12]); bad = bad + 1; end
+         ok = (bad == 0);
+      end
+      report(ok, "cd36 - an out-of-range CD read is refused with 05/21");
+
+      // --- cd37: and the LAST valid CD block still reads ---------------------
+      // The guard in the other direction, in 2048-byte units. A bounds check
+      // that is itself off by one here would truncate every disc by one logical
+      // block -- 2 KB off the end of the last file on the volume.
+      begin : cd37
+         integer bad;
+         bad = 0;
+         // READ(10) at CD_CAP (182491 = 0x0002C8DB), 1 block
+         select_target;
+         send_cdb(8'h28,8'h00,8'h00,8'h02,8'hc8,8'hdb,8'h00,8'h00,8'h01,8'h00,0,0, 10);
+         read_data_phase(2048);
+         finish_command;
+         if (timed_out || (status_byte !== 8'h00) || (buf_len != 2048)) begin
+            $display("       status %h len %0d timeout %b, expected GOOD / 2048",
+                     status_byte, buf_len, timed_out); bad = bad + 1; end
+         ok = (bad == 0);
+      end
+      report(ok, "cd37 - the last valid CD block still reads in full");
+
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);
       $display("");

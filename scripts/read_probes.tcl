@@ -100,6 +100,8 @@ for {set n 0} {$n < $samples} {incr n} {
 	set pifd [b2i [rd PIFD]]
 	set pios [b2i [rd PIOS]]
 	set pio2 [b2i [rd PIO2]]
+	set pio3 [b2i [rd PIO3]]
+	set pio4 [b2i [rd PIO4]]
 	set pifa [b2i [rd PIFA]]
 	set pact [b2i [rd PACT]]
 	set pscs [b2i [rd PSCS]]
@@ -158,6 +160,8 @@ for {set n 0} {$n < $samples} {incr n} {
 	puts [format "  PIFD  %04X: %04X                  <- instruction word there" $fd_a $fd_o]
 	puts [format "  PIOS  cd fetch stuck=%-3d lba=%d" [expr {($pios >> 24) & 0xff}] [expr {$pios & 0xffffff}]]
 	puts [format "  PIO2  cd rd=%d ack=%d  disk0 rd=%d   live: cd_rd=%d cd_wr=%d cd_ack=%d d0_rd=%d d0_ack=%d" [expr {($pio2 >> 24) & 0xff}] [expr {($pio2 >> 16) & 0xff}] [expr {($pio2 >> 8) & 0xff}] [expr {($pio2 >> 4) & 1}] [expr {($pio2 >> 3) & 1}] [expr {($pio2 >> 2) & 1}] [expr {($pio2 >> 1) & 1}] [expr {$pio2 & 1}]]
+	puts [format "  PIO3  disk write stuck=%-3d lba=%d" [expr {($pio3 >> 24) & 0xff}] [expr {$pio3 & 0xffffff}]]
+	puts [format "  PIO4  disk0 wr=%d ack=%d (ack covers rd+wr)  disk1 wr=%d   live: d0_wr=%d d0_ack=%d d1_wr=%d" [expr {($pio4 >> 24) & 0xff}] [expr {($pio4 >> 16) & 0xff}] [expr {($pio4 >> 8) & 0xff}] [expr {($pio4 >> 2) & 1}] [expr {($pio4 >> 1) & 1}] [expr {$pio4 & 1}]]
 	# The access ring, newest first. Entry = {rw,dack,reg,3'b0,val}.
 	puts [format "  PRG   recent non-poll SCSI accesses (newest first); DACK reads so far: %d" [expr {($pscs >> 8) & 0xf}]]
 	foreach pr {PRG0 PRG1 PRG2 PRG3} {
@@ -331,6 +335,14 @@ puts "  * PODR shows the tail of the last CDB the driver handed the target."
 puts "  * PIOS stuck>0 with PIO2 cd_rd=1 and rd>ack = a fetch the HPS never"
 puts "    answered. That holds io_busy, which holds REQ low AND resets the bus"
 puts "    watchdog every cycle -- a hang with no recovery (scsi.v:239, :1195)."
+puts "  * PIO3/PIO4 are the same test for the WRITE side, which is what the"
+puts "    2026-08-22 wedge actually was. PIO3 stuck>0 with PIO4 d0_wr=1 and"
+puts "    PIO4 wr+PIO2 rd > PIO4 ack = a FLUSH the HPS never answered, and"
+puts "    PIO3 lba names the block it was trying to write."
+puts "  * PIO4 disk0 wr climbing between samples is write progress; frozen"
+puts "    with d0_wr=1 is a stalled flush. Note PIO4 ack counts BOTH"
+puts "    directions on that slot -- compare it against PIO2 disk0 rd + PIO4"
+puts "    disk0 wr, not against either one alone."
 puts "  * PDMA/PDM2 are the discriminating word. Both readings of the wedge"
 puts "    predict the SAME frozen PSCS/PODR capture; they differ only here."
 puts "    Predicted by the invisible-completion reading: DACK-since-arm=2,"

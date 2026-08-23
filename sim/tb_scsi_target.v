@@ -361,6 +361,7 @@ module tb_scsi_target;
    // buffering the whole transfer, so a read can be longer than buf_in.
    // Reports the number of bytes taken and the number that did not match.
    integer stream_len, stream_bad;
+   integer io_wr_count_at18 = 0;
    reg [31:0] stream_first_bad;
    task read_check_phase;
       input [31:0] start_lba;
@@ -857,6 +858,170 @@ module tb_scsi_target;
          end else begin
             $display("FAIL: test12 - ring wrap corrupted the read (timeout=%b len=%0d status=%02x bad=%0d first_bad=%0d)",
                      timed_out, stream_len, status_byte, stream_bad, stream_first_bad);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      io_wr_count_at18 = io_wr_count;
+
+      // ==================================================================
+      // Test 13: READ CAPACITY must return the LAST LBA, not the block COUNT.
+      // SCSI-1: the returned value is the address of the last logical block,
+      // so a 40960-block image ends at 40959. Reporting 40960 advertises one
+      // block MORE than exists -- and combined with the missing bounds check
+      // below, block 40960 is a block the driver believes is valid and which
+      // can never be serviced.
+      // ==================================================================
+      do_reset;
+      mount_image(32'd40960);
+      select_target;
+      send_cdb(8'h25,8'h00,8'h00,8'h00,8'h00,8'h00,8'h00,8'h00,8'h00,8'h00,0,0, 10);
+      read_data_phase(8);
+      finish_command;
+
+      begin : test13
+         reg ok;
+         reg [31:0] cap;
+         p1_total = p1_total + 1;
+         cap = {buf_in[0], buf_in[1], buf_in[2], buf_in[3]};
+         ok = (!timed_out) && (buf_len == 8) && (status_byte == 8'h00)
+              && (cap === 32'd40959)      // LAST LBA of a 40960-block image
+              && (buf_in[6] === 8'd2);    // block length 512
+         if (ok) begin
+            $display("PASS: test13 - READ CAPACITY returns the last LBA (%0d)", cap);
+         end else begin
+            $display("FAIL: test13 - READ CAPACITY off by one (cap=%0d want=40959 blen=%02x timeout=%b)",
+                     cap, buf_in[6], timed_out);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      // ==================================================================
+      // Test 14: a READ whose LBA is past the end of the medium must be
+      // refused with CHECK CONDITION, and the sense must say why.
+      //
+      // Today nothing compares an incoming LBA against the image size. The
+      // out-of-range LBA is handed straight to the HPS, which cannot service
+      // it, io_busy holds, REQ is suppressed, and the target sits on the bus
+      // until the io-stall watchdog fires ~516 ms later. A bad LBA has to be
+      // a clean SCSI error, not a half-second wedge.
+      // ==================================================================
+      do_reset;
+      mount_image(32'd40960);
+      select_target;
+      // READ(6) lba=40960 (0x00A000 -- one past the last valid block), 1 block
+      send_cdb(8'h08,8'h00,8'ha0,8'h00,8'd1,8'h00,0,0,0,0,0,0, 6);
+      finish_command;
+
+      begin : test14a
+         reg ok;
+         p1_total = p1_total + 1;
+         ok = (!timed_out) && (status_byte == 8'h02);
+         if (ok) begin
+            $display("PASS: test14 - out-of-range READ refused with CHECK CONDITION");
+         end else begin
+            $display("FAIL: test14 - out-of-range READ not refused (status=%02x timeout=%b io_rd=%b)",
+                     status_byte, timed_out, io_rd);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      select_target;
+      send_cdb(8'h03,8'h00,8'h00,8'h00,8'h12,8'h00,0,0,0,0,0,0, 6);
+      read_data_phase(32);
+      finish_command;
+
+      begin : test14b
+         reg ok;
+         p1_total = p1_total + 1;
+         ok = (!timed_out) && (buf_len == 18)
+              && (buf_in[2]  === 8'h05)   // ILLEGAL REQUEST
+              && (buf_in[12] === 8'h21);  // LOGICAL BLOCK ADDRESS OUT OF RANGE
+         if (ok) begin
+            $display("PASS: test15 - sense reports ILLEGAL REQUEST / ASC 21");
+         end else begin
+            $display("FAIL: test15 - wrong sense for a bad LBA (key=%02x asc=%02x len=%0d timeout=%b)",
+                     buf_in[2], buf_in[12], buf_len, timed_out);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      // ==================================================================
+      // Test 16: a transfer that STARTS in range but RUNS PAST the end is
+      // equally out of range. Checking only the starting LBA would let this
+      // through and stall on the last sector instead of the first.
+      // ==================================================================
+      do_reset;
+      mount_image(32'd40960);
+      select_target;
+      // READ(6) lba=40958 (0x009FFE), 4 blocks -> 40958..40961, past the end
+      send_cdb(8'h08,8'h00,8'h9f,8'hfe,8'd4,8'h00,0,0,0,0,0,0, 6);
+      finish_command;
+
+      begin : test16
+         reg ok;
+         p1_total = p1_total + 1;
+         ok = (!timed_out) && (status_byte == 8'h02);
+         if (ok) begin
+            $display("PASS: test16 - a READ running past the end is refused");
+         end else begin
+            $display("FAIL: test16 - overrunning READ not refused (status=%02x timeout=%b)",
+                     status_byte, timed_out);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      // ==================================================================
+      // Test 17: the guard in the other direction. The LAST valid block must
+      // still read, byte-exact -- a bounds check that is itself off by one
+      // would amputate the last sector of every disk, which is far worse than
+      // the defect it replaces.
+      // ==================================================================
+      do_reset;
+      mount_image(32'd40960);
+      select_target;
+      // READ(6) lba=40959 (0x009FFF), 1 block -- the last valid block
+      send_cdb(8'h08,8'h00,8'h9f,8'hff,8'd1,8'h00,0,0,0,0,0,0, 6);
+      read_check_phase(32'd40959, 512);
+      finish_command;
+
+      begin : test17
+         reg ok;
+         p1_total = p1_total + 1;
+         ok = (!timed_out) && (stream_len == 512) && (status_byte == 8'h00)
+              && (stream_bad == 0);
+         if (ok) begin
+            $display("PASS: test17 - the last valid block still reads byte-exact");
+         end else begin
+            $display("FAIL: test17 - last block broken (timeout=%b len=%0d status=%02x bad=%0d)",
+                     timed_out, stream_len, status_byte, stream_bad);
+            p1_fail = p1_fail + 1;
+         end
+      end
+
+      // ==================================================================
+      // Test 18: the same bound on the WRITE path. An out-of-range write is
+      // the dangerous direction -- it must be refused BEFORE any data phase,
+      // not accepted and then stalled with the initiator's bytes in hand.
+      // ==================================================================
+      do_reset;
+      mount_image(32'd40960);
+      select_target;
+      io_wr_count_at18 = io_wr_count;
+      // WRITE(6) lba=40960, 1 block
+      send_cdb(8'h0a,8'h00,8'ha0,8'h00,8'd1,8'h00,0,0,0,0,0,0, 6);
+      finish_command;
+
+      begin : test18
+         reg ok;
+         p1_total = p1_total + 1;
+         ok = (!timed_out) && (status_byte == 8'h02)
+              && (io_wr_count == io_wr_count_at18);
+         if (ok) begin
+            $display("PASS: test18 - out-of-range WRITE refused before any flush");
+         end else begin
+            $display("FAIL: test18 - out-of-range WRITE not refused (status=%02x timeout=%b flushes=%0d)",
+                     status_byte, timed_out, io_wr_count - io_wr_count_at18);
             p1_fail = p1_fail + 1;
          end
       end

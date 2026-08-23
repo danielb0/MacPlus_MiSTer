@@ -93,7 +93,11 @@ module tb_dbg_probes;
 		.selectSCSI(selectSCSI),
 		.cd_io_rd(io_rd[CD_DEV]), .cd_io_wr(io_wr[CD_DEV]),
 		.cd_io_ack(io_ack[CD_DEV]), .cd_io_lba(io_lba[CD_DEV]),
-		.d0_io_rd(io_rd[0]), .d0_io_ack(io_ack[0]),
+		.d0_io_rd(io_rd[0]), .d0_io_wr(io_wr[0]), .d0_io_ack(io_ack[0]),
+		.d0_io_lba(io_lba[0]),
+		// DEVS=2 with CD_DEV=1, so there is no second DISK in this bench; the
+		// d1 counter uses the same edge-count idiom as d0 immediately above it.
+		.d1_io_wr(1'b0),
 		.scsi_dbg(scsi_dbg)
 	);
 
@@ -166,6 +170,17 @@ module tb_dbg_probes;
 			while (dut.scsi_req && g < 8000) begin @(posedge clk); g = g + 1; end
 			reg_wr_(`W_ICR, 8'h00);
 			while (!dut.scsi_req && dut.scsi_bsy && g < 12000) begin @(posedge clk); g = g + 1; end
+		end
+	endtask
+
+	task select_disk;
+		integer g;
+		begin
+			reg_wr_(`W_ODR, 8'h40);               // disk at ID 6
+			reg_wr_(`W_ICR, 8'h05);               // A_DATA | A_SEL
+			g = 0;
+			while (!dut.scsi_bsy && g < 2000) begin @(posedge clk); g = g + 1; end
+			reg_wr_(`W_ICR, 8'h01);
 		end
 	endtask
 
@@ -352,6 +367,60 @@ module tb_dbg_probes;
 		ok("probe - and the build tag is stamped, not left at zero",
 		   probes.build_tag_w !== 32'h0 && probes.build_tag_w !== 32'hxxxxxxxx);
 
+		// ---- PIO3/PIO4: the write side of the instrument --------------------
+		// The 2026-08-22 wedge was an io-stall on a DISK WRITE, and this deck
+		// could not see it: no disk write counter and no disk LBA existed
+		// anywhere in it. These probes close that, so they are under test
+		// before anyone reads a capture from them.
+		//
+		// Driven by a real stalled flush: io_ack[0] is never asserted in this
+		// bench, so the WRITE's tail flush is issued and never answered --
+		// exactly the shape the probes exist to name.
+		begin : wrprobe
+			integer n;
+			img_size = 32'd8192;      // LBA 0x001234 must be IN range
+			img_mounted[0] = 1'b1;
+			@(posedge clk); @(posedge clk);
+			img_mounted[0] = 1'b0;
+			repeat (50) @(posedge clk);
+
+			// Wait for a free bus: the tests above leave the CD target holding
+			// BSY, and bus_busy blocks selection of any other target.
+			begin : idle
+				integer g;
+				g = 0;
+				while (dut.scsi_bsy && g < 40000) begin @(posedge clk); g = g + 1; end
+			end
+
+			select_disk;
+			send_cmd_byte(8'h0A);                 // WRITE(6)
+			send_cmd_byte(8'h00);
+			send_cmd_byte(8'h12);                 // LBA 0x001234
+			send_cmd_byte(8'h34);
+			send_cmd_byte(8'h01);                 // 1 block
+			send_cmd_byte(8'h00);
+			reg_wr_(`W_ICR, 8'h00);
+
+			for (n = 0; n < 512; n = n + 1) send_cmd_byte(8'h5A);
+			repeat (40) @(posedge clk);
+		end
+
+		ok("probe - PIO4 counted the disk write flush",
+		   probes.pio4_r[31:24] == 8'd1);
+		ok("probe - PIO4 shows no ack for it, which is the stall",
+		   probes.pio4_r[23:16] == 8'd0);
+		ok("probe - PIO4 shows the live disk write request asserted",
+		   probes.pio4_r[2] === 1'b1 && probes.pio4_r[1] === 1'b0);
+		ok("probe - PIO3 names the LBA the stalled flush was writing",
+		   probes.pio3_r[23:0] == 24'h001234);
+		ok("probe - PIO3 carries the write-stall age in its top byte",
+		   probes.pio3_r[31:24] === probes.wr_stuck);
+		// The disk LBA is the field that did not exist at all before; PIOS
+		// carries the CD's LBA and would have read 0 here, which is precisely
+		// how a stalled disk write used to look identical to no disk IO.
+		ok("probe - and that LBA is NOT the CD probe's, which stayed put",
+		   probes.pios_r[23:0] != 24'h001234);
+
 		$display("");
 		$display("PROBES: %0d of %0d failing", fails, tests);
 		if (fails == 0) $display("PROBE DECK GATE: PASS - the instrument measures what it claims");
@@ -360,7 +429,10 @@ module tb_dbg_probes;
 	end
 
 	initial begin
-		#20_000_000;
+		// Raised from 20ms-equivalent when the PIO3/PIO4 legs were added: those
+		// pump a full 512-byte block through the register path, which the earlier
+		// budget had no room for.
+		#60_000_000;
 		$display("FAIL: bench timeout");
 		$display("PROBE DECK GATE: FAIL");
 		$finish;

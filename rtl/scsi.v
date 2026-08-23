@@ -352,17 +352,21 @@ reg        mounted = 0;
 always @(posedge clk) begin
 	if (img_mounted) begin
 		if (|img_blocks) begin
-			// CDROM: capacity is the LAST LBA in 2048-byte logical blocks, i.e.
-			// the mounted 512-block count / 4 - 1.
+			// capacity is the LAST LBA, on both personalities: READ CAPACITY is
+			// defined to return the address of the last logical block, not the
+			// block count. CDROM counts in 2048-byte logical blocks, i.e. the
+			// mounted 512-block count / 4 - 1.
 			//
-			// NOTE the disk path deliberately still reports img_blocks, not
-			// img_blocks-1. READ CAPACITY is defined to return the last LBA, so
-			// that is a pre-existing off-by-one which the LC fixed on its disk
-			// path -- but changing it here would alter what every existing
-			// user's driver sees, and Phase 2 is meant to be purely additive.
-			// Logged in SCSI_UPGRADE_PLAN.md as a Phase 1 follow-up instead.
+			// The disk path used to report img_blocks, advertising one block
+			// MORE than the medium has. That was a knowingly deferred Phase 1
+			// follow-up, left alone on the grounds that changing it would alter
+			// what every existing driver sees. It does -- but the extra block
+			// was never actually usable: with no bounds check (added below) an
+			// access to it went to an HPS that could not service it and stalled
+			// the bus, so no existing volume can hold data there. See
+			// SCSI_UPGRADE_PLAN.md 5.7 defect A.
 			capacity <= (CDROM != 0) ? ({2'b00, img_blocks[31:2]} - 1'd1)
-			                         : img_blocks;
+			                         : (img_blocks - 1'd1);
 			if (!mounted) $display("Image mounted on target %d, size: %d", ID, img_blocks);
 			mounted <= 1;
 		end else
@@ -700,14 +704,38 @@ wire [22:0] rd_blk_total  = {7'd0, tlen};
 wire        rd_blk_remain = (rd_hps_blk < rd_blk_total);
 wire        rd_ring_space = ((rd_hps_blk - rd_cur_blk) < RING_BLOCKS);
 wire req_rd = (phase == PHASE_DATA_OUT) && cmd_read && (data_len != 32'd0) &&
-              !data_complete && rd_blk_remain && rd_ring_space;
+              !data_complete && rd_blk_remain && rd_ring_space && !cmd_aborted;
 
 // generate an io_wr signal whenever a 512 byte block has been received or when the status
 // phase of a write command has been reached.
 // data_len != 0 guard: a zero-length WRITE reaches STATUS_OUT with no data phase;
 // without the guard the STATUS_OUT clause would flush a stale sector-buffer block
 // (the previous READ's data) to the command's LBA.
-wire req_wr = ((((phase == PHASE_DATA_IN) && (data_cnt[8:0] == 0) && (data_cnt != 0)) || (phase == PHASE_STATUS_OUT)) && cmd_write && (data_len != 32'd0));
+// data_in_seen on the STATUS_OUT clause is the same guard for the other way a
+// write can reach STATUS with no data phase: being REJECTED. A WRITE refused for
+// an out-of-range LBA -- or, on a CD, refused because the medium is read-only --
+// reaches STATUS_OUT with cmd_write and data_len both still set, and flushed a
+// stale sector-buffer block to the LBA it had just declined to write. Requiring
+// that a data phase actually happened covers every rejection path at once.
+// !cmd_aborted: the tail clause above is still true after an abort -- we are
+// still in STATUS_OUT, still a write, still non-zero length -- so the flush the
+// abort just cleared would re-arm on the very next cycle, re-assert io_busy, and
+// suppress the REQ the abort needs in order to send its own status byte. An
+// aborted command must not arm any NEW HPS transaction. See the abort branch in
+// the phase FSM, and SCSI_UPGRADE_PLAN.md 5.7 defect C.
+wire req_wr = ((((phase == PHASE_DATA_IN) && (data_cnt[8:0] == 0) && (data_cnt != 0)) ||
+                ((phase == PHASE_STATUS_OUT) && data_in_seen))
+               && cmd_write && (data_len != 32'd0) && !cmd_aborted);
+
+// Did this command actually get a data-in phase? data_cnt cannot answer that:
+// it keeps counting through STATUS_OUT and MESSAGE_OUT, so it is non-zero again
+// the moment the status byte has gone out -- which is exactly when the tail
+// flush of a rejected write used to fire.
+reg data_in_seen;
+always @(posedge clk) begin
+	if((phase == PHASE_IDLE) || (phase == PHASE_CMD_IN)) data_in_seen <= 0;
+	else if(phase == PHASE_DATA_IN) data_in_seen <= 1;
+end
 
 // wr_pending lives at module scope because io_busy must include it (see there).
 reg wr_pending;
@@ -723,7 +751,11 @@ always @(posedge clk) begin
 	// resets again -- an intermittent reset/re-scan loop. It is also the Phase 0
 	// finding that these registers have no reset at all and power up as X in
 	// simulation, which made io_busy (and therefore req) X forever.
-	if(any_rst || iostall_abort) begin
+	// wdog_abort, not iostall_abort: the bus watchdog can also fire with
+	// wr_pending set (io_busy's DATA_IN clause is qualified on
+	// data_cnt[9] == sd_buff_sel, so a pending flush does not always hold it),
+	// and a stale request left over an abort poisons the next command.
+	if(any_rst || wdog_abort) begin
 		io_rd      <= 1'b0;
 		io_wr      <= 1'b0;
 		wr_pending <= 1'b0;
@@ -870,6 +902,27 @@ always @(posedge clk) begin
 	else if(stb_adv) message_sent <= 1;
 end
 
+// Has the status byte for THIS command actually been delivered? Distinct from
+// `status_sent`, which is cleared the moment the phase leaves STATUS_OUT and so
+// reads 0 again in MESSAGE_OUT. The abort path needs the sticky answer: keying
+// it on status_sent would send an abort taken in MESSAGE_OUT back to STATUS_OUT
+// to re-issue a status the initiator already has.
+reg status_done;
+always @(posedge clk) begin
+	if(phase == PHASE_IDLE) status_done <= 0;
+	else if((phase == PHASE_STATUS_OUT) && stb_adv) status_done <= 1;
+end
+
+// This command has been aborted by a watchdog. Suppresses further HPS requests
+// (see req_rd/req_wr) so the abort can get its own CHECK CONDITION out, and acts
+// as the abort path's loop guard. Registered, so it is still 0 during the FIRST
+// abort and 1 on any subsequent one.
+reg cmd_aborted;
+always @(posedge clk) begin
+	if(any_rst || (phase == PHASE_IDLE)) cmd_aborted <= 0;
+	else if(wdog_abort) cmd_aborted <= 1;
+end
+
 /* ----------------------- command decoding ------------------------------- */
 
 
@@ -994,6 +1047,34 @@ wire  cd_no_media = (CDROM != 0) && (!mounted || !toc_ready) && cd_needs_media;
 // READ HEADER in MSF form: rejected (see cd_hdr_byte).
 wire  cd_hdr_msf_rej = cmd_cd_hdr && cmd[1][1];
 
+// ----- LBA bounds ----------------------------------------------------------
+// Nothing used to compare an incoming LBA against the mounted medium. An
+// out-of-range address was latched and handed straight to the HPS, which cannot
+// service it; io_busy then holds REQ low and the target sits on the bus until
+// the io-stall watchdog fires ~516 ms later. A real drive fails the command
+// immediately with ILLEGAL REQUEST / 0x21, which is what this does.
+//
+// These read the CDB combinationally rather than the lba/tlen registers,
+// because those latch on the same edge cmd_cpl is evaluated -- at decision time
+// they still hold the PREVIOUS command's values.
+//
+// One comparison covers both personalities: on the CD path `capacity` and the
+// CDB address are both in 2048-byte logical blocks (the <<2 to 512-byte HPS
+// sectors happens at latch time), and on the disk path both are 512-byte
+// sectors.
+wire [31:0] cdb_lba  = cmd6_cpl ? {11'd0, lba6} : lba10;
+wire [16:0] cdb_blks = cmd6_cpl ? {8'd0, tlen6} : {1'b0, tlen10};
+// One PAST the last block addressed. Widened to 33 bits before the add: the
+// length can be 65535, so a 32-bit sum would wrap and a wildly out-of-range LBA
+// would test as valid.
+wire [32:0] cdb_end  = {1'b0, cdb_lba} + {16'd0, cdb_blks};
+// cdb_blks != 0: a zero-length transfer moves no data and is legal, not an error.
+// The test is on the END, not the start -- a transfer that begins in range and
+// runs off the end is equally out of range, and checking only the start would
+// stall on the last sector instead of refusing the command.
+wire  lba_out_of_range = (cmd_read || cmd_write) && mounted && (cdb_blks != 0) &&
+                         (cdb_end > ({1'b0, capacity} + 33'd1));
+
 // ----- REQUEST SENSE state -------------------------------------------------
 // Key/ASC latched when a command CHECKs, cleared by the next successful
 // non-REQUEST-SENSE command (SCSI-1 semantics: sense persists until the next
@@ -1034,6 +1115,9 @@ always @(posedge clk) begin
 		end else if (cd_no_media) begin
 			sense_key <= cd_nomedia_key;
 			sense_asc <= cd_nomedia_asc;
+		end else if (lba_out_of_range) begin
+			sense_key <= 4'h5;  // ILLEGAL REQUEST
+			sense_asc <= 8'h21; // logical block address out of range
 		end else if (cd_hdr_msf_rej) begin
 			sense_key <= 4'h5;  // ILLEGAL REQUEST
 			sense_asc <= 8'h24; // invalid field in CDB
@@ -1165,8 +1249,21 @@ always @(posedge clk) begin
 	if(any_rst) begin
 		phase <= PHASE_IDLE;
 	end else if (wdog_abort) begin
-		// Give up and release the bus rather than wedge it.
-		if ((phase == PHASE_STATUS_OUT) || (phase == PHASE_MESSAGE_OUT))
+		// Give up and release the bus rather than wedge it -- but not before
+		// telling the initiator, if it has not been told yet.
+		//
+		// This used to key on the phase, treating "in STATUS_OUT" as "status
+		// already sent". That is false for a WRITE: req_wr's tail clause issues
+		// the last partial-sector flush AT PHASE_STATUS_OUT, so a stalled write
+		// aborts while already in STATUS_OUT with the status byte still
+		// undelivered -- and the target dropped BSY with no status and no
+		// COMMAND COMPLETE, leaving the driver polling for a completion that
+		// could never arrive. That is the 2026-08-22 soak wedge; see
+		// SCSI_UPGRADE_PLAN.md 5.7 defect C.
+		//
+		// cmd_aborted is the loop guard: one attempt to report the error, then
+		// release. A target must never be able to hold BSY indefinitely.
+		if (status_done || cmd_aborted)
 			phase <= PHASE_IDLE;
 		else begin
 			status <= `STATUS_CHECK_CONDITION;
@@ -1193,7 +1290,7 @@ always @(posedge clk) begin
 				// is this a supported and valid command?
 				// (CDROM: media-dependent commands CHECK with the no-disc sense
 				// while unmounted, and a prevent-blocked EJECT CHECKs too.)
-				if(cmd_ok && !cd_no_media && !cd_hdr_msf_rej) begin
+				if(cmd_ok && !cd_no_media && !cd_hdr_msf_rej && !lba_out_of_range) begin
 					// yes, continue
 					status <= (cmd_cd_eject_any && cd_prevent) ? `STATUS_CHECK_CONDITION : `STATUS_OK;
 

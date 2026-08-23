@@ -1017,7 +1017,10 @@ dbg_probes dbg_probes_inst
 	.cd_io_ack  ( sd_ack[4]               ),
 	.cd_io_lba  ( scsi_sd_lba[SCSI_CD_DEV]),
 	.d0_io_rd   ( scsi_sd_rd[0]           ),
+	.d0_io_wr   ( scsi_sd_wr[0]           ),
 	.d0_io_ack  ( sd_ack[0]               ),
+	.d0_io_lba  ( scsi_sd_lba[0]          ),
+	.d1_io_wr   ( scsi_sd_wr[1]           ),
 	.scsi_dbg   ( scsi_dbg                )
 );
 `endif

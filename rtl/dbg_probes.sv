@@ -26,6 +26,8 @@
 //   PODR  last four bytes written to the data register -- the CDB tail
 //   PIOS  {rd_stuck, cd_io_lba} -- is an HPS fetch stalled, and for which LBA?
 //   PIO2  CD/disk io_rd vs io_ack counts + live handshake bits
+//   PIO3  {wr_stuck, d0_io_lba} -- the WRITE-side twin of PIOS
+//   PIO4  disk write/ack counts + live write handshake bits
 //   PRG0-3  ring of the last 8 SCSI register accesses -- the CONVERSATION,
 //           not just its last line
 //   PDMA  the discriminating word: DACK reads since the arm, watchdog fire
@@ -54,7 +56,10 @@ module dbg_probes (
 	input  wire        cd_io_ack,
 	input  wire [31:0] cd_io_lba,
 	input  wire        d0_io_rd,
+	input  wire        d0_io_wr,
 	input  wire        d0_io_ack,
+	input  wire [31:0] d0_io_lba,
+	input  wire        d1_io_wr,
 
 	// Raw 5380 state, tapped in rtl/ncr5380.sv. Bit assignments are defined
 	// there; all counting, epochs and sticky logic live here.
@@ -395,18 +400,59 @@ module dbg_probes (
 		end
 	end
 
-	reg [7:0] cd_rd_cnt, cd_ack_cnt, d0_rd_cnt;
+	// ---- PIO3 / PIO4: the WRITE-side twin of the above ---------------------
+	// The 2026-08-22 wedge was an io-stall on a DISK WRITE, and this deck could
+	// not see it: PIO2 carried d0_rd_cnt only and PIOS carried cd_io_lba only,
+	// so there was no disk write counter and no disk LBA anywhere. A capture of
+	// that failure could show the machine was wedged but not on which block, in
+	// which direction, or how far the write stream had got. Closing that needed
+	// a recompile, which is why it is being done in the same build as the fixes
+	// for the defects it is meant to observe.
+	//
+	// wr_stuck mirrors rd_stuck exactly: it saturates while d0_io_wr stays
+	// continuously asserted, so a saturated value with wr_cnt > ack_cnt is a
+	// flush the HPS never answered.
+	reg  [7:0] wr_stuck;
+	reg        d0_wr_d, d0_ack_d, d1_wr_d;
+	reg [15:0] wstuck_div;
+	always @(posedge clk) begin
+		d0_wr_d  <= d0_io_wr;
+		d0_ack_d <= d0_io_ack;
+		d1_wr_d  <= d1_io_wr;
+		if (!d0_io_wr) begin
+			wr_stuck   <= 8'd0;
+			wstuck_div <= 16'd0;
+		end else begin
+			wstuck_div <= wstuck_div + 16'd1;
+			if (&wstuck_div && ~&wr_stuck) wr_stuck <= wr_stuck + 8'd1;
+		end
+	end
+
+	// Initialised: these only ever increment, so without a power-up value they
+	// are X forever in simulation and every count the deck reports is X --
+	// the same no-reset shape as the Phase 0 io_rd/io_wr finding. Altera
+	// fabric powers up at 0, so this matches the hardware it already had.
+	reg [7:0] cd_rd_cnt = 8'd0, cd_ack_cnt = 8'd0, d0_rd_cnt = 8'd0;
+	reg [7:0] d0_wr_cnt = 8'd0, d0_ack_cnt = 8'd0, d1_wr_cnt = 8'd0;
 	always @(posedge clk) begin
 		if (~cd_rd_d  &  cd_io_rd)  cd_rd_cnt  <= cd_rd_cnt  + 8'd1;
 		if (~cd_ack_d &  cd_io_ack) cd_ack_cnt <= cd_ack_cnt + 8'd1;
 		if (~d0_rd_d  &  d0_io_rd)  d0_rd_cnt  <= d0_rd_cnt  + 8'd1;
+		if (~d0_wr_d  &  d0_io_wr)  d0_wr_cnt  <= d0_wr_cnt  + 8'd1;
+		// d0_io_ack is shared by reads and flushes on that slot, so this is the
+		// COMBINED ack count -- compare it against d0_rd_cnt + d0_wr_cnt.
+		if (~d0_ack_d &  d0_io_ack) d0_ack_cnt <= d0_ack_cnt + 8'd1;
+		if (~d1_wr_d  &  d1_io_wr)  d1_wr_cnt  <= d1_wr_cnt  + 8'd1;
 	end
 
-	reg [31:0] pios_r, pio2_r;
+	reg [31:0] pios_r, pio2_r, pio3_r, pio4_r;
 	always @(posedge clk) begin
 		pios_r <= {rd_stuck, cd_io_lba[23:0]};
 		pio2_r <= {cd_rd_cnt, cd_ack_cnt, d0_rd_cnt,
 		           3'd0, cd_io_rd, cd_io_wr, cd_io_ack, d0_io_rd, d0_io_ack};
+		pio3_r <= {wr_stuck, d0_io_lba[23:0]};
+		pio4_r <= {d0_wr_cnt, d0_ack_cnt, d1_wr_cnt,
+		           5'd0, d0_io_wr, d0_io_ack, d1_io_wr};
 	end
 
 	// ---- which bitstream is this? -----------------------------------------
@@ -474,6 +520,16 @@ module dbg_probes (
 		.instance_id ("PIO2"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
 	) cp_pio2 (.probe(pio2_r), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	altsource_probe #(
+		.instance_id ("PIO3"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_pio3 (.probe(pio3_r), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	altsource_probe #(
+		.instance_id ("PIO4"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_pio4 (.probe(pio4_r), .source(), .source_clk(clk), .source_ena(1'b1));
 
 	altsource_probe #(
 		.instance_id ("PDMA"), .probe_width (32), .source_width (1),
