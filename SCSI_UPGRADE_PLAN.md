@@ -2199,3 +2199,75 @@ Two lessons already paid for:
 * **Line-buffer any long capture.** The first 10-minute run was killed for a
   faster iteration and lost everything: Tcl had flushed nothing, and both the
   log and the task output were zero bytes.
+
+### The pre-fix A/B: Test Disk FAILS on the old core (2026-08-24)
+
+The experiment logged above as "the cheapest remaining way to turn this
+inference into a measurement" was run the same day, and it landed better than
+the prediction. The prediction was a HANG. What actually happens is a clean,
+reported failure.
+
+| build | Test Disk on the same blank 20 MiB disk |
+|---|---|
+| `MacPlus_432955e3_clean.rbf` (pre-fix) | **FAILS** -- "Problems writing data to disk" |
+| `MacPlus_ea4167b2_scsifix.rbf` (fixed)  | **PASSES**, three runs out of three |
+
+**This is a true single-variable A/B.** Everything that changed between
+`432955e` and `7dbc965` (the direct parent of the fix commit) is documentation
+and scripts -- `git diff --stat 432955e 7dbc965` touches only
+`SCSI_UPGRADE_PLAN.md`, `scripts/archive_build.ps1` and
+`scripts/read_probes.tcl`. Zero RTL. So the four fixes are the only difference
+in logic between the two bitstreams.
+
+**Why it fails, confirmed in the pre-fix RTL itself.** At `432955e`,
+`capacity <= img_blocks` on the disk path -- reporting 40,960 as the LAST LBA of
+an image whose blocks are 0..40,959 -- and `lba_out_of_range` does not appear in
+that file at all. The driver was told block 40,960 exists, Test Disk wrote to
+it, and the write went to a block that is not there.
+
+**This is defect A's consequence observed directly, for the first time.** Until
+now A rested on partition-map arithmetic: an inference about what *would* have
+gone wrong, reasoned from the on-disk layout of an 80MB init. Now there is the
+failure itself, and the fix clearing it.
+
+#### Test Disk WRITES
+
+The error message says so, and it corrects an assumption made twice in this
+document -- that Test Disk is a read-only verify. It is not. That upgrades the
+three passing post-fix runs: they exercised the **write** path at the boundary,
+not merely reads, which gives defects C and D better boundary coverage than
+they were credited with.
+
+It also means Test Disk is not safe to run casually on a volume holding data.
+Both runs here were on a blank disk, which is the only reason this was free.
+
+#### CORRECTION: the "stalled the bus" mechanism is wrong
+
+`scsi.v` carried, inside the defect A safety argument, the claim that with no
+bounds check "an access to it went to an HPS that could not service it and
+stalled the bus". That claim is **not what happens**, and it was load-bearing:
+it was the stated reason the extra block was never usable, and therefore the
+reason it was judged safe to change what every existing driver sees.
+
+Measured: the pre-fix core reports the write error to the driver and **the Mac
+carries on working normally**. No stall, no wedge, no reset needed. The
+*conclusion* survives untouched -- the block is genuinely not usable, writes to
+it fail -- but the mechanism was invented rather than observed. The comment at
+`scsi.v:360` has been corrected in place.
+
+**Not overclaimed:** only the WRITE path past the end was characterised here.
+Reads past the end were not, and the 2026-08-22 wedge was a different path
+entirely (the CD/DMA seam). This says the stall claim is unsupported for this
+case, not that no stall can ever occur.
+
+#### What is now measured rather than argued
+
+* **Defect A** -- pre-fix Test Disk fails, post-fix it passes. Direct.
+* **Defect B**, accept direction -- LBA 40,959 addressed and not refused, three
+  runs. Direct.
+* **Defect B**, reject direction -- still inferred. The pre-fix run does not
+  isolate it, because pre-fix BOTH A and B are absent: the failure is fully
+  explained by A's off-by-one without needing the missing bounds check. The
+  probe cannot separate them either, since `PIO3` shows what was asked for and
+  not what was serviced.
+* **Defect C** -- unchanged, still fixed-by-argument.

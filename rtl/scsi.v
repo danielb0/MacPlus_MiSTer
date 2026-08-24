@@ -361,10 +361,20 @@ always @(posedge clk) begin
 			// MORE than the medium has. That was a knowingly deferred Phase 1
 			// follow-up, left alone on the grounds that changing it would alter
 			// what every existing driver sees. It does -- but the extra block
-			// was never actually usable: with no bounds check (added below) an
-			// access to it went to an HPS that could not service it and stalled
-			// the bus, so no existing volume can hold data there. See
-			// SCSI_UPGRADE_PLAN.md 5.7 defect A.
+			// was never actually usable, so no existing volume can hold data
+			// there.
+			//
+			// MEASURED 2026-08-24, and NOT by the mechanism this comment used
+			// to claim. It said such an access "stalled the bus" via an HPS
+			// that could not service it. It does not: on the pre-fix build
+			// 432955e3, HD SC Setup's Test Disk on a 40,960-block image FAILS
+			// with "Problems writing data to disk" and the Mac carries on
+			// working normally. The driver was told block 40,960 exists, wrote
+			// to it, and got an error back -- no stall, no wedge. The
+			// conclusion stands (the block is not usable); the mechanism was
+			// wrong. The same test passes on this build. Reads past the end
+			// were not separately characterised, so this says nothing about
+			// them. See SCSI_UPGRADE_PLAN.md 5.7 defect A.
 			capacity <= (CDROM != 0) ? ({2'b00, img_blocks[31:2]} - 1'd1)
 			                         : (img_blocks - 1'd1);
 			if (!mounted) $display("Image mounted on target %d, size: %d", ID, img_blocks);
