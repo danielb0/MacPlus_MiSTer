@@ -2130,3 +2130,72 @@ pruned entirely.
 * All four are `scsi.v`-local; the CD personality shares the bounds check and
   the abort path, so the CD gate is a real regression check, not a formality --
   `cd36` fails against the pre-fix RTL, which is how we know it is one.
+
+### Defect B CONFIRMED ON HARDWARE — 2026-08-24
+
+The last of the four defects to rest on simulation alone is now closed. Build
+`ea4167b2` (read back from `PBLD`, not inferred), blank 20 MiB disk on SCSI ID 6
+(`d0`, the only slot with an LBA probe), boot volume on ID 5, initialised with
+Apple HD SC Setup 7.3.5. **HD SC Setup's Test Disk was run three times and
+passed every time**, with `scripts/watch_lba.tcl` tracing `PIO3` throughout.
+
+20 MiB = 20,971,520 B = **40,960 blocks, last LBA 40,959**. Confirming the
+arithmetic at `scsi.v:1076`: a 1-block read at 40,959 gives `cdb_end` = 40,960,
+and `40,960 > capacity+1 = 40,960` is false, so it is ALLOWED; at 40,960 the end
+is 40,961 and it is REFUSED. The boundary is exactly right.
+
+#### Correction: Test Disk is not a surface scan
+
+The plan called Test Disk "the one ordinary operation that addresses the final
+LBA". The conclusion was right; the description was wrong, and the wrong
+description nearly caused the result to be discarded. Test Disk completes in
+**under a second** on 20 MiB — three orders of magnitude too fast to read the
+medium — and that speed was twice read as "it cannot have covered anything".
+It does two things, identically on all three runs:
+
+1. **A capacity boundary probe:** `0 -> 768 -> 0 -> 33024 -> 65536 -> 40959 ->
+   40960 -> 40959 -> 40960`. It walks out past the end (65,536 on a
+   40,960-block device), then alternates the **last valid block against the
+   first invalid one**. This is the defect B boundary, hit deliberately by a
+   real Apple driver.
+2. **A strided spot check:** 80 reads at `0, 512, 1024, … 40448`. It stops at
+   40,448 because the next stride would land on 40,960, past the end.
+
+So the medium's end is reached by the capacity probe, not by the scan. **Filling
+the volume still does not reach it** — that part of the plan stands, and the
+`Apple_Free` tail reasoning behind it is unchanged.
+
+#### What is proven, and what is inferred
+
+**Proven.** The driver requests LBA 40,959 and Test Disk passes. B does not
+falsely reject the last good block — the dangerous direction, and the only one
+a healthy driver can exercise. The alternating 40,959/40,960 pattern is itself
+evidence the two are being told apart: a driver getting the same answer to both
+has no reason to repeat the pair.
+
+**Inferred, not proven.** That the out-of-range requests were refused *by the
+bounds check*. `PIO3` is `assign io_lba = lba` (`scsi.v:693`) — the latched CDB
+address, not a gated request — while the data phase is entered only
+`if(cmd_ok && … && !lba_out_of_range)` (`scsi.v:1293`). **The probe therefore
+shows what the driver ASKED for, never what was serviced**, and seeing 40,960
+is not evidence a transfer happened. The support is indirect: six out-of-range
+requests across three runs, no wedge, `wr_stuck` 0 throughout. Per `scsi.v:363`,
+before the bounds check such an access "went to an HPS that could not service it
+and stalled the bus" — so the prediction is that **this same Test Disk run would
+have hung the pre-fix core.** Untested, and it is the cheapest remaining way to
+turn this inference into a measurement.
+
+#### New tool: `scripts/watch_lba.tcl`
+
+`read_probes.tcl` decodes all 18 probes per sample and is far too slow to chase
+a moving LBA. The new script reads `PIO3` alone at **~2,660 samples/s** and
+records every CHANGE with the sample count it was held for. That trace is what
+made the two phases legible; a high-water mark alone would have reported
+`max=65536` and shown neither the boundary alternation nor the stride.
+
+Two lessons already paid for:
+* **Record the trace, not the maximum.** A max cannot distinguish "swept the
+  medium" from "touched four blocks, one of them high".
+* **Line-buffer any long capture.** The first 10-minute run was killed for a
+  faster iteration and lost everything: Tcl had flushed nothing, and both the
+  log and the task output were zero bytes.
