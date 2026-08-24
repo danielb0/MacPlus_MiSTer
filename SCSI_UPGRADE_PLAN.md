@@ -2418,3 +2418,44 @@ case, not that no stall can ever occur.
   probe cannot separate them either, since `PIO3` shows what was asked for and
   not what was serviced.
 * **Defect C** -- unchanged, still fixed-by-argument.
+
+### Scope note: everything here was validated in PLUS mode only
+
+Confirmed with the user 2026-08-24. Every hardware result in this document --
+the Phase 1/2 bring-up, the CD work, the soaks, and all four defect
+confirmations -- was obtained with the OSD `Model` option set to **Plus**
+(`status[9]` = 0, the default).
+
+**The core's SCSI path is model-independent**, so this is a gap in coverage, not
+a suspicion. Verified: `machineType`/`status_mod` appear **nowhere** in
+`scsi.v`, `ncr5380.sv` or `dbg_probes.sv`; `status_mod` is used in only three
+places in `MacPlus.sv` (`configROMSize`, `machineType`, the ROM address bit),
+none of which touch the SCSI wiring; and `selectSCSI` at `$58 0000` decodes
+identically in both models (`addrDecoder.v:123-127`), unlike the IWM and the
+`$40 0000` region. The whole simulation ladder is unaffected by definition --
+those benches drive the modules directly, with no top level and no ROM.
+
+**What is not covered is the initiator.** The SE runs a different ROM with a
+different, later SCSI Manager. Our conformance work has been exercised by the
+Plus ROM and the drivers on the test volumes, and by nothing else.
+
+**Worth doing as an opportunity rather than a chore.** A second independent
+initiator is exactly what conformance work wants and we do not otherwise have.
+The SE's SCSI Manager may issue commands the Plus ROM never does, prefer 10-byte
+CDBs where the Plus uses 6-byte, or request MODE SENSE pages we stub. Any of
+those is a real finding for one OSD toggle and a reset. Note `status_mod` is
+latched inside the reset counter (`MacPlus.sv:125`), so the switch only takes
+effect on a reset, and the SE ROM (`boot1.rom`) must be present.
+
+**One place to look first if SE mode ever misbehaves with the target.**
+`addrDecoder.v:119`:
+
+```
+if(configROMSize[1] || address[17] == 1'b0)   // <- this detects SCSI (on Plus)!!!
+```
+
+In `$40 0000-$4F FFFF` the Plus returns ROM only when A17 is low; the SE returns
+ROM across the whole range. The source's own comment ties that to SCSI
+detection. **The mechanism it refers to is not understood** -- recorded as an
+open question rather than explained, because guessing at it would be worse than
+admitting it. It is the only model difference found anywhere near SCSI.
