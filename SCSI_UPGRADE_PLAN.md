@@ -508,12 +508,159 @@ be mixed in as true stereo. That removes the main reason to compromise on the
 mixer design, and it makes the signedness question below MORE important, not
 less: a mono error is a volume error, a stereo error is an image error.
 
-**Blocking investigation before this phase:** our audio output is
-`assign AUDIO_L = {audio[10:0], 5'b00000}` with `AUDIO_S = 1` (signed)
-(`MacPlus.sv:228-231`). If `audio` is an unsigned 0..2047 value, placing it in a
-signed 16-bit field makes everything above 1024 read as *negative*. That is either a
-pre-existing bug or `audio` is already centred — determine which before building a
-mixer on top of it, because a stereo signed mix will expose the difference loudly.
+#### RESOLVED (2026-08-24): the signedness question was a false alarm
+
+This section used to carry a blocking investigation: whether
+`assign AUDIO_L = {audio[10:0], 5'b00000}` with `AUDIO_S = 1` was placing an
+unsigned 0..2047 value in a signed field, making everything above 1024 read as
+negative. **It is not. `audio` is already signed and centred**, and no fix is
+needed.
+
+The proof is `dataController_top.sv:162`:
+
+```
+audio_prebuf <= memoryDataIn[15:8] - 8'd128;
+```
+
+The Mac's sound buffer holds unsigned 0..255 samples; that subtraction converts
+them to two's complement -128..+127. The volume stage
+(`dataController_top.sv:136`) is an explicit `$signed` product yielding
+-896..+889 in 11 bits. So the concatenation is an 11-bit signed value scaled x32
+into 16 bits: **-28,672 .. +28,448**, correctly inside int16. `AUDIO_S = 1` is
+right.
+
+#### The REAL blocker: the disabled-state level is SIGNAL, not an offset
+
+`dataController_top.sv:171`:
+
+```
+wire [7:0] audio_latch = snd_ena ? 8'h7f : audio_sample;
+```
+
+`snd_ena` is the raw /SNDENB pin level, so **1 means sound DISABLED** despite
+the name. Disabled emits `8'h7f` = +127 -- near full-scale positive in this
+signed domain, not silence. After volume and the x32 shift that is up to
+**+28,448**, i.e. 87% of positive full scale.
+
+**Do NOT "fix" this to `8'h00`.** It is deliberate, it is correct, and the
+reasoning is invisible in the source. From the PR #12 discussion
+(darylrichards, 2024-08-27/28; the change was `8'h00` -> `8'h7f`):
+
+> The original sound hardware was PWM TTL, so the output was only ever zero or
+> one. **Many programs ignored the PWM aspect and just drove the enable pin on
+> and off to produce sound.** When the original hardware disabled the sound it
+> went to a TTL '1'. Driving the analog value high when disabled emulates this
+> properly, and produces sound in all the software that doesn't have sound now.
+
+That is bug #7, with forum confirmation. sorgelig raised the obvious modern-
+hardware objection -- "driving to 0 while muted is more friendly... setting to 1
+may produce pops/clicks" -- and it was answered on authenticity grounds. So for
+an entire class of software **the swing between buffer content and +127 IS the
+waveform**. Zeroing it re-silences all of them.
+
+Recorded here because the source gives no hint, and this analysis independently
+proposed changing it to `8'h00` before the PR history was consulted.
+
+#### Why that blocks the mixer
+
+Two cases that must be told apart:
+
+* Sound disabled **and staying disabled** -- a Mac idling, which is exactly when
+  a user plays a CD -- parks the channel at a constant +28,448 at volume 7.
+* Software **toggling** enable at audio rates: the same level is signal and must
+  pass through untouched.
+
+**A sustained level is inaudible DC; a toggling one is music.** Mixing full-scale
+CD audio onto a +28,448 pedestal saturates every positive half-cycle: half-wave
+clipping on all CD playback. And it cannot be left to MiSTer's downstream audio
+path, because the clipping happens in **our** sum before `sys_top` sees it.
+
+#### Proposed fix: emulate the AC coupling the real hardware has
+
+The Mac's speaker is capacitively coupled. A constant TTL '1' makes no sound on
+a real Plus *because the capacitor blocks it*. Our core omits that coupling, so
+a DC level that was never audible on real hardware survives into a digital sum
+where it costs 87% of the headroom. Restoring it is period-accurate rather than
+a workaround, and it separates the two cases above the way the hardware did.
+
+One-pole DC blocker, `y[n] = x[n] - x[n-1] + a*y[n-1]` with `a = 1 - 2^-K`:
+
+```
+// Sketch -- NOT yet built or simulated.
+// x = the existing {audio[10:0], 5'b00000}, 16-bit signed.
+// Internal width 18 bits: the step response can transiently exceed |x|.
+reg signed [17:0] dcb_y;
+reg signed [15:0] dcb_x1;
+always @(posedge clk32) if (aud_ce) begin
+    dcb_y  <= $signed({{2{x[15]}}, x}) - $signed({{2{dcb_x1[15]}}, dcb_x1})
+              + dcb_y - (dcb_y >>> K);
+    dcb_x1 <= x;
+end
+```
+
+Corner and decay, taking the filter rate as the 48 kHz `sys/audio_out` pickup
+(`fc ~= fs / (2*pi*2^K)`, time constant `2^K / fs`):
+
+| K | corner | time constant | droop across a 5 ms half-cycle |
+|---|---|---|---|
+| 9  | 14.9 Hz | 11 ms | ~37% |
+| 10 | 7.5 Hz  | 21 ms | ~21% |
+| 11 | 3.7 Hz  | 43 ms | ~11% |
+
+**Start at K=11** and make K a parameter. It kills the pedestal within ~0.2 s
+while leaving enable-toggled square waves nearly untilted. Some droop on very
+low-frequency toggling is expected and is what real AC coupling does too.
+
+**Three things to get right, none of them obvious:**
+
+1. **`>>>` on a negative number rounds toward -inf**, so the feedback term
+   itself injects a small negative DC and the filter settles a little below zero
+   rather than exactly at it. Either add a rounding constant or accept ~1 LSB.
+   This is the classic DC-blocker foot-gun and it is self-defeating if missed.
+2. **Pick the filter's sample rate deliberately.** `snd_ena` is combinational,
+   so the toggle path has no inherent rate limit; the existing output is
+   whatever `sys_top` samples at 48 kHz. Filtering at the Mac's ~22 kHz
+   `snd_advance` tick would undersample the toggle waveform.
+3. **Verify against the toggle-based software specifically**, not just the
+   startup chime. The chime is buffer audio and already centred, so it exercises
+   none of this. The titles named in bug #7 are the regression set.
+
+**Conservative alternative**, if the DC blocker proves too invasive to a working
+path: attenuate the Mac channel only while the CD is actually playing. Nothing
+changes with no disc -- bit-identical, matching MacLC's exact-zeros property --
+at the cost of an audible volume step when playback starts and stops.
+
+#### The mixer itself is a straight port from MacLC
+
+`MacLC.sv:687` sign-extends each source to 18 bits, sums, and saturates:
+
+```
+wire signed [17:0] audio_mix_l = {{2{asc_sample_l[15]}}, asc_sample_l}
+                               + {{2{cd_snd_l[15]}}, cd_snd_l};
+assign AUDIO_L = (audio_mix_l > 18'sd32767) ? 16'sd32767 :
+                 (audio_mix_l < -18'sd32768) ? -16'sd32768 : audio_mix_l[15:0];
+```
+
+Full gain, saturating. `cd_snd_*` are **exact zeros** when the drive is not
+playing, so the mix is bit-identical with no disc -- worth preserving here, since
+it makes the whole feature a no-op for period purists. MacLC's own comment
+records that they tried half-gain first and it drew a "CD sounds half as loud"
+report; the real LC sums drive line-out with the DAC at unity. Inherit that
+posture. With the pedestal handled, the only residual saturation is Mac and CD
+both near full scale at once, which is rare and is what MacLC accepts.
+
+#### The integration risk is the HPS channel, not the mixer
+
+`cd_audio.sv` carries its own `ca_io_rd` / `ca_io_lba` / `ca_io_active` -- it
+fetches audio sectors itself and arbitrates for the channel. **All five hps_io
+slots are already spoken for** on this core: 0/1 the SCSI disks, 2/3 the
+floppies, 4 the CD (`MacPlus.sv:174-179`). So the audio engine has to share
+slot 4 with the SCSI CD target.
+
+A shared request/ack window between two engines on one channel is the same shape
+of seam as the 2026-08-22 wedge, which cost days. **It needs a seam test before
+it reaches hardware**, not after. That is the real cost of this phase; the mixer
+is an afternoon.
 
 ---
 
