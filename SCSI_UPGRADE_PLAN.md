@@ -2484,3 +2484,75 @@ ROM across the whole range. The source's own comment ties that to SCSI
 detection. **The mechanism it refers to is not understood** -- recorded as an
 open question rather than explained, because guessing at it would be worse than
 admitting it. It is the only model difference found anywhere near SCSI.
+
+---
+
+## RELEASE BLOCKER: SCSI has no back-pressure to the CPU bus
+
+**Raised and deferred 2026-08-24. This must be resolved BEFORE any release.**
+Not before the next hardware test, not before a merge -- before users get it.
+"We can't release a core that will corrupt people's disks" (user).
+
+### The mechanism, verified not assumed
+
+`_cpuDTACK` (`MacPlus.sv:415`) is a pure function of `cpuAddr`, `_cpuAS` and
+`turbo_dtack_en`. **Nothing from `scsi.v` or `ncr5380.sv` feeds it** -- there is
+no `dtack` anywhere in either file. So unlike real hardware, where the SCSI
+pseudo-DMA path asserts `/DTACK` only when a byte is actually ready, this core
+gives the target **no way to stall the CPU**.
+
+On a DACK read the CPU takes `cur_data` -- whatever the target is currently
+offering (`ncr5380.sv:159`) -- and nothing stops it reading again immediately.
+All pacing of the pDMA byte stream therefore comes from the driver polling DRQ,
+or from timing that happens to work out.
+
+**The failure mode this creates is silent corruption, not a hang.** A wedge is
+safe for user data; a dropped or duplicated byte inside a sector write is not.
+That is the whole reason this is a blocker rather than a curiosity.
+
+### Why it is not already a demonstrated bug
+
+At 8 MHz / 68000 it is empirically fine, and that is well evidenced: the soaks,
+the byte-exact volume integrity checks, `HD20.vhd`'s 8,806 alloc blocks
+agreeing exactly with its MDB after heavy writing. So either the driver polls
+DRQ per byte and is genuinely self-pacing, or the timing works out. **We do not
+know which**, and that is the gap.
+
+At 16 MHz the CPU issues DACK cycles twice as fast into a path with no
+interlock. Untested. The 08-22 evidence cuts both ways: the driver waited
+forever when `io_busy` held REQ low, which implies real DRQ polling and
+therefore speed-independence -- but those same notes record the Plus driver
+using tight DACK loops, and a burst inside a sector is exactly where an
+interlock would be needed and is absent.
+
+### Three ways to resolve it, in rough order of appeal
+
+1. **Add the missing interlock.** Let the target hold DTACK during a DACK
+   access until the byte is genuinely ready. This is what real hardware does,
+   so it is period-accurate as well as safe, and it would remove the entire
+   class of risk at any clock. It touches the CPU bus path, so it is the most
+   invasive and needs the seam bench first.
+2. **Validate and document.** Run the bitmap-vs-MDB cross-check after a 16 MHz
+   write soak (see the technique and its unmounted-capture precondition
+   elsewhere in this document). If it comes back clean over a real payload,
+   the risk is bounded empirically -- the same standard 8 MHz is held to.
+3. **Refuse the combination.** If it cannot be made safe, block or warn on SCSI
+   writes at 16 MHz rather than shipping a selectable option that eats
+   volumes. Authenticity already says 16 MHz is a fantasy machine and low
+   priority; that argues against spending effort making it *work*, not for
+   letting it destroy data quietly.
+
+**Note that 1 and 3 are not in tension with the authenticity scoping.** The
+scoping decision is about where to spend effort, not about whether a shipped
+option may lose data.
+
+### Testing it is cheap and safe if set up right
+
+Copy the images first -- the .vhd files on the PC may be the only copies, since
+the live ones are on the SD card. Then: boot a throwaway image at 16 MHz, write
+a real payload, **shut down cleanly** so the MDB and catalog flush, capture, and
+cross-check. `drAtrb` bit 8 set confirms the unmount; the bitmap popcount then
+either agrees with `drNmAlBlks - drFreeBks` or it does not.
+
+That also probes the 8 MHz question, which is the more valuable half: it tells
+us whether the driver is genuinely self-pacing or whether we have been lucky.
