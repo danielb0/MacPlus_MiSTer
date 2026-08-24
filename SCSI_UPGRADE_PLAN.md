@@ -2439,6 +2439,31 @@ those benches drive the modules directly, with no top level and no ROM.
 different, later SCSI Manager. Our conformance work has been exercised by the
 Plus ROM and the drivers on the test volumes, and by nothing else.
 
+#### Which configurations actually matter (user, 2026-08-24)
+
+**Only two are real machines: Plus / 68000 / 8 MHz, and SE / 68000 / 8 MHz.**
+Every other combination -- 68010, 68020, 16 MHz -- is, in the user's words, a
+"fantasy computer": no such Macintosh existed. They are explicitly **lower
+priority, and a limitation there is acceptable.** This follows the same rule the
+rest of this project uses: classify by what real hardware did before scoping
+work against it.
+
+That settles the coverage question raised below rather than leaving it open.
+`Plus / 68000 / 8 MHz` is the configuration everything so far was validated in;
+`SE / 68000 / 8 MHz` is the one remaining configuration that deserves the same
+standard. The others do not.
+
+**SE mode boots (user, 2026-08-24).** A smoke observation only -- "it boots, but
+that's it" -- NOT a test. It does establish that the SE ROM path, ADB keyboard
+and the different overlay/decode arrangement are not obviously broken, which is
+more than was known an hour earlier. What it does NOT establish is anything
+about the SE's SCSI Manager as an initiator, which is the part worth having.
+
+**One data point on the turbo path:** the floppy write work does function at
+16 MHz (user, 2026-08-24). That is not SCSI, and the turbo DTACK special case at
+`MacPlus.sv:410-415` is specifically about I/O accesses, so it does not transfer
+-- but it does mean 16 MHz is not simply broken.
+
 **Worth doing as an opportunity rather than a chore.** A second independent
 initiator is exactly what conformance work wants and we do not otherwise have.
 The SE's SCSI Manager may issue commands the Plus ROM never does, prefer 10-byte
