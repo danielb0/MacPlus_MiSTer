@@ -64,12 +64,17 @@ localparam CONF_STR = {
 	"SC0,IMGVHD,Mount SCSI-6;",
 	"SC1,IMGVHD,Mount SCSI-5;",
 	"-;",
-	// CD-ROM (SCSI ID 3). ISO only for now: the TOC is a synthesized single
-	// data track, so 2352-byte .bin and text .cue would be served wrong rather
-	// than merely incompletely (SCSI_UPGRADE_PLAN.md Phase 2).
+	// CD-ROM (SCSI ID 3). CUE/BIN/CHD/TOAST are translated host-side by
+	// Main_MiSTer's support/mac into a flat 2048-byte-sector view of the data
+	// track, so the core still sees plain 2048 sectors and Phase 2's
+	// synthesized single-data-track TOC stays consistent with what the guest
+	// is shown. Audio tracks are hidden from that view; playing them is
+	// Phase 3B/3C (SCSI_UPGRADE_PLAN.md Phase 3A).
+	// Extension list is MacLC.sv:81 verbatim - the host-side translation is
+	// keyed off the file, not the core, so the lists must agree.
 	// No conditional-visibility prefix here - MacLC_MiSTer declares its
 	// equivalent slot plainly, and an `h` prefix hid the item outright.
-	"SC4,ISO,Mount CD-ROM;",
+	"SC4,ISOTO*CUEBINCHD,Mount CD-ROM;",
 	"OI,CD-ROM Drive,Enabled,Disabled;",
 	"-;",
 	"O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
