@@ -163,6 +163,7 @@ wire  [VDNUM-1:0] sd_ack;
 // want 512-byte addressing slice [7:0] explicitly at their port - identical
 // bits to what the implicit truncation gave them (MacLC.sv:203 does the same).
 wire           [12:0] sd_buff_addr;
+wire signed    [15:0] cd_snd_l, cd_snd_r;   // CD-DA pair; consumed in Phase 3D
 wire           [15:0] sd_buff_dout;
 wire           [15:0] sd_buff_din[VDNUM];
 wire                  sd_buff_wr;
@@ -709,7 +710,14 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.sd_buff_addr_hi(sd_buff_addr[12:8]),   // CD whole-frame bursts (Phase 3B)
 	.sd_buff_dout(sd_buff_dout),
 	.sd_buff_din(scsi_sd_buff_din),
-	.sd_buff_wr(sd_buff_wr)
+	.sd_buff_wr(sd_buff_wr),
+
+	// CD-DA pair (Phase 3B). Deliberately UNCONSUMED: the mixer is Phase 3D
+	// and the DC blocker that must precede it is 3C. Wiring these to AUDIO_L/R
+	// now would half-wave clip every track against the +127 disabled-sound
+	// pedestal - see SCSI_UPGRADE_PLAN.md Phase 3C.
+	.cd_snd_l(cd_snd_l),
+	.cd_snd_r(cd_snd_r)
 );
 
 // sd_rd/sd_wr are consumer OUTPUTS -> hps_io INPUTS, so the SCSI 2-bit view

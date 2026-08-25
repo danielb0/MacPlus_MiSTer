@@ -22,6 +22,11 @@ module dataController_top(
 	// pruned, in a build without the deck.
 	output [15:0] scsi_dbg,
 
+	// CD-DA pair from the SCSI CD target's audio engine (Phase 3B). Exact
+	// zeros when not playing; the mixer that consumes them is Phase 3D.
+	output signed [15:0] cd_snd_l,
+	output signed [15:0] cd_snd_r,
+
 	input [3:0] cpuAddrRegHi, // A12-A9
 	input [2:0] cpuAddrRegMid, // A6-A4
 	input [1:0] cpuAddrRegLo, // A2-A1
@@ -230,6 +235,8 @@ module dataController_top(
 		.iow(!_cpuLDS),
 		.dack(cpuAddrRegHi[0]),   // A9
 		.dbg_bus(scsi_dbg),
+		.cd_snd_l(cd_snd_l),
+		.cd_snd_r(cd_snd_r),
 		.wdata(cpuDataIn[15:8]),
 		.rdata(scsiDataOut),
 

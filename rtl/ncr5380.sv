@@ -78,7 +78,12 @@ module ncr5380
 
 	// CD-ROM drive present on the bus (see scsi.v's cd_enable). Only meaningful
 	// when CD_DEV is in range; low makes the bus identical to a disks-only build.
-	input              cd_enable
+	input              cd_enable,
+
+	// CD-DA sample pair from the CD target's audio engine. Exact zeros when
+	// not playing. Nothing consumes these yet - the mixer is Phase 3D.
+	output signed [15:0] cd_snd_l,
+	output signed [15:0] cd_snd_r
 
 	// Debug tap for the JTAG probe deck (rtl/dbg_probes.sv). Raw state only --
 	// every counter, sticky bit and epoch lives in the probe deck, so this bus
@@ -438,6 +443,8 @@ module ncr5380
 	wire [DEVS-1:0] target_cd;
 	wire [DEVS-1:0] target_req;
 	wire      [7:0] target_dout[DEVS];
+	wire signed [15:0] target_snd_l[DEVS];
+	wire signed [15:0] target_snd_r[DEVS];
 
 	generate
 		genvar i;
@@ -488,9 +495,16 @@ module ncr5380
 				.sd_buff_din( sd_buff_din[i] ),
 				.sd_buff_wr( sd_buff_wr & target_bsy[i] ),
 
-				.dbg_abort( { target_iostall[i], target_wdog[i] } )
+				.dbg_abort( { target_iostall[i], target_wdog[i] } ),
+				.cd_snd_l( target_snd_l[i] ),
+				.cd_snd_r( target_snd_r[i] )
 			);
 		end
 	endgenerate
+
+	// Only the CD target has an audio engine; every other instance ties its
+	// pair to zero, so this picks the one that can be non-zero.
+	assign cd_snd_l = target_snd_l[CD_DEV];
+	assign cd_snd_r = target_snd_r[CD_DEV];
 
 endmodule

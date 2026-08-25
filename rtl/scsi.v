@@ -72,7 +72,13 @@ module scsi
 	// driver missed REQ and a watchdog rescued the bus" from "the transaction
 	// completed invisibly" -- see SCSI_UPGRADE_PLAN.md 5.6. Unconnected in a
 	// build without the probe deck, where it costs nothing.
-	output  [1:0] dbg_abort
+	output  [1:0] dbg_abort,
+
+	// CD-DA sample pair from the audio engine. EXACT zeros whenever the
+	// drive is not playing, so a build with no disc mixes bit-identically
+	// to one without the engine. Constant 0 on a disk target.
+	output signed [15:0] cd_snd_l,
+	output signed [15:0] cd_snd_r
 );
 
 // SCSI device id
@@ -156,7 +162,7 @@ scsi_dpram #(.ADDRWIDTH(BUF_AW)) buffer0
 
 	.address_a(hps_addr),
 	.data_a(sd_buff_dout[7:0]),
-	.wren_a(sd_buff_wr),
+	.wren_a(sd_buff_wr && !ca_io_active),
 	.q_a(sd_buff_din[7:0]),
 
 	.address_b(mac_addr),
@@ -172,7 +178,7 @@ scsi_dpram #(.ADDRWIDTH(BUF_AW)) buffer1
 
 	.address_a(hps_addr),
 	.data_a(sd_buff_dout[15:8]),
-	.wren_a(sd_buff_wr),
+	.wren_a(sd_buff_wr && !ca_io_active),
 	.q_a(sd_buff_din[15:8]),
 
 	.address_b(mac_addr),
@@ -187,7 +193,13 @@ always @(posedge clk) begin
 	if (phase == PHASE_IDLE)
 		sd_buff_sel <= 0;
 	else
-		if (old_io_ack & ~io_ack) sd_buff_sel <= !sd_buff_sel;
+		// ~ca_io_active: a CD-audio channel transfer started at bus-idle can
+		// still be in flight when the Mac's next command reaches a data phase.
+		// Its ack falling here would toggle the write double-buffer and bump
+		// the ring counter below - wrong sectors served. MacLC hit exactly
+		// this on hardware (2026-07-17: artifacted CD icons, then a wedged
+		// READ). Same scope the io_busy term already has.
+		if (old_io_ack & ~io_ack & ~ca_io_active) sd_buff_sel <= !sd_buff_sel;
 
 	// READ ring fetch counter: # of sectors the HPS has delivered this command.
 	// Reset alongside data_cnt (any non-transfer phase); bump on each io_ack
@@ -195,7 +207,7 @@ always @(posedge clk) begin
 	if (phase != PHASE_DATA_OUT && phase != PHASE_DATA_IN &&
 	    phase != PHASE_STATUS_OUT && phase != PHASE_MESSAGE_OUT)
 		rd_hps_blk <= 23'd0;
-	else if (old_io_ack & ~io_ack & cmd_read)
+	else if (old_io_ack & ~io_ack & cmd_read & ~ca_io_active)
 		rd_hps_blk <= rd_hps_blk + 23'd1;
 end
 
@@ -237,8 +249,8 @@ assign io = (phase == PHASE_DATA_OUT) || (phase == PHASE_STATUS_OUT) || (phase =
 // byte could land in the slot the flush had not read yet.
 wire   rd_cur_unfilled = (rd_cur_blk >= rd_hps_blk);
 wire   io_busy = (phase == PHASE_DATA_OUT && cmd_read && mounted && rd_cur_unfilled) ||
-                 (phase == PHASE_DATA_IN  && (io_wr | wr_pending | io_ack) && data_cnt[9] == sd_buff_sel) ||
-                 (phase != PHASE_DATA_OUT && phase != PHASE_DATA_IN && (io_rd | io_wr | wr_pending | io_ack));
+                 (phase == PHASE_DATA_IN  && (io_wr | wr_pending | (io_ack & ~ca_io_active)) && data_cnt[9] == sd_buff_sel) ||
+                 (phase != PHASE_DATA_OUT && phase != PHASE_DATA_IN && (io_rd | io_wr | wr_pending | (io_ack & ~ca_io_active)));
 
 // A zero-length data phase (allocation length 0) never sees an ACK edge, so
 // data_complete -- which only sets on one -- would never assert and REQ would be
@@ -704,7 +716,8 @@ reg [7:0]  cmd [9:0];
 
 /* ----------------------- request data from/to io controller ----------------------- */
 
-assign io_lba = lba;
+// CD-audio/TOC fetches own the address bus while their request is live.
+assign io_lba = ca_io_active ? ca_io_lba : lba;
 
 // READ prefetch (ring): keep issuing sequential sector fetches while sectors
 // remain (rd_hps_blk < tlen) and the ring has space (fetched no more than
@@ -1349,6 +1362,114 @@ always @(posedge clk) begin
 end
    
    
+// =====================================================================
+// CD audio engine (CDROM targets only; every ca_* wire folds to a constant
+// on a disk target). Owns the AppleCD playback state machine, the real TOC,
+// and audio-frame streaming from the HPS windows.
+// =====================================================================
+
+wire        ca_io_active, ca_io_rd_w;
+wire [31:0] ca_io_lba;
+wire  [7:0] ca_ast_code, ca_cur_ctrl, ca_cur_trk;
+wire  [7:0] ca_abs_m, ca_abs_s, ca_abs_f, ca_rel_m, ca_rel_s, ca_rel_f;
+wire  [7:0] ca_toc_q0, ca_toc_q1, ca_toc_q2, ca_toc_q3;
+wire        ca_toc_ready;
+wire  [7:0] ca_t43_q0, ca_t43_q1, ca_t43_q2, ca_t43_q3;
+wire  [9:0] ca_t43_len;
+wire  [7:0] ca_t2_q0, ca_t2_q1, ca_t2_q2, ca_t2_q3;
+wire  [9:0] ca_t2_len;
+wire        ca_disc_audio;
+
+// Serve addresses are driven by the TOC serving logic; tied off for now.
+wire  [8:0] ca_toc_addr = 9'd0;
+wire  [8:0] ca_t43_addr = 9'd0;
+wire  [8:0] ca_t2_addr  = 9'd0;
+
+// Command strobes into the engine. Wired to the decode next; the engine is
+// harmless with them low - it still acquires the TOC on the mount pulse,
+// which is what makes this stage independently testable (a TOC fetch shows
+// up on PIOS as win=TOC, the first thing that actually exercises the tag).
+wire        ca_cmd_stb   = 1'b0;
+wire        ca_read_stb  = 1'b0;
+wire        ca_eject_stb = 1'b0;
+
+// CD Audio Control page 0x0E output ports. MODE SELECT does not write these
+// yet, so default to the drive's power-on state: port 0 = left at full, port
+// 1 = right at full (channel 0x01 = left source, 0x02 = right).
+wire  [7:0] cd_ap_ch0 = 8'h01, cd_ap_vol0 = 8'hff;
+wire  [7:0] cd_ap_ch1 = 8'h02, cd_ap_vol1 = 8'hff;
+
+// CA grant: the audio/TOC engine's fetches are HPS-channel-only (they never
+// touch the SCSI bus), so they may interleave with an ACTIVE READ command's
+// serving phase. DO NOT "tighten" this to full bus-idle: MacLC did, and it
+// starved the frame stream to ~42 of the required 75 frames/s whenever the
+// guest read data from the same disc - audible crackle from sample-hold at
+// every late frame (their HW capture 2026-07-18). The io-free terms still
+// serialize the channel per-op, and the ~ca_io_active scoping above keeps CA
+// acks out of the data-path accounting. DATA_IN (writes) stays excluded: a CD
+// is read-only so it never occurs.
+wire ca_grant = (phase == PHASE_IDLE || (cmd_read && phase == PHASE_DATA_OUT))
+                && !io_rd && !io_wr && !io_ack && mounted;
+
+generate if (CDROM != 0) begin : g_cd_audio
+	cd_audio #(.CLK_HZ(32'd32_500_000)) cd_audio_i (   // clk_sys rate; audio pitch verifies it
+		// NOT .rst(rst): scsi.v's `rst` is the SCSI BUS reset (ICR RST from the
+		// initiator), and cd_audio's `rst` means SYSTEM reset. Tying both to the
+		// bus reset would wipe the TOC every time a driver resets the bus, which
+		// they do routinely at init - cd_audio.sv:32-33 says the TOC and engine
+		// state must SURVIVE a bus reset, and only playback stops.
+		.clk(clk), .rst(sys_rst), .bus_rst(rst),
+		.mounted(mounted), .img_mounted(img_mounted), .img_blocks(img_blocks),
+		.cmd_stb(ca_cmd_stb), .cmd_op(cmd[0]),
+		.cdb1(cmd[1]), .cdb2(cmd[2]), .cdb3(cmd[3]), .cdb4(cmd[4]),
+		.cdb5(cmd[5]), .cdb6(cmd[6]), .cdb7(cmd[7]), .cdb8(cmd[8]), .cdb9(cmd[9]),
+		.read_stb(ca_read_stb), .eject_stb(ca_eject_stb),
+		.ap_ch0(cd_ap_ch0), .ap_vol0(cd_ap_vol0),
+		.ap_ch1(cd_ap_ch1), .ap_vol1(cd_ap_vol1),
+		.ch_grant(ca_grant),
+		.ca_io_active(ca_io_active), .ca_io_rd(ca_io_rd_w), .ca_io_lba(ca_io_lba),
+		.io_ack(io_ack),
+		.sd_buff_addr(sd_buff_addr), .sd_buff_addr_hi(sd_buff_addr_hi),
+		.sd_buff_dout(sd_buff_dout), .sd_buff_wr(sd_buff_wr),
+		.ast_code(ca_ast_code), .cur_ctrl(ca_cur_ctrl), .cur_trk(ca_cur_trk),
+		.abs_m(ca_abs_m), .abs_s(ca_abs_s), .abs_f(ca_abs_f),
+		.rel_m(ca_rel_m), .rel_s(ca_rel_s), .rel_f(ca_rel_f),
+		.toc_base(ca_toc_addr),
+		.toc_q0(ca_toc_q0), .toc_q1(ca_toc_q1), .toc_q2(ca_toc_q2), .toc_q3(ca_toc_q3),
+		.toc_ready(ca_toc_ready),
+		.toc43_base(ca_t43_addr),
+		.toc43_q0(ca_t43_q0), .toc43_q1(ca_t43_q1),
+		.toc43_q2(ca_t43_q2), .toc43_q3(ca_t43_q3),
+		.toc43_len(ca_t43_len),
+		.toc2_base(ca_t2_addr),
+		.toc2_q0(ca_t2_q0), .toc2_q1(ca_t2_q1),
+		.toc2_q2(ca_t2_q2), .toc2_q3(ca_t2_q3),
+		.toc2_len(ca_t2_len),
+		.disc_audio(ca_disc_audio),
+		.snd_l(cd_snd_l), .snd_r(cd_snd_r),
+		.dbg_cda0(), .dbg_cdur()
+	);
+end else begin : g_no_cd_audio
+	assign ca_io_active = 1'b0;
+	assign ca_io_rd_w   = 1'b0;
+	assign ca_io_lba    = 32'd0;
+	assign ca_ast_code  = 8'h05;
+	assign ca_cur_ctrl  = 8'd0;
+	assign ca_cur_trk   = 8'd0;
+	assign {ca_abs_m, ca_abs_s, ca_abs_f} = 24'd0;
+	assign {ca_rel_m, ca_rel_s, ca_rel_f} = 24'd0;
+	assign {ca_toc_q0, ca_toc_q1, ca_toc_q2, ca_toc_q3} = 32'd0;
+	assign ca_toc_ready = 1'b0;
+	assign {ca_t43_q0, ca_t43_q1, ca_t43_q2, ca_t43_q3} = 32'd0;
+	assign ca_t43_len   = 10'd0;
+	assign {ca_t2_q0, ca_t2_q1, ca_t2_q2, ca_t2_q3} = 32'd0;
+	assign ca_t2_len    = 10'd0;
+	assign ca_disc_audio = 1'b0;
+	assign cd_snd_l     = 16'sd0;
+	assign cd_snd_r     = 16'sd0;
+end
+endgenerate
+
 endmodule
 
 module scsi_dpram #(parameter DATAWIDTH=8, ADDRWIDTH=9)
