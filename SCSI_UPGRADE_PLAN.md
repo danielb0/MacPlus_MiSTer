@@ -707,9 +707,42 @@ channel, the same shape of seam as the 2026-08-22 wedge."
 four sites (`:211`, `:371`, `:392-405`, `:471-472`). The sharing is a **port,
 not a design**.
 
-It is still not trivial, because **our `scsi.v` is 1,385 lines against MacLC's
-3,173** — the arbitration pattern transfers but lands in substantially
-different surrounding code. Budget for careful transcription, not copy-paste.
+**CORRECTED 2026-08-25 after reading both files.** The paragraph that used to
+sit here said our `scsi.v` (1,385 lines) vs MacLC's (3,173) meant the
+arbitration "lands in substantially different surrounding code — budget for
+careful transcription, not copy-paste." That overstated it. The line-count gap
+is almost entirely MacLC's extra command set (Toolbox, CD changer, more vendor
+commands) plus their testbench block. **The io machinery is nearly identical**
+— same `rd_hps_blk`, same `sd_buff_sel` double-buffer, same `io_busy` shape —
+so the arbitration maps essentially 1:1 onto seven touchpoints:
+
+| Site | Ours | Change |
+|---|---|---|
+| buffer0 `wren_a` | `scsi.v:155` | `&& !ca_io_active` |
+| buffer1 `wren_a` | `scsi.v:171` | `&& !ca_io_active` |
+| `sd_buff_sel` toggle | `scsi.v:186` | `& ~ca_io_active` |
+| `rd_hps_blk` bump | `scsi.v:194` | `& ~ca_io_active` |
+| `io_busy` | `scsi.v:236-237` | `io_ack` → `(io_ack & ~ca_io_active)` |
+| `io_lba` | `scsi.v:703` | `assign io_lba = ca_io_active ? ca_io_lba : lba;` |
+| new | near `scsi.v:716` | `ca_grant` + the `generate` block |
+
+**Two of MacLC's comments record hardware failures and must be inherited
+deliberately — both are easy to "improve" into bugs:**
+
+1. **`ca_grant` does NOT require full bus idle** (`MacLC scsi.v:1873`). It
+   permits audio fetches during an active READ's serving phase. Requiring true
+   idle starved the frame stream to ~42 of the required 75 frames/s and produced
+   audible crackle whenever the guest read data from the same disc (their HW
+   capture 2026-07-18). A "safer" conservative port reproduces their bug.
+2. **The `~ca_io_active` scoping is not cosmetic** (`MacLC scsi.v:392-397`).
+   Without it, an audio transfer still in flight when the Mac's next command
+   reaches a data phase has its ack toggle the write double-buffer and bump the
+   ring counter — wrong sectors served. Their capture: artifacted CD icons, then
+   a wedged READ. Same shape as our 2026-08-22 wedge.
+
+`rtl/cd_audio.sv` also needs `rtl/cd_vol_lut.vh`, its only include — a measured
+fifth-power volume law rather than the linear one MAME/Snow/BlueSCSI use.
+Otherwise it is self-contained (it defines its own `cd_sdp` memories inline).
 
 Port surface:
 
