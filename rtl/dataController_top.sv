@@ -120,6 +120,7 @@ module dataController_top(
 	output  [SCSI_DEVS-1:0] io_wr,
 	input   [SCSI_DEVS-1:0] io_ack,
 	input             [7:0] sd_buff_addr,
+	input             [4:0] sd_buff_addr_hi,  // hps_io addr[12:8], CD-DA frames
 	input            [15:0] sd_buff_dout,
 	output           [15:0] sd_buff_din[SCSI_DEVS],
 	input                   sd_buff_wr
@@ -242,6 +243,7 @@ module dataController_top(
 		.io_ack ( io_ack ),
 
 		.sd_buff_addr(sd_buff_addr),
+		.sd_buff_addr_hi(sd_buff_addr_hi),
 		.sd_buff_dout(sd_buff_dout),
 		.sd_buff_din(sd_buff_din),
 		.sd_buff_wr(sd_buff_wr)

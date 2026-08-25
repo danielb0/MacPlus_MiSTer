@@ -57,6 +57,10 @@ module scsi
 	input         io_ack,
 
 	input   [7:0] sd_buff_addr,
+	input   [4:0] sd_buff_addr_hi, // hps_io addr[12:8] (CD whole-frame bursts).
+	                               // Unused until the cd_audio engine lands; a
+	                               // 2352-byte frame needs 11 address bits and
+	                               // this port carries the 3 above our 8.
 	input  [15:0] sd_buff_dout,
 	output [15:0] sd_buff_din,
 	input         sd_buff_wr,

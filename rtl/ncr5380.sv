@@ -70,6 +70,8 @@ module ncr5380
 	input  [DEVS-1:0] io_ack,
 
 	input        [7:0] sd_buff_addr,
+	input        [4:0] sd_buff_addr_hi, // hps_io addr[12:8]; CD-DA frames are
+	                                   // 2352 bytes = 1176 words > 8 bits
 	input       [15:0] sd_buff_dout,
 	output      [15:0] sd_buff_din[DEVS],
 	input              sd_buff_wr,
@@ -481,6 +483,7 @@ module ncr5380
 				.io_ack ( io_ack[i] & target_bsy[i] ),
 
 				.sd_buff_addr( sd_buff_addr ),
+				.sd_buff_addr_hi( sd_buff_addr_hi ),
 				.sd_buff_dout( sd_buff_dout ),
 				.sd_buff_din( sd_buff_din[i] ),
 				.sd_buff_wr( sd_buff_wr & target_bsy[i] ),

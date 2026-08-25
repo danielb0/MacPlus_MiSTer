@@ -156,7 +156,13 @@ wire [31:0] sd_lba[VDNUM];
 wire  [VDNUM-1:0] sd_rd;
 wire  [VDNUM-1:0] sd_wr;
 wire  [VDNUM-1:0] sd_ack;
-wire            [7:0] sd_buff_addr;
+// 13 bits, not 8: hps_io drives [AW:0] with AW = WIDE ? 12 : 13, and every
+// transfer this core did before the CD-ROM was 512 bytes = 256 16-bit words =
+// exactly 8 bits, so the top 5 were silently truncated and nothing noticed.
+// CD-DA frames are 2352 bytes = 1176 words and need 11. Consumers that still
+// want 512-byte addressing slice [7:0] explicitly at their port - identical
+// bits to what the implicit truncation gave them (MacLC.sv:203 does the same).
+wire           [12:0] sd_buff_addr;
 wire           [15:0] sd_buff_dout;
 wire           [15:0] sd_buff_din[VDNUM];
 wire                  sd_buff_wr;
@@ -699,7 +705,8 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.io_wr(scsi_sd_wr),
 	.io_ack({sd_ack[4], sd_ack[1:0]}),
 
-	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_addr(sd_buff_addr[7:0]),
+	.sd_buff_addr_hi(sd_buff_addr[12:8]),   // CD whole-frame bursts (Phase 3B)
 	.sd_buff_dout(sd_buff_dout),
 	.sd_buff_din(scsi_sd_buff_din),
 	.sd_buff_wr(sd_buff_wr)
@@ -751,7 +758,7 @@ floppy_loader ldr_int
 	.sd_rd(ldr_int_sd_rd),
 	.sd_ack(sd_ack[2]),
 
-	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_addr(sd_buff_addr[7:0]),
 	.sd_buff_dout(sd_buff_dout),
 	.sd_buff_wr(sd_buff_wr),
 
@@ -779,7 +786,7 @@ floppy_loader ldr_ext
 	.sd_rd(ldr_ext_sd_rd),
 	.sd_ack(sd_ack[3]),
 
-	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_addr(sd_buff_addr[7:0]),
 	.sd_buff_dout(sd_buff_dout),
 	.sd_buff_wr(sd_buff_wr),
 
@@ -818,7 +825,7 @@ floppy_sd_writer wr_int
 	.sd_wr(wr_int_sd_wr),
 	.sd_ack(sd_ack[2]),
 
-	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_addr(sd_buff_addr[7:0]),
 	.sd_buff_din(wr_int_sd_buff_din),
 
 	.busy(wr_int_busy)
@@ -845,7 +852,7 @@ floppy_sd_writer wr_ext
 	.sd_wr(wr_ext_sd_wr),
 	.sd_ack(sd_ack[3]),
 
-	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_addr(sd_buff_addr[7:0]),
 	.sd_buff_din(wr_ext_sd_buff_din),
 
 	.busy(wr_ext_busy)
