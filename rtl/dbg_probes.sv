@@ -24,7 +24,8 @@
 //   PSCS  last SCSI register READ  (the poll target + the value it returned)
 //   PSCW  last SCSI register WRITE (the register the driver last programmed)
 //   PODR  last four bytes written to the data register -- the CDB tail
-//   PIOS  {rd_stuck, cd_io_lba} -- is an HPS fetch stalled, and for which LBA?
+//   PIOS  {rd_stuck, window, cd_io_lba} -- is an HPS fetch stalled, for which
+//         LBA, and in which of the three address windows (data / CD-DA / TOC)?
 //   PIO2  CD/disk io_rd vs io_ack counts + live handshake bits
 //   PIO3  {wr_stuck, d0_io_lba} -- the WRITE-side twin of PIOS
 //   PIO4  disk write/ack counts + live write handshake bits
@@ -445,9 +446,33 @@ module dbg_probes (
 		if (~d1_wr_d  &  d1_io_wr)  d1_wr_cnt  <= d1_wr_cnt  + 8'd1;
 	end
 
+	// ---- PIOS window tag (added for Phase 3B) ------------------------------
+	// cd_io_lba is not a plain block number: the CD target addresses three
+	// disjoint spaces on the same channel (SCSI_UPGRADE_PLAN.md Phase 3A).
+	//
+	//   data      0x00000000 + disc_lba   ordinary sector reads
+	//   CD-DA     0x40000000 + disc_lba   raw 2352-byte audio frames
+	//   TOC blob  0x7FFF0000..0001        the "MCDA" table
+	//
+	// PIOS used to carry cd_io_lba[23:0] alone, which DESTROYS that
+	// distinction: the audio base is 0x40000000, so bits [31:24] are exactly
+	// what separates an audio fetch from a data read, and truncating them makes
+	// "audio frame for disc block n" read as "data read of block n". That is
+	// the specific ambiguity Phase 3B has to resolve -- cd_audio.sv and the
+	// SCSI target share this channel, and telling their fetches apart IS the
+	// arbitration test. Same trap as the write side had before PIO3 existed:
+	// a probe that cannot see the failure reports a healthy-looking value.
+	//
+	// So spend 2 bits on a window tag and keep 22 of LBA (4,194,303 blocks --
+	// a CD tops out around 360,000, and the audio offset is disc-relative).
+	wire [1:0] cd_win = (cd_io_lba[31:16] == 16'h7FFF) ? 2'd2 :   // TOC blob
+	                    (cd_io_lba[31:28] == 4'h4)     ? 2'd1 :   // CD-DA
+	                    (|cd_io_lba[31:22])            ? 2'd3 :   // unrecognised
+	                                                     2'd0;    // data
+
 	reg [31:0] pios_r, pio2_r, pio3_r, pio4_r;
 	always @(posedge clk) begin
-		pios_r <= {rd_stuck, cd_io_lba[23:0]};
+		pios_r <= {rd_stuck, cd_win, cd_io_lba[21:0]};
 		pio2_r <= {cd_rd_cnt, cd_ack_cnt, d0_rd_cnt,
 		           3'd0, cd_io_rd, cd_io_wr, cd_io_ack, d0_io_rd, d0_io_ack};
 		pio3_r <= {wr_stuck, d0_io_lba[23:0]};

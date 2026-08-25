@@ -158,7 +158,15 @@ for {set n 0} {$n < $samples} {incr n} {
 	set fd_o [expr { $pifd        & 0xffff}]
 	set ipairs($fd_a) $fd_o
 	puts [format "  PIFD  %04X: %04X                  <- instruction word there" $fd_a $fd_o]
-	puts [format "  PIOS  cd fetch stuck=%-3d lba=%d" [expr {($pios >> 24) & 0xff}] [expr {$pios & 0xffffff}]]
+	# PIOS = {rd_stuck[8], window[2], lba[22]} as of the Phase 3B probe change
+	# (dbg_probes.sv). The window tag is what separates a CD-DA fetch from a
+	# data read of the same block number -- see the note there. On a bitstream
+	# built BEFORE that change these two bits are the top of a 24-bit LBA, so a
+	# window that reads "audio"/"TOC" on a small disc means the loaded build
+	# predates it: check the bitstream tag printed above before believing it.
+	set pios_win [lindex {data audio TOC ????} [expr {($pios >> 22) & 0x3}]]
+	puts [format "  PIOS  cd fetch stuck=%-3d win=%-5s lba=%d" \
+	             [expr {($pios >> 24) & 0xff}] $pios_win [expr {$pios & 0x3fffff}]]
 	puts [format "  PIO2  cd rd=%d ack=%d  disk0 rd=%d   live: cd_rd=%d cd_wr=%d cd_ack=%d d0_rd=%d d0_ack=%d" [expr {($pio2 >> 24) & 0xff}] [expr {($pio2 >> 16) & 0xff}] [expr {($pio2 >> 8) & 0xff}] [expr {($pio2 >> 4) & 1}] [expr {($pio2 >> 3) & 1}] [expr {($pio2 >> 2) & 1}] [expr {($pio2 >> 1) & 1}] [expr {$pio2 & 1}]]
 	puts [format "  PIO3  disk write stuck=%-3d lba=%d" [expr {($pio3 >> 24) & 0xff}] [expr {$pio3 & 0xffffff}]]
 	puts [format "  PIO4  disk0 wr=%d ack=%d (ack covers rd+wr)  disk1 wr=%d   live: d0_wr=%d d0_ack=%d d1_wr=%d" [expr {($pio4 >> 24) & 0xff}] [expr {($pio4 >> 16) & 0xff}] [expr {($pio4 >> 8) & 0xff}] [expr {($pio4 >> 2) & 1}] [expr {($pio4 >> 1) & 1}] [expr {$pio4 & 1}]]
@@ -335,6 +343,11 @@ puts "  * PODR shows the tail of the last CDB the driver handed the target."
 puts "  * PIOS stuck>0 with PIO2 cd_rd=1 and rd>ack = a fetch the HPS never"
 puts "    answered. That holds io_busy, which holds REQ low AND resets the bus"
 puts "    watchdog every cycle -- a hang with no recovery (scsi.v:239, :1195)."
+puts "  * PIOS win names WHICH address space the fetch is in: data sectors,"
+puts "    the CD-DA window (0x40000000+lba), or the TOC blob (0x7FFF0000)."
+puts "    Without it an audio frame for block n is indistinguishable from a"
+puts "    data read of block n -- which is the whole Phase 3B question, since"
+puts "    cd_audio.sv and the SCSI target share this one channel."
 puts "  * PIO3/PIO4 are the same test for the WRITE side, which is what the"
 puts "    2026-08-22 wedge actually was. PIO3 stuck>0 with PIO4 d0_wr=1 and"
 puts "    PIO4 wr+PIO2 rd > PIO4 ack = a FLUSH the HPS never answered, and"
