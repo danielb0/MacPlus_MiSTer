@@ -473,8 +473,20 @@ module dbg_probes (
 	reg [31:0] pios_r, pio2_r, pio3_r, pio4_r;
 	always @(posedge clk) begin
 		pios_r <= {rd_stuck, cd_win, cd_io_lba[21:0]};
+		// PIO2[7] is a PROBE-FORMAT MARKER, not a signal. It says "PIOS carries a
+		// window tag in [23:22]". Without it read_probes.tcl cannot tell a build
+		// that has the tag from one that predates it, and on an older bitstream
+		// it decodes the top of the old 24-bit LBA as a window -- printing a
+		// perfectly plausible "win=data" that is pure fiction. That happened on
+		// 2026-08-25: a comment warning in the script was useless, because the
+		// output reads healthy either way. Exactly the failure the window tag
+		// was added to fix, reintroduced one level up.
+		//
+		// It costs one of PIO2's three spare bits and no new hub node, which
+		// matters -- the deck is at 18 instances against MacLC's noted ~20
+		// ceiling, above which the name table reads back corrupted.
 		pio2_r <= {cd_rd_cnt, cd_ack_cnt, d0_rd_cnt,
-		           3'd0, cd_io_rd, cd_io_wr, cd_io_ack, d0_io_rd, d0_io_ack};
+		           1'b1, 2'd0, cd_io_rd, cd_io_wr, cd_io_ack, d0_io_rd, d0_io_ack};
 		pio3_r <= {wr_stuck, d0_io_lba[23:0]};
 		pio4_r <= {d0_wr_cnt, d0_ack_cnt, d1_wr_cnt,
 		           5'd0, d0_io_wr, d0_io_ack, d1_io_wr};

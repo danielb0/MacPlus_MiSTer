@@ -235,6 +235,10 @@ set_global_assignment -name QIP_FILE rtl/fx68k/fx68k.qip
 set_global_assignment -name VERILOG_FILE rtl/sdram.v
 set_global_assignment -name VERILOG_FILE rtl/scsi.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ncr5380.sv
+# CD-DA engine, instantiated inside scsi.v behind the CDROM parameter.
+# Its one include, rtl/cd_vol_lut.vh, resolves relative to this file -
+# no SEARCH_PATH needed (MacLC.qsf:373 registers it the same way).
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/cd_audio.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/dbg_probes.sv
 set_global_assignment -name VERILOG_FILE rtl/build_tag.v
 # JTAG probe deck (rtl/dbg_probes.sv). OFF for a release build -- the deck and
