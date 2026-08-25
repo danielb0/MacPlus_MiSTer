@@ -63,7 +63,7 @@ Plus circa 1986?* Three distinct answers, and it maps cleanly onto the phases.
 | **1** | REQUEST SENSE, 12-byte CDB non-hang, `bus_busy` arbitration, MODE SENSE pages | **1986.** SCSI-1 mandatory/standard. Our omissions make us *less* accurate than a real ST225N. Porting these is a conformance fix. |
 | **2** | CD-ROM target (AppleCD personality, 2048-byte blocks, READ TOC, sub-channel, eject) | **1988.** The AppleCD SC shipped March 1988 and Apple explicitly supported it on the Mac Plus under System 6 with the Apple CD-ROM driver + Foreign File Access. Two years after the machine, but a real Apple-sanctioned Plus configuration. |
 | **3** | CD audio (CD-DA playback engine) | **1988**, same configuration. See routing caveat below. |
-| **4** | BlueSCSI Toolbox (shared folders, CD changer) | **Modern.** A 2020s vendor command set. **Not in scope** — and inert without a forked Main_MiSTer anyway (§8). |
+| **4** | BlueSCSI Toolbox (shared folders, CD changer) | **Modern.** A 2020s vendor command set. **Not in scope** — on period grounds alone. (The "needs a forked Main_MiSTer" half of this was true when written and is not any more; see §8.) |
 
 **Read prefetch ring** sits slightly outside this table. 32 sectors of read-ahead has
 no 1986 analogue in *size*, but it restores authentic *behavior*: a real drive
@@ -499,37 +499,65 @@ whether the Plus shares that failure mode.
 
 ### Phase 3 — CD audio
 
-Port `cd_audio.sv` (1,416 lines) and mix `cd_snd_l/r` into the audio path.
+**Status: not started.** Nothing ported, nothing written, nothing simulated.
+`rtl/` still has no audio file. This section was rewritten on 2026-08-25 after
+the host-side investigation and the audio-path decisions below; the version it
+replaces (commit `61507a3`) named the wrong blocker and the wrong integration
+risk, and both corrections are recorded here rather than left implicit.
 
-**The output is genuinely stereo (user, 2026-08-22).** MiSTer's `sys_top` carries
-separate 16-bit `AUDIO_L`/`AUDIO_R`, so CD audio does not have to be folded down
-— the Mac's own mono output goes to both channels and the CD's two channels can
-be mixed in as true stereo. That removes the main reason to compromise on the
-mixer design, and it makes the signedness question below MORE important, not
-less: a mono error is a volume error, a stereo error is an image error.
+#### What real hardware did — and what this phase actually is
+
+**A real Mac Plus never mixed CD audio.** There is no audio input anywhere on
+the board. The Plus's sound circuit only ever plays its own buffer, in mono, to
+the internal speaker and the rear jack.
+
+The AppleCD SC and its contemporaries carried **their own audio outputs** — RCA
+jacks on the back and a headphone socket on the front with its own volume knob.
+You ran those to a stereo. The Mac and the CD were two entirely separate audio
+paths that happened to share a SCSI cable. On real hardware you heard the Mac
+beeping out of its little speaker while the CD played through your hi-fi.
+
+That is the difference from MacLC. Later Macs had a CD-audio input header on the
+logic board, so MacLC's mixer is modelling something that physically existed.
+Ours is not. **The mixer in this phase is an accommodation to MiSTer having one
+audio output, not an emulation**, and the plan should not dress it up as
+authenticity.
+
+Two consequences that do follow from the hardware, and that shape the design:
+
+1. **The Plus's speaker output is capacitively coupled**, and this core omits
+   that. Restoring it (§3C) is genuinely period-accurate — it is the reason a
+   constant TTL '1' made no sound on a real Plus.
+2. **The Mac's volume control had no effect on the drive.** The drive's own knob
+   set CD level, independently. So the CD channel must not pass through the
+   Mac's volume stage, and it should get its own control (§3D).
+
+Nothing on real hardware corresponds to *mounting* a disc, so the envelope in
+§3C is free of authenticity constraints. It exists purely so the transition
+does not click.
+
+#### What is already in place
+
+* **The CD-audio command surface is stubbed.** `rtl/scsi.v:1002` already accepts
+  the audio opcodes (`C8`/`C9` and friends) via `cmd_cd_audio_nop` — they
+  complete successfully and do nothing. Phase 3 replaces the stub with an
+  engine; it does not have to add the commands.
+* **The CD slot is hps_io slot 4** (`MacPlus.sv:176`, `SCSI_CD_DEV = 2`).
+* **The host side is already merged and shipped upstream.** See §3A — this was
+  the single biggest correction to the old plan.
 
 #### RESOLVED (2026-08-24): the signedness question was a false alarm
 
 This section used to carry a blocking investigation: whether
 `assign AUDIO_L = {audio[10:0], 5'b00000}` with `AUDIO_S = 1` was placing an
-unsigned 0..2047 value in a signed field, making everything above 1024 read as
-negative. **It is not. `audio` is already signed and centred**, and no fix is
-needed.
-
-The proof is `dataController_top.sv:162`:
-
-```
-audio_prebuf <= memoryDataIn[15:8] - 8'd128;
-```
-
-The Mac's sound buffer holds unsigned 0..255 samples; that subtraction converts
-them to two's complement -128..+127. The volume stage
+unsigned value in a signed field. **It is not.** `dataController_top.sv:162`
+does `audio_prebuf <= memoryDataIn[15:8] - 8'd128`, converting the buffer's
+unsigned 0..255 to two's complement -128..+127. The volume stage
 (`dataController_top.sv:136`) is an explicit `$signed` product yielding
--896..+889 in 11 bits. So the concatenation is an 11-bit signed value scaled x32
-into 16 bits: **-28,672 .. +28,448**, correctly inside int16. `AUDIO_S = 1` is
-right.
+-896..+889 in 11 bits, so the x32 concatenation lands at -28,672..+28,448,
+correctly inside int16. `AUDIO_S = 1` is right. Closed.
 
-#### The REAL blocker: the disabled-state level is SIGNAL, not an offset
+#### The pedestal: why the mixer needs a filter in front of it
 
 `dataController_top.sv:171`:
 
@@ -538,12 +566,11 @@ wire [7:0] audio_latch = snd_ena ? 8'h7f : audio_sample;
 ```
 
 `snd_ena` is the raw /SNDENB pin level, so **1 means sound DISABLED** despite
-the name. Disabled emits `8'h7f` = +127 -- near full-scale positive in this
+the name. Disabled emits `8'h7f` = +127 — near full-scale positive in this
 signed domain, not silence. After volume and the x32 shift that is up to
 **+28,448**, i.e. 87% of positive full scale.
 
-**Do NOT "fix" this to `8'h00`.** It is deliberate, it is correct, and the
-reasoning is invisible in the source. From the PR #12 discussion
+**Do NOT "fix" this to `8'h00`.** It is deliberate. From PR #12
 (darylrichards, 2024-08-27/28; the change was `8'h00` -> `8'h7f`):
 
 > The original sound hardware was PWM TTL, so the output was only ever zero or
@@ -552,115 +579,329 @@ reasoning is invisible in the source. From the PR #12 discussion
 > went to a TTL '1'. Driving the analog value high when disabled emulates this
 > properly, and produces sound in all the software that doesn't have sound now.
 
-That is bug #7, with forum confirmation. sorgelig raised the obvious modern-
-hardware objection -- "driving to 0 while muted is more friendly... setting to 1
-may produce pops/clicks" -- and it was answered on authenticity grounds. So for
-an entire class of software **the swing between buffer content and +127 IS the
-waveform**. Zeroing it re-silences all of them.
+That is bug #7, with forum confirmation. sorgelig raised the modern-hardware
+objection — driving to 0 while muted is friendlier, driving to 1 may pop — and
+it was answered on authenticity grounds. **For an entire class of software the
+swing between buffer content and +127 IS the waveform.** Zeroing it re-silences
+all of them. Recorded because the source gives no hint, and this analysis
+independently proposed exactly that change before the PR history was consulted.
 
-Recorded here because the source gives no hint, and this analysis independently
-proposed changing it to `8'h00` before the PR history was consulted.
+**Nobody hears the pedestal today.** MiSTer already strips it: `DC_blocker` in
+`sys/iir_filter.v:189` runs unconditionally on both channels
+(`sys/audio_out.sv:224` and `:235`) at the 48 kHz `sample_ce`. So this is not a
+live audio bug — it is purely a headroom problem, and only once we add a second
+source.
 
-#### Why that blocks the mixer
-
-Two cases that must be told apart:
-
-* Sound disabled **and staying disabled** -- a Mac idling, which is exactly when
-  a user plays a CD -- parks the channel at a constant +28,448 at volume 7.
-* Software **toggling** enable at audio rates: the same level is signal and must
-  pass through untouched.
-
-**A sustained level is inaudible DC; a toggling one is music.** Mixing full-scale
-CD audio onto a +28,448 pedestal saturates every positive half-cycle: half-wave
-clipping on all CD playback. And it cannot be left to MiSTer's downstream audio
-path, because the clipping happens in **our** sum before `sys_top` sees it.
-
-#### Proposed fix: emulate the AC coupling the real hardware has
-
-The Mac's speaker is capacitively coupled. A constant TTL '1' makes no sound on
-a real Plus *because the capacitor blocks it*. Our core omits that coupling, so
-a DC level that was never audible on real hardware survives into a digital sum
-where it costs 87% of the headroom. Restoring it is period-accurate rather than
-a workaround, and it separates the two cases above the way the hardware did.
-
-One-pole DC blocker, `y[n] = x[n] - x[n-1] + a*y[n-1]` with `a = 1 - 2^-K`:
+**Why the existing filter is not enough.** It sits *downstream of our sum*:
 
 ```
-// Sketch -- NOT yet built or simulated.
-// x = the existing {audio[10:0], 5'b00000}, 16-bit signed.
-// Internal width 18 bits: the step response can transiently exceed |x|.
-reg signed [17:0] dcb_y;
-reg signed [15:0] dcb_x1;
-always @(posedge clk32) if (aud_ce) begin
-    dcb_y  <= $signed({{2{x[15]}}, x}) - $signed({{2{dcb_x1[15]}}, dcb_x1})
-              + dcb_y - (dcb_y >>> K);
-    dcb_x1 <= x;
-end
+mac audio --+
+            +-- SUM (saturating) -- sys_top -- DC_blocker -- out
+cd audio ---+        ^ clipping happens HERE
 ```
 
-Corner and decay, taking the filter rate as the 48 kHz `sys/audio_out` pickup
-(`fc ~= fs / (2*pi*2^K)`, time constant `2^K / fs`):
+By the time MiSTer's blocker runs, full-scale CD audio has already been added to
+a +28,448 pedestal and every positive half-cycle has been clipped off. The
+information is gone. Protecting the headroom requires a blocker **inside the
+core, before the adder**.
 
-| K | corner | time constant | droop across a 5 ms half-cycle |
-|---|---|---|---|
-| 9  | 14.9 Hz | 11 ms | ~37% |
-| 10 | 7.5 Hz  | 21 ms | ~21% |
-| 11 | 3.7 Hz  | 43 ms | ~11% |
+#### 3A — Host-side gate: CUE/CHD data discs, no RTL
 
-**Start at K=11** and make K a parameter. It kills the pedestal within ~0.2 s
-while leaving enable-toggled square waves nearly untilted. Some droop on very
-low-frequency toggling is expected and is what real AC coupling does too.
+**Do this first.** It is the cheapest step, it needs no audio code at all, and
+it validates the whole host-side build-and-deploy loop before anything harder
+depends on it. It also delivers a real feature on its own: MacPlus currently
+accepts flat ISO only (`MacPlus.sv:72`, `"SC4,ISO,Mount CD-ROM;"`), and this
+step gives it CUE/BIN/CHD/TOAST **data** discs.
 
-**Three things to get right, none of them obvious:**
+**The host side is not a fork and needs no custom binary.** The CD translation
+landed in Main_MiSTer PR #1255 (merged 2026-08-02, `support/mac/`), and was
+verified on 2026-08-25 to be present in the stock Main already on the user's SD
+card. `support/mac/` has exactly one commit in the entire repo history and has
+never been touched since, so any Main built after 2026-08-02 carries identical
+mac code. **The MacLC readme's "use the custom binary" instruction is
+obsolete.** A hand-built Main is needed only to develop this patch; once merged
+and released, users need nothing.
 
-1. **`>>>` on a negative number rounds toward -inf**, so the feedback term
-   itself injects a small negative DC and the filter settles a little below zero
-   rather than exactly at it. Either add a rounding constant or accept ~1 LSB.
-   This is the classic DC-blocker foot-gun and it is self-defeating if missed.
-2. **Pick the filter's sample rate deliberately.** `snd_ena` is combinational,
-   so the toggle path has no inherent rate limit; the existing output is
-   whatever `sys_top` samples at 48 kHz. Filtering at the Mac's ~22 kHz
-   `snd_advance` tick would undersample the toggle waveform.
-3. **Verify against the toggle-based software specifically**, not just the
-   startup chime. The chime is buffer audio and already centred, so it exercises
-   none of this. The titles named in bug #7 are the regression set.
+What blocks MacPlus is a core-name allowlist, `support/mac/mac.cpp:20`:
 
-**Conservative alternative**, if the DC blocker proves too invasive to a working
-path: attenuate the Mac channel only while the CD is actually playing. Nothing
-changes with no disc -- bit-identical, matching MacLC's exact-zeros property --
-at the cost of an audible volume step when playback starts and stops.
+```c
+char is_mac_scsi_family()
+{ return is_core_named("maclc") || is_core_named("lbmactwo") || is_core_named("maciivi"); }
 
-#### The mixer itself is a straight port from MacLC
+static int mac_slots(void) { return is_mac_scsi_family() && !is_core_named("lbmactwo"); }
 
-`MacLC.sv:687` sign-extends each source to 18 bits, sums, and saturates:
+int mac_toolbox_slot()    { return mac_slots() ? MAC_TOOLBOX_SLOT    : -1; }  // 3
+int mac_cdrom_slot()      { return mac_slots() ? MAC_CDROM_SLOT      : -1; }  // 4
+int mac_cd_toolbox_slot() { return mac_slots() ? MAC_CD_TOOLBOX_SLOT : -1; }  // 5
+```
+
+Our core name is `MACPLUS` (`MacPlus.sv:59`). Two pieces of luck:
+`MAC_CDROM_SLOT` is **4** (`mac_cdrom.h:9`) — already exactly our CD slot, no
+renumbering on either side — and `MAC_CDROM_TOC_BLK` / `MAC_CDROM_AUDIO_BLK`
+(`0x7FFF0000` / `0x40000000`) are byte-identical to `cd_audio.sv`'s constants.
+
+**HAZARD: this cannot be a one-line change.** All three slot helpers share one
+`mac_slots()` gate. Adding `macplus` to the family naively would also claim
+slot 3 — which is our **Mount Sec Floppy** (`MacPlus.sv:62`) — and slot 5,
+which does not exist on this core (`VDNUM = 5`). The predicate must split: a
+CD gate that includes macplus, and toolbox gates that do not. The existing
+`lbmactwo` exclusion is the precedent for the shape.
+
+**RESOLVED 2026-08-25 (was an open item): what the rest of `mac.cpp` does.**
+All 149 lines read. With the predicate split as above, every remaining hook
+self-gates correctly:
+
+| Hook | Gate | Behaviour for macplus |
+|---|---|---|
+| `mac_mount_hook` (`:39`) | `index != mac_cdrom_slot()` | Active — CD translation runs |
+| `mac_sd_service` toolbox branch (`:109`) | `mac_toolbox_slot()` / `mac_cd_toolbox_slot()` | Both -1, never matches. Correct |
+| `mac_sd_service` CD branch (`:134`) | `mac_cdrom_active(disk)` | Active — serves the virtual disc |
+| `mac_cdda_window` (`:96`) | `is_mac_scsi_family()` **only** | Active — 2352-byte CD-DA blocks turned on automatically |
+| `mac_poll` (`:64`) | both toolbox slots | Both -1, so the whole body no-ops... |
+
+**...with one genuine defect, found in the same read.** `mac_cdrom_poll()` —
+the one-shot boot repulse that re-inserts the CD ~60 s after attach when the
+guest missed the early mount pulse (`mac_cdrom.cpp:391`) — is nested inside
+`mac_poll`'s `cdc_slot >= 0` branch (`mac.cpp:91`). That couples a **CD-ROM**
+workaround to the **CD-changer toolbox** slot for no reason. With toolbox
+excluded, macplus would silently lose the repulse.
+
+This is plausibly relevant to us: the intermittent `!toc_ready` race with a disc
+mounted is still open from the attempt-4 work, and a missed mount pulse is the
+same shape of problem. **Lift `mac_cdrom_poll()` out of the `cdc_slot` branch
+and gate it on `mac_cdrom_slot() >= 0`.** It is a small, upstream-friendly fix
+that is arguably a latent bug for the other cores too.
+
+Also note `mac_cdda_window` hardcodes `MAC_CDROM_SLOT` rather than calling
+`mac_cdrom_slot()`. Harmless for us because our slot is 4 either way, but it is
+why the CD-DA path switches on from the family predicate alone.
+
+**Deliverables for 3A**
+
+1. `mac.cpp`: split the predicate, add `macplus` to the CD path only.
+2. `mac.cpp`: move `mac_cdrom_poll()` to a `mac_cdrom_slot()` gate.
+3. `MacPlus.sv:72`: widen the CD slot's extension list from `ISO` to the full
+   set — match MacLC's exact string — and update the comment above it, which
+   currently explains the ISO-only restriction that this step removes.
+4. Build in WSL (see the cross-compile notes; ~9 s), deploy to the SD card
+   keeping `MiSTer.orig`, and mount a multi-track CUE.
+
+**Expected result:** a data CUE/CHD mounts and reads. The audio tracks are
+present in the TOC and the drive will refuse to *read* them as data
+(`cd_audio_read_rej` in MacLC's `scsi.v:2564` — our stub has no equivalent yet,
+see §3B), but the data session works. **No sound yet — that is §3C/§3D.**
+
+**Warning to carry into testing:** the normal MiSTer updater overwrites
+`/media/fat/MiSTer` and will silently revert this patch.
+
+#### 3B — Port `cd_audio.sv`
+
+The old plan called this the phase's real cost, on the grounds that all five
+hps_io slots are taken and the audio engine would have to share slot 4 with the
+SCSI CD target — "a shared request/ack window between two engines on one
+channel, the same shape of seam as the 2026-08-22 wedge."
+
+**That framing was wrong.** `cd_audio.sv` is instantiated *inside* MacLC's
+`scsi.v` (`scsi.v:1876`), and that file already carries the arbitration:
+`ca_grant` (`:1873`), the `io_lba` mux (`:1789`), and `~ca_io_active` scoping at
+four sites (`:211`, `:371`, `:392-405`, `:471-472`). The sharing is a **port,
+not a design**.
+
+It is still not trivial, because **our `scsi.v` is 1,385 lines against MacLC's
+3,173** — the arbitration pattern transfers but lands in substantially
+different surrounding code. Budget for careful transcription, not copy-paste.
+
+Port surface:
+
+* `rtl/cd_audio.sv` — 1,416 lines, taken essentially verbatim from
+  `C:/Git/MiSTer-devel/MacLC_MiSTer/rtl/cd_audio.sv`. Instantiate with
+  `.CLK_HZ(32'd32_500_000)` — `clk_sys` is **32.5 MHz**, not 32, and this
+  parameter sets audio pitch, so it is self-verifying by ear.
+* `rtl/scsi.v` — the six arbitration touchpoints above, plus routing the real
+  TOC (`toc_*`, `toc43_*`, `toc2_*`, `toc_ready`) in place of Phase 2's
+  synthesized single-data-track TOC, and adding `cd_audio_read_rej` so a data
+  READ against an audio track is refused rather than served as garbage.
+* `MacPlus.sv` — expose `cd_snd_l` / `cd_snd_r` out of the SCSI hierarchy.
+
+**Seam test before hardware.** `sim/tb_scsi_target.v` exercises `scsi.v` alone
+and the `ncr5380.sv` <-> `scsi.v` seam still has no coverage. Add bench cases
+for the arbitration specifically: an audio fetch starting at bus-idle must not
+disturb an in-flight data transfer, and `sd_buff_sel` must not advance on an
+`io_ack` that belonged to the audio engine (`scsi.v:392-405` is exactly that
+guard). This is the lesson from the 2026-08-22 wedge and from the floppy Phase 4
+byte-swap: **defects live in seams, and a bench that only talks to one module
+can only agree with itself.**
+
+#### 3C — In-core DC blocker with a mount envelope
+
+**Decided 2026-08-25.** Four decisions, in the order they were made:
+
+**1. The filter goes in the core, before the sum.** For the reason in
+"The pedestal" above — MiSTer's own blocker is downstream of the clipping.
+
+**2. Make it gentle: K=12, not K=9.**
+
+MiSTer's `DC_blocker` runs K=9 at 48 kHz (`sys/iir_filter.v:189`; the pole term
+is `y - (y>>>9)`, and at 96 kHz it shifts to `>>>10` to hold the same corner) —
+**14.9 Hz, tau = 10.7 ms**. Matching that would put the Mac channel through two
+identical high-passes while the CD channel passes only one. That is not a
+frequency-response problem in itself (the combined corner moves to about 23 Hz)
+but it is two real risks:
+
+* **The toggle-sound software.** The bug #7 titles are square-wave content that
+  today passes exactly one blocker and reportedly sounds right. One blocker
+  already droops ~37% across a 5 ms half-cycle; two tilt it further and add edge
+  undershoot. That is an untested change to the very software PR #12 existed to
+  fix.
+* It buys nothing, because **DC is inaudible**. The in-core stage's only job is
+  to reclaim headroom before the adder. Nothing is listening to how fast it
+  settles.
+
+So run it slow:
+
+| K | corner | tau | 99% settled | magnitude at 20 Hz |
+|---|---|---|---|---|
+| 9 (MiSTer's, downstream) | 14.9 Hz | 11 ms | 49 ms | -1.7 dB |
+| **12 (ours, chosen)** | **1.87 Hz** | **85 ms** | **392 ms** | **-0.04 dB** |
+| 13 | 0.93 Hz | 171 ms | 785 ms | -0.01 dB |
+
+At K=12 the cascade is arithmetically negligible above 20 Hz and the
+square-wave droop nearly vanishes. The entire cost is a few hundred ms for the
+pedestal to clear — invisible, since it was silent to begin with.
+
+*Implementation note:* K is hardcoded 9/10 in `sys/iir_filter.v`, so K=12 needs
+a local copy in `rtl/`. Do copy it rather than writing one from scratch — it
+dodges the classic DC-blocker foot-gun (`>>>` on a negative number rounds toward
+-inf, so a naive implementation settles ~1 LSB below zero) by working in
+`{din, 23'd0}` fixed point, putting the truncation ~23 bits below an output LSB.
+If a zero-fork half-measure is ever wanted, instantiating `sys`'s module with
+`sample_rate = 1` while clocking `ce` at 48 kHz yields K=10 -> 7.5 Hz.
+
+*Rate:* 48 kHz, because that is where `sys/audio_out.sv` point-samples
+`AUDIO_L/R`. From `clk_sys` = 32.5 MHz that is a /677 divide (48,006 Hz, 0.01%
+off — irrelevant at a 2 Hz corner). Note anything above 24 kHz in the `snd_ena`
+toggle path already aliases today; this changes nothing about that.
+
+**3. Apply the correction only when a disc is mounted — and gate on *mounted*,
+not *playing*.**
+
+The filter runs continuously so its state stays settled, but its output is only
+selected when a disc is present. That preserves the "no disc, output unchanged
+bit for bit" property, which makes the whole feature a provable no-op for anyone
+not using it. (Note this is a courtesy, not authenticity: a real Plus with a CD
+drive attached still sounded exactly like a Plus, because the two paths never
+met.)
+
+Gate on **mounted**, not on playback state:
+
+* "Playing" flips many times per disc — track gaps, pause, end of disc — and
+  each flip is a transition to manage, landing in the middle of listening.
+* It would also need to engage slightly *before* audio starts, i.e. lookahead.
+* All it would buy is bit-identical output while a disc sits mounted and idle.
+  Not worth the states.
+
+**Never gate on `cd_snd_l == 0 && cd_snd_r == 0`** — that toggles at audio rate
+and would splice discontinuities into the waveform.
+
+`cd_audio.sv` exposes suitable slow signals: `disc_audio` (`:113`) and
+`ast_code` (`:65`; 0 play, 1 paused, 3 end, 5 idle).
+
+**4. Ramp the correction with an envelope, ~170 ms, attack and release.**
+
+Switching the correction in is itself a step of up to 28,448 — a click.
+Ramping removes it instead of switching it.
+
+The clean form uses one multiplier, because the two candidate outputs differ by
+exactly the quantity being removed:
 
 ```
-wire signed [17:0] audio_mix_l = {{2{asc_sample_l[15]}}, asc_sample_l}
-                               + {{2{cd_snd_l[15]}}, cd_snd_l};
-assign AUDIO_L = (audio_mix_l > 18'sd32767) ? 16'sd32767 :
+  d   = x - y                  // the DC estimate the filter is removing
+  out = x - (g * d)            // g ramps 0 -> 1
+```
+
+`g = 0` gives raw; `g = 1` gives fully blocked. A 16-bit `g` stepping by 8 per
+48 kHz sample reaches full scale in 8192 samples = **171 ms**, comfortably
+slower than the ~20 Hz below which a ramp stops being audible, and still
+instant to a user who just picked a disc in the menu.
+
+**Release matters as much as attack** — unmounting restores the pedestal and
+that is just as much a click. Make `g` chase a target (1 when mounted, 0 when
+not) at a fixed rate and one piece of logic covers both directions with no
+special-casing.
+
+Cost: roughly twenty lines and one 16x16 multiplier. Nothing on this device.
+
+#### 3D — Mixer and CD volume
+
+The mixer is a straight port of `MacLC.sv:687` — sign-extend both sources to
+18 bits, sum, saturate:
+
+```
+wire signed [17:0] audio_mix_l = {{2{mac_ch[15]}}, mac_ch}
+                               + {{2{cd_l[15]}}, cd_l};
+assign AUDIO_L = (audio_mix_l >  18'sd32767) ?  16'sd32767 :
                  (audio_mix_l < -18'sd32768) ? -16'sd32768 : audio_mix_l[15:0];
 ```
 
-Full gain, saturating. `cd_snd_*` are **exact zeros** when the drive is not
-playing, so the mix is bit-identical with no disc -- worth preserving here, since
-it makes the whole feature a no-op for period purists. MacLC's own comment
-records that they tried half-gain first and it drew a "CD sounds half as loud"
-report; the real LC sums drive line-out with the DAC at unity. Inherit that
-posture. With the pedestal handled, the only residual saturation is Mac and CD
-both near full scale at once, which is rare and is what MacLC accepts.
+Full gain. MacLC's own comment records that they tried half-gain first and drew
+a "CD sounds half as loud" report; inherit that posture. `cd_snd_*` are exact
+zeros when not playing, so with the §3C gate the no-disc path is untouched.
 
-#### The integration risk is the HPS channel, not the mixer
+`mac_ch` is the §3C output, mono, sent to both channels. `cd_l`/`cd_r` are true
+stereo — `sys_top` carries separate 16-bit `AUDIO_L`/`AUDIO_R`, so no fold-down
+is needed. This matters more than it looks: a mono error is a volume error, a
+stereo error is an image error.
 
-`cd_audio.sv` carries its own `ca_io_rd` / `ca_io_lba` / `ca_io_active` -- it
-fetches audio sectors itself and arbitrates for the channel. **All five hps_io
-slots are already spoken for** on this core: 0/1 the SCSI disks, 2/3 the
-floppies, 4 the CD (`MacPlus.sv:174-179`). So the audio engine has to share
-slot 4 with the SCSI CD target.
+**CD volume is independent of the Mac's volume control.** On real hardware the
+Mac's setting had no effect on the drive; the drive had its own knob. So the CD
+channel must not pass through the Mac's volume stage, and it gets its own OSD
+control as the honest equivalent of that knob — without which there is no way
+to balance the two sources at all.
 
-A shared request/ack window between two engines on one channel is the same shape
-of seam as the 2026-08-22 wedge, which cost days. **It needs a seam test before
-it reaches hardware**, not after. That is the real cost of this phase; the mixer
-is an afternoon.
+Proposed: `"OFG,CD Volume,Full,3/4,1/2,Off;"` at status bits 15-16 (free —
+current allocation is 0, 4-9, 11-14, 18, with 10 reserved by the commented-out
+serial option). **Index 0 must be Full**, because `status` defaults to zero and
+unity is the desired default. The four steps are multiplier-free: `x`,
+`x - (x>>>2)`, `x>>>1`, `0`.
+
+#### Verification ladder for this phase
+
+Cheapest first, per the standing practice. Steps 1-5 need no permission;
+**a full Quartus compile always does**.
+
+| # | Gate | Passing means |
+|---|---|---|
+| 1 | Icarus: existing `sim/tb_scsi_target.v` | 3B did not regress the Phase 1/2 target |
+| 2 | Icarus: new arbitration seam cases (§3B) | Audio fetches do not disturb data transfers |
+| 3 | Icarus: new DC-blocker + envelope bench | Pedestal clears; no step at mount/unmount; a settled filter sits at 0, not -1 LSB |
+| 4 | `quartus_map --analyze_file` on each new file | Syntax |
+| 5 | `quartus_map --analysis_and_elaboration MacPlus` | Ports and connectivity. **Baseline 0 errors, 20 warnings** |
+| 6 | Full compile — **ask first** | Baseline 0 errors, 57 warnings, timing met |
+| 7 | Hardware: 3A alone (data CUE/CHD) | Host loop proven before any audio RTL exists |
+| 8 | Hardware: audio playback | The actual feature |
+| 9 | Hardware: **toggle-sound regression set** | The bug #7 titles still sound right through the cascade |
+| 10 | Hardware: no-disc A/B | Output unchanged with no disc mounted |
+
+Step 9 is the one most likely to be skipped and most likely to matter. **The
+startup chime does not exercise it** — the chime is buffer audio and already
+centred, so it passes through all of this untouched. The regression set is the
+titles named in bug #7.
+
+Step 10 is directly checkable: with the CD-ROM Drive OSD item set to Disabled,
+the bus is already bit-identical to a pre-CD build (§5.5), and with the §3C
+mount gate the audio path should be too.
+
+#### Open items
+
+* **The intermittent `!toc_ready` race** with a disc mounted, left over from the
+  attempt-4 work. §3A's `mac_cdrom_poll()` fix may bear on it; not established.
+* **Exact filter setting confirmed by ear**, against the toggle-sound titles
+  rather than the chime. K=12 is a calculation, not a measurement.
+* **CD volume step count.** Four is a guess at "enough"; the real knob was
+  continuous.
+* **Not blocking this phase, but outstanding for release:** SCSI cannot stall
+  the CPU bus (no DTACK path from `scsi.v` / `ncr5380.sv`), so a pacing
+  violation corrupts silently rather than hanging. Untouched by Phase 3.
 
 ---
 
@@ -856,7 +1097,9 @@ Merge order: `floppy-write` → `master` first, then rebase this branch.
 | Phase 1 regresses the existing disk path | **High** | It touches what every current user depends on. Hardware-gate Phase 1 alone before adding CD. The read ring is the largest single behavioural change. |
 | CD-ROM unusable on a Plus in practice | Medium | 68000 at 8MHz, 1–4MB RAM, polled SCSI. Historically real, but slow. May be more demo than daily driver. |
 | LC's boot-attach CD hang reproduces here | Medium | Documented on their core, cause not established. Test with CD detached at boot. |
-| Audio signedness (§Phase 3) | Medium | May surface a pre-existing bug that is currently inaudible. |
+| Audio signedness (§Phase 3) | ~~Medium~~ **Closed** | False alarm, resolved 2026-08-24. `audio` is already two's complement (`dataController_top.sv:162`) and `AUDIO_S = 1` is correct. |
+| Phase 3 regresses the toggle-sound titles (§3C) | Medium | The bug #7 software is the only thing that exercises the DC-blocker cascade, and the startup chime does not test it. Ladder step 9. |
+| Phase 3's host patch is reverted by the MiSTer updater | Low | Only during development — the change is intended for upstream. Keep `MiSTer.orig`. |
 | Fit / timing | **Low** | 475 M10K and 63% ALM free. The LC's constraints do not bind us. |
 
 ---
@@ -866,13 +1109,17 @@ Merge order: `floppy-write` → `master` first, then rebase this branch.
 **BlueSCSI Toolbox** (shared folders + CD changer, LC `TOOLBOX_ENABLE` /
 `CDCHANGER_ENABLE`). Two independent reasons:
 
-1. **It cannot work on stock MiSTer.** The LC readme: *"Stock Main has no Toolbox
-   handler; the core degrades gracefully without it."* The HPS handler lives on an
-   unmerged `add-bluescsi-toolbox-for-MacLC` branch of Main_MiSTer. Porting the RTL
-   without also shipping a forked Main yields dead code that returns CHECK.
-2. It is wholly anachronistic to the period (§2, tier 4).
-
-Revisit only if the Main-side handler is upstreamed.
+1. ~~**It cannot work on stock MiSTer.**~~ **CORRECTED 2026-08-25 — this reason
+   no longer holds.** The LC readme (*"Stock Main has no Toolbox handler"*) and
+   the `add-bluescsi-toolbox-for-MacLC` branch are both obsolete: the handler was
+   merged upstream in Main_MiSTer PR #1255 on 2026-08-02 and ships in stock Main
+   today (verified against the SD card, §Phase 3A). It is no longer a fork, and
+   no longer dead code. What still gates it for us is the core-name allowlist in
+   `support/mac/mac.cpp` — the same gate Phase 3A opens for the CD path, which
+   is deliberately split so that opening CD does **not** also claim the Toolbox
+   slot (slot 3 is our Mount Sec Floppy).
+2. It is wholly anachronistic to the period (§2, tier 4). **This reason stands
+   on its own and is why the Toolbox remains out of scope.**
 
 Also out of scope: the LC's TG68K CPU work (mentioned in the same forum reply but
 orthogonal to SCSI — separate evaluation if wanted), and their JTAG debug harness.
