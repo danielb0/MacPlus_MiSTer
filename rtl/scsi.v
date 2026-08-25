@@ -274,8 +274,9 @@ wire [7:0] cmd_dout =
 		cmd_read_capacity?read_capacity_dout:
 		cmd_mode_sense?mode_sense_dout:
 		cmd_request_sense?request_sense_dout:
-		cmd_cd_toc?cd_toc_byte(data_cnt, c1_op_r, c1_m, c1_s, c1_f):
-		cmd_cd_toc43?cd_toc43_byte(data_cnt, t43_m, t43_s, t43_f):
+		cmd_cd_toc?cd_toc_dout:
+		(cmd_cd_t43f2 || cmd_cd_t43f1)?cd_toc2_dout:
+		cmd_cd_toc43?cd_toc43_dout:
 		cmd_cd_subq?cd_subq_byte(data_cnt):
 		cmd_cd_subq43?cd_subq43_byte(data_cnt):
 		cmd_cd_astat?cd_astat_byte(data_cnt, cd_astat_vol_r):
@@ -517,6 +518,9 @@ wire [7:0] hd_mode_sense_dout =
 // byte 0 of every CD response carrying the PREVIOUS command's decode while
 // bytes 1+ were correct -- the data_cnt increment was what retriggered it).
 reg [1:0]  c1_op_r        = 2'b00;   // Apple READ TOC operation, CDB[9][7:6]
+reg [7:0]  c1_trk_r       = 8'd0;    // Apple READ TOC track (BCD), CDB[5]
+reg [7:0]  t43_start_r    = 8'd0;    // standard READ TOC start track, CDB[6]
+reg [7:0]  t43_fmt_r      = 8'd0;    // standard READ TOC format byte, CDB[9]
 reg [5:0]  cd_page_r      = 6'd0;    // MODE SENSE page code, CDB[2][5:0]
 reg        cd_astat_vol_r = 1'b0;    // AUDIO STATUS asked for volumes, CDB[3]==1
 reg [31:0] cd_alloc10_r   = 32'd0;   // raw 10-byte-CDB allocation, CDB[7:8]
@@ -1006,6 +1010,12 @@ wire       cmd_cd_subq      = (CDROM != 0) && (op_code == 8'hc2);  // READ Q SUB
 wire       cmd_cd_astat     = (CDROM != 0) && (op_code == 8'hcc);  // AUDIO STATUS (6 B)
 wire       cmd_cd_actl      = (CDROM != 0) && (op_code == 8'hce);  // AUDIO CONTROL (DataOut, discarded)
 wire       cmd_cd_toc43     = (CDROM != 0) && (op_code == 8'h43);  // standard READ TOC
+// Phase 2 answered 0x43 with a format-0 response whatever was asked, because
+// it ignored CDB[9] entirely. The AppleCD driver's actual dialect on the
+// CDU-8004 identity is format 2 (FULL TOC), with format 1 (SESSION INFO) as
+// the other real ask, so the engine pre-renders all three and these select.
+wire       cmd_cd_t43f2     = cmd_cd_toc43 && (t43_fmt_r == 8'h80);
+wire       cmd_cd_t43f1     = cmd_cd_toc43 && (t43_fmt_r == 8'h40);
 wire       cmd_cd_subq43    = (CDROM != 0) && (op_code == 8'h42);  // standard READ SUB-CHANNEL
 wire       cmd_cd_hdr       = (CDROM != 0) && (op_code == 8'h44);  // READ HEADER
 wire       cmd_cd_prevent   = (CDROM != 0) && (op_code == 8'h1e);  // PREVENT/ALLOW MEDIUM REMOVAL
@@ -1189,6 +1199,9 @@ always @(posedge clk) begin
 
 		// CD serve parameters, decoded here once (see the CD decode block).
 		c1_op_r        <= cmd[9][7:6];
+		c1_trk_r       <= cmd[5];
+		t43_start_r    <= cmd[6];
+		t43_fmt_r      <= cmd[9];
 		cd_page_r      <= cmd[2][5:0];
 		cd_astat_vol_r <= (cmd[3] == 8'h01);
 		cd_alloc10_r   <= {16'd0, cmd[7], cmd[8]};
@@ -1272,7 +1285,12 @@ end
 
 // the 5380 changes phase in the falling edge, thus we monitor it
 // on the rising edge
+// CD-audio engine strobes are 1-clk pulses raised on command acceptance
+// below. Clearing them here, ahead of every branch, covers the watchdog
+// abort path too - a clear placed only in the final else would let a pulse
+// stretch across an abort cycle.
 always @(posedge clk) begin
+	ca_cmd_stb <= 1'b0; ca_read_stb <= 1'b0; ca_eject_stb <= 1'b0;
 	if(any_rst) begin
 		phase <= PHASE_IDLE;
 	end else if (wdog_abort) begin
@@ -1317,9 +1335,17 @@ always @(posedge clk) begin
 				// is this a supported and valid command?
 				// (CDROM: media-dependent commands CHECK with the no-disc sense
 				// while unmounted, and a prevent-blocked EJECT CHECKs too.)
-				if(cmd_ok && !cd_no_media && !cd_hdr_msf_rej && !lba_out_of_range) begin
+				if(cmd_ok && !cd_no_media && !cd_audio_read_rej && !cd_hdr_msf_rej && !lba_out_of_range) begin
 					// yes, continue
 					status <= (cmd_cd_eject_any && cd_prevent) ? `STATUS_CHECK_CONDITION : `STATUS_OK;
+
+					// Notify the CD-audio engine. All constant 0 on a disk target.
+					// Raised HERE, on acceptance alongside STATUS_OK, because the
+					// engine's contract (cd_audio.sv:39) is that the CDB is latched
+					// with status GOOD already decided - not at raw decode.
+					ca_cmd_stb   <= cmd_cd_audio_nop;
+					ca_read_stb  <= cmd_read && (CDROM != 0);
+					ca_eject_stb <= cmd_cd_eject_any && !cd_prevent;
 
 					// continue according to command
 
@@ -1380,18 +1406,92 @@ wire  [7:0] ca_t2_q0, ca_t2_q1, ca_t2_q2, ca_t2_q3;
 wire  [9:0] ca_t2_len;
 wire        ca_disc_audio;
 
-// Serve addresses are driven by the TOC serving logic; tied off for now.
-wire  [8:0] ca_toc_addr = 9'd0;
-wire  [8:0] ca_t43_addr = 9'd0;
-wire  [8:0] ca_t2_addr  = 9'd0;
+// ---- TOC serving from the engine's pre-rendered response RAMs -----------
+// Phase 2 synthesized a single-track TOC from `capacity`. The engine builds the
+// real one from Main's MCDA blob, so these address its images instead. All
+// three RAMs are 1-clock registered reads, the same latency as the sector
+// dpram this file already serves combinationally (buffer0/buffer1 at the
+// cmd_dout mux), and they use the same even/odd plane split - so the underlying
+// address advances every TWO bytes and the margin is identical to that proven
+// path. MacLC's 4-deep data_cnt_next lookahead is for their FOUR parallel dout
+// lanes, not for latency; we have one lane and use q0 alone.
+function [7:0] cd_bcd2bin;
+	input [7:0] v;
+	cd_bcd2bin = (v[7:4] * 8'd10) + {4'd0, v[3:0]};
+endfunction
+
+// Apple 0xC1: layout [0..3] header, [4..7] lead-out, [8+4k..] track k+1.
+// Mode (latched CDB[9][7:6]) picks the base; track mode indexes by BCD CDB[5].
+// Reads past the 99 precomputed descriptors clamp to the last one with the
+// byte-in-descriptor preserved - MAME's "keep returning the last track".
+wire  [7:0] ca_toc_trk_bin = cd_bcd2bin(c1_trk_r);
+wire  [8:0] ca_toc_trk_k   = (ca_toc_trk_bin == 8'd0)  ? 9'd0  :
+                             (ca_toc_trk_bin >  8'd99) ? 9'd98 :
+                             {1'b0, ca_toc_trk_bin} - 9'd1;
+wire  [8:0] ca_toc_base    = (c1_op_r == 2'b01) ? 9'd4 :
+                             (c1_op_r == 2'b10) ? (9'd8 + {ca_toc_trk_k[6:0], 2'b00}) :
+                                                  9'd0;
+wire  [8:0] ca_toc_raw     = ca_toc_base + data_cnt[8:0];
+wire  [8:0] ca_toc_addr    = (ca_toc_raw < 9'd404) ? ca_toc_raw
+                                                   : (9'd400 + {7'd0, ca_toc_raw[1:0]});
+wire  [7:0] cd_toc_dout    = ca_toc_ready ? ca_toc_q0 : 8'h00;
+
+// Standard 0x43 format 0 (MSF form): 4-byte header then 8-byte descriptors.
+// A start track other than 1 skips whole descriptors, and the header's u16be
+// data-length must then describe the SHORTENED response, not the whole table.
+wire  [6:0] ca_t43_nreal = (ca_t43_len >= 10'd14) ? ((ca_t43_len - 10'd14) >> 3) + 7'd1 : 7'd1;
+wire  [6:0] ca_t43_soff  =
+	(t43_start_r == 8'h00 || t43_start_r == 8'h01) ? 7'd0 :
+	(t43_start_r == 8'hAA)                          ? ca_t43_nreal :
+	(t43_start_r >  {1'b0, ca_t43_nreal})           ? ca_t43_nreal :
+	                                                  t43_start_r[6:0] - 7'd1;
+wire  [9:0] ca_t43_flen  = {(7'd1 + ca_t43_nreal - ca_t43_soff), 3'b000} + 10'd2;
+wire  [9:0] ca_t43_tot   = ca_t43_flen + 10'd2;
+wire  [8:0] ca_t43_addr  = (data_cnt < 32'd4) ? data_cnt[8:0]
+                         : (9'd4 + {ca_t43_soff, 3'b000} + (data_cnt[8:0] - 9'd4));
+function [7:0] t43_hdr_fix;
+	input [31:0] cnt;
+	input [7:0]  raw;
+	t43_hdr_fix = (cnt >= {22'd0, ca_t43_tot}) ? 8'h00 :
+	              (cnt == 32'd0) ? {6'd0, ca_t43_flen[9:8]} :
+	              (cnt == 32'd1) ? ca_t43_flen[7:0] : raw;
+endfunction
+wire  [7:0] cd_toc43_dout = ca_toc_ready ? t43_hdr_fix(data_cnt, ca_t43_q0) : 8'h00;
+
+// Format 2 (FULL TOC) / format 1 (SESSION INFO): the T2 plane IS the response
+// image, linear addressing, session page at [496..507]. Zero-fill past the real
+// payload - serving pads to the armed allocation, and the u16be length fields
+// carry the true sizes.
+wire  [8:0] ca_t2_addr = (cmd_cd_t43f1 ? 9'd496 : 9'd0) + data_cnt[8:0];
+function [7:0] t2_fix;
+	input [31:0] cnt;
+	input [7:0]  raw;
+	t2_fix = (cnt >= {22'd0, ca_t2_len}) ? 8'h00 : raw;
+endfunction
+function [7:0] sess_fix;
+	input [31:0] cnt;
+	input [7:0]  raw;
+	sess_fix = (cnt >= 32'd12) ? 8'h00 : raw;
+endfunction
+wire  [7:0] cd_toc2_dout = !ca_toc_ready ? 8'h00 :
+                           cmd_cd_t43f1 ? sess_fix(data_cnt, ca_t2_q0)
+                                        : t2_fix(data_cnt, ca_t2_q0);
+
+// A data READ aimed at an audio track must CHECK, not be served as garbage.
+// Without this an audio-only disc mounts with a non-zero capacity and returns
+// the audio extent as if it were a filesystem.
+wire        cd_audio_read_rej = (CDROM != 0) && mounted && cmd_read && ca_disc_audio;
+
+
+
 
 // Command strobes into the engine. Wired to the decode next; the engine is
 // harmless with them low - it still acquires the TOC on the mount pulse,
 // which is what makes this stage independently testable (a TOC fetch shows
 // up on PIOS as win=TOC, the first thing that actually exercises the tag).
-wire        ca_cmd_stb   = 1'b0;
-wire        ca_read_stb  = 1'b0;
-wire        ca_eject_stb = 1'b0;
+reg         ca_cmd_stb   = 1'b0;
+reg         ca_read_stb  = 1'b0;
+reg         ca_eject_stb = 1'b0;
 
 // CD Audio Control page 0x0E output ports. MODE SELECT does not write these
 // yet, so default to the drive's power-on state: port 0 = left at full, port
