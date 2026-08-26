@@ -1097,6 +1097,110 @@ contract, prompted by finding PCM inside a disk image. **Audio bytes at a disk
 LBA can only arrive through the sector buffer**, and there is exactly one write
 port into it.
 
+#### OPEN DEFECT: a CD READ can inherit the sector ring's previous occupant
+
+**Status 2026-08-26: live, reproduced on hardware TWICE, not reproduced in
+simulation, cause NOT established.** Read this before touching the read ring.
+
+##### What was measured
+
+Copying files off the Panzer Dragoon II Zwei disc onto an HFS volume, one file
+in each run came back wrong. Same file, same offset, both runs, on build
+`54289d58`:
+
+| Run | Files copied | Corrupt | Bytes wrong | At offset |
+|---|---|---|---|---|
+| 1 (audio playing) | 55 | `DRA01E01.GRB` | 378 | 512 |
+| 2 (**audio off**) | 59 | `DRA01E01.GRB` | 404 | 512 |
+
+**Audio is NOT involved** -- run 2 had none. Everything else on both runs was
+byte-perfect, and the destination volume reconciled exactly (13,621 files,
+accounted == MDB in use, 0 out-of-bounds, 0 cross-linked).
+
+##### The arithmetic, which pins the mechanism precisely
+
+```
+DRA01A.MTB    ISO lba 46264..46310, 95400 B = 47 blocks = 188 HPS sectors
+              read as ONE command, copied IMMEDIATELY BEFORE
+DRA01E01.GRB  ISO lba 46717, 2136 B -- the corrupted file
+```
+
+The wrong bytes are the contents of **ISO block 46304 at the same intra-block
+offset (512)**. Block 46304 lies inside `DRA01A.MTB`; its second 512-byte half
+is HPS sector 185217 = sector index **161** of that command. Ring slot =
+index mod 32 (RING_LOG=5) = **1**. The corruption in the next file sits at file
+offset 512 = ring slot **1**. Exact match.
+
+Within that 512-byte slot the split is diagnostic:
+
+```
+file[   0: 512]  correct
+file[ 512:1024]  first ~407 bytes = PREVIOUS command's data, last ~105 correct
+file[1024:2136]  correct
+```
+
+A fill writes a sector from its start upward, so *stale head, fresh tail* means
+the Mac consumed those bytes BEFORE the HPS wrote them and the fill then caught
+up mid-sector. **The host ran past the fetch frontier.** `rd_cur_unfilled` is
+precisely the guard that should make that impossible, and it is present and
+identical to MacLC's.
+
+##### What has been ruled out
+
+* **Audio arbitration.** All four `~ca_io_active` scoping sites present and
+  identical to MacLC; ring bookkeeping identical line for line; `ca_io_active`
+  verified still high on the ack-falling cycle (`fr_act` clears the cycle AFTER
+  the guard evaluates), so an audio ack cannot bump `rd_hps_blk`. And run 2 had
+  no audio at all.
+* **MacLC's `rd_ahead` term.** We lack it, but justifiedly: it guards their
+  pseudo-DMA host-face capturing the +2/+3 pair, and we deliberately did not
+  port that machinery (`grep second_word|din_pair|dout_next` on our
+  `ncr5380.sv` -> no matches; `rdata = dack ? cur_data` serves ONE byte).
+  Porting it would be a guard against a hazard we do not have.
+* **A test artefact.** The disc has zero duplicate basenames, so the comparison
+  keyed correctly.
+* **Marginality.** Same file, same offset, same source block, two runs with
+  different file sets. Deterministic.
+
+##### What did NOT reproduce it
+
+`cd38` in `tb_scsi_cdrom`: a 12-block READ (48 sectors, wrapping the 32-sector
+ring once) followed immediately by a 2-block READ, both byte-checked. Passes.
+`buf_in` was enlarged to 64 KB so the ring CAN wrap -- at 8 KB the bench could
+only ever use 16 of the 32 slots, so this class was structurally untestable
+before. The case is kept: it pins the invariant even though it is currently
+green.
+
+**Why it probably does not reproduce:** `tb_scsi_cdrom` drives `scsi.v`
+DIRECTLY. It never goes through `ncr5380.sv`'s pseudo-DMA host-face, and its HPS
+model acks in a fixed 8 clocks. MacLC's note on their equivalent bug names "a
+just-in-time fill" as the trigger, and a deterministic fast bench never produces
+one. **The reproduction needs ncr5380 + scsi.v + pseudo-DMA reads + VARIABLE HPS
+latency** -- which is exactly the seam coverage this plan has asked for since
+Phase 3B and never got. Real HPS latency is not small: a write flush was
+measured at ~28 ms on 2026-08-26.
+
+##### Method note, worth more than the bug
+
+Four mechanisms were proposed for this symptom during one session and all four
+were wrong: frame starvation, `ca_grant`, a timing regression from a +6 ALM fit,
+and a late-ack regression from removing the CD's BSY gate. Each was plausible,
+each survived a round of reasoning, and each fell to the next measurement.
+
+The two defects that WERE found came from reading the RTL against a published
+contract (`hps_io`'s per-slot ack) and from arithmetic on measured bytes (ring
+slot 161 mod 32). **Neither came from reasoning about symptoms.** Prefer a
+reproduction that fails over an explanation that convinces.
+
+##### Practical position until fixed
+
+CD -> disk copies can silently corrupt roughly one file in 55. Status is GOOD,
+lengths are right, the volume reconciles, and no probe counter sees it. Disk to
+disk is unaffected (165 files verified byte-exact on 2026-08-26). Only a byte
+comparison finds this, which is why it survived since Phase 2 -- the 3A session
+explicitly logged "NOT proven: byte-correctness" and today is the first time
+anyone ran that check.
+
 #### 3C — In-core DC blocker with a mount envelope
 
 **Decided 2026-08-25.** Four decisions, in the order they were made:

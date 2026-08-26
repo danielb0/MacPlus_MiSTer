@@ -288,7 +288,7 @@ module tb_scsi_cdrom;
       end
    endtask
 
-   reg [7:0] buf_in [0:8191];
+   reg [7:0] buf_in [0:65535];   // >32 sectors: the ring must be able to wrap
    integer   buf_len;
    task read_data_phase;
       input integer maxbytes;
@@ -820,6 +820,77 @@ module tb_scsi_cdrom;
                            apple_ok, buf_len, buf_in[1], buf_in[3]);
       end
       report(ok, "cd19 - READ SUB-CHANNEL (0xC2 and 0x42) report track 1, stopped");
+
+      // ==================================================================
+      // Test 38: a long READ that WRAPS the sector ring must not leak its
+      // leftovers into the next READ.
+      //
+      // HARDWARE 2026-08-26. Copying 59 files off the Panzer Dragoon disc,
+      // one file came back with 404 wrong bytes at offset 512 -- and the
+      // wrong bytes were the PREVIOUS FILE's data. The arithmetic pinned it:
+      //
+      //   DRA01A.MTB    ISO lba 46264..46310, read as ONE command = 188
+      //                 HPS sectors, so its sector 161 landed in ring slot
+      //                 161 mod 32 = 1
+      //   DRA01E01.GRB  the next file copied; its corruption is at file
+      //                 offset 512 = ring slot 1
+      //
+      // So slot 1 still held the previous command's occupant and the new
+      // command was allowed into it before its own fetch landed. The first
+      // ~407 bytes are stale and the tail is correct, which is the Mac
+      // running PAST the fetch frontier and the fill catching up mid-sector.
+      //
+      // rd_cur_unfilled is the guard that should make this impossible. This
+      // case exists to find out why it does not. Reproducing it needs a
+      // transfer longer than RING_BLOCKS -- 12 CD blocks = 48 sectors wraps
+      // the 32-sector ring once, like the real 188-sector read did.
+      // ==================================================================
+      select_target;
+      // READ(10), lba 1000, 12 blocks = 24576 bytes = 48 HPS sectors
+      send_cdb(8'h28,8'h00,8'h00,8'h00,8'h03,8'he8,8'h00,8'h00,8'h0c,8'h00,0,0, 10);
+      read_data_phase(24576);
+      finish_command;
+      begin : t38a
+         integer i2, sec2;
+         ok = (!timed_out) && (buf_len == 24576) && (status_byte == 8'h00);
+         if (ok)
+            for (i2 = 0; i2 < 24576; i2 = i2 + 1) begin
+               sec2 = 4000 + (i2 / 512);
+               expect_byte = sec2[7:0] ^ (i2 % 512);
+               if (buf_in[i2] !== expect_byte) begin
+                  if (ok) $display("       long read first mismatch at %0d: got %02x want %02x",
+                                   i2, buf_in[i2], expect_byte);
+                  ok = 0;
+               end
+            end
+         if (!ok) $display("       (len=%0d status=%02x)", buf_len, status_byte);
+      end
+      report(ok, "cd38 - a ring-wrapping READ is byte-exact");
+
+      // ...and now the SHORT read straight after it. Slot 1 currently holds
+      // sector 33 of the transfer above; if the new command is let into it
+      // early, these bytes are that leftover.
+      select_target;
+      // READ(6), lba 2000, 2 blocks = 4096 bytes
+      send_cdb(8'h08,8'h00,8'h07,8'hd0,8'h02,8'h00,0,0,0,0,0,0, 6);
+      read_data_phase(4096);
+      finish_command;
+      begin : t38b
+         integer i3, sec3;
+         ok = (!timed_out) && (buf_len == 4096) && (status_byte == 8'h00);
+         if (ok)
+            for (i3 = 0; i3 < 4096; i3 = i3 + 1) begin
+               sec3 = 8000 + (i3 / 512);
+               expect_byte = sec3[7:0] ^ (i3 % 512);
+               if (buf_in[i3] !== expect_byte) begin
+                  if (ok) $display("       STALE at %0d: got %02x want %02x (slot %0d)",
+                                   i3, buf_in[i3], expect_byte, (i3 / 512) % 32);
+                  ok = 0;
+               end
+            end
+         if (!ok) $display("       (len=%0d status=%02x)", buf_len, status_byte);
+      end
+      report(ok, "cd38 - the READ after it does not inherit the ring's leftovers");
 
       // ==================================================================
       // Test 19b: the sub-channel must report what the drive is ACTUALLY
