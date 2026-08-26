@@ -716,15 +716,29 @@ commands) plus their testbench block. **The io machinery is nearly identical**
 — same `rd_hps_blk`, same `sd_buff_sel` double-buffer, same `io_busy` shape —
 so the arbitration maps essentially 1:1 onto seven touchpoints:
 
+**CORRECTED 2026-08-26 - this table was WRONG, and shipped that way.** It listed
+seven sites and there are eight. The missing one is the `io_rd` merge, and its
+absence is the defect written up in "The eighth touchpoint" below. The table was
+originally derived by reading which lines mention `ca_io_active`; the eighth site
+mentions `ca_io_rd_w` instead and fell outside that search. Take this as the
+lesson it is: **a port checklist built by grepping for one signal name finds only
+the sites that use that signal.**
+
 | Site | Ours | Change |
 |---|---|---|
 | buffer0 `wren_a` | `scsi.v:155` | `&& !ca_io_active` |
 | buffer1 `wren_a` | `scsi.v:171` | `&& !ca_io_active` |
 | `sd_buff_sel` toggle | `scsi.v:186` | `& ~ca_io_active` |
 | `rd_hps_blk` bump | `scsi.v:194` | `& ~ca_io_active` |
-| `io_busy` | `scsi.v:236-237` | `io_ack` → `(io_ack & ~ca_io_active)` |
+| `io_busy` | `scsi.v:236-237` | `io_ack` → `(io_ack & ~ca_io_active)`, and `io_rd` → `io_rd_d` |
 | `io_lba` | `scsi.v:703` | `assign io_lba = ca_io_active ? ca_io_lba : lba;` |
+| **`io_rd`** | **the module output** | **`reg io_rd_d; assign io_rd = io_rd_d \| ca_io_rd_w;`** - MacLC `scsi.v:1812-1818` |
 | new | near `scsi.v:716` | `ca_grant` + the `generate` block |
+
+Three sites read `io_rd_d` (the register itself, `io_busy`, `ca_grant`) and
+exactly ONE reads the shared `io_rd` wire: the prefetch start guard. That
+asymmetry is the entire interlock - get it backwards and either the audio engine
+never defers to the disk, or the disk never defers to the audio engine.
 
 **Two of MacLC's comments record hardware failures and must be inherited
 deliberately — both are easy to "improve" into bugs:**
@@ -764,6 +778,152 @@ disturb an in-flight data transfer, and `sd_buff_sel` must not advance on an
 guard). This is the lesson from the 2026-08-22 wedge and from the floppy Phase 4
 byte-swap: **defects live in seams, and a bench that only talks to one module
 can only agree with itself.**
+
+#### The eighth touchpoint, and four other defects (2026-08-26)
+
+Found while reaping the dead Phase 2 TOC synthesis, which is how this kind of
+thing usually surfaces: removing the code that was no longer read forced a look
+at what the compiler had been saying about the code that was.
+
+**1. `ca_io_rd_w` reached nothing.** The engine's read request was wired out of
+`cd_audio` and read by no one, because `scsi.v` kept `io_rd` as a plain
+`output reg` driven only by the disk prefetch engine. Two consequences:
+
+* the audio/TOC engine could only make progress by PIGGY-BACKING on a disk
+  fetch that happened to be in flight, since `io_lba` is already muxed to its
+  address;
+* therefore a disk fetch issued while `ca_io_active` was high was served the
+  ENGINE's block, silently, into the sector ring. The `!io_rd` guard is what
+  should have prevented that, and it was blind.
+
+Measured in `tb_scsi_cdrom` by reproducing the pre-fix conditions:
+
+```
+(len=2048 status=00 fetches=6)
+FAIL: cd6 - READ(6) of one 2048-block = 4 HPS sectors, byte-exact
+```
+
+GOOD status, a full 2048 bytes handed to the guest, six HPS fetches instead of
+four. **This is the silent-corruption class**: success with a full-length
+transfer, so no probe counter and no guest-visible symptom reports it. Nothing
+short of a byte comparison finds it.
+
+**This also reinterprets the 2026-08-26 3B hardware result.** The real track
+list and the correct track lengths were genuine, but the mechanism was not the
+one recorded — the TOC arrived by piggy-backing on Finder disk reads at mount,
+not by the engine arbitrating for the channel. "Zero stalls, zero watchdog
+fires, arbitration holds on first hardware contact" was a correct observation
+attached to a wrong conclusion. The arbitration had not run at all.
+
+**2. `bin2bcd` truncates — an UPSTREAM MacLC defect.** Every arm read
+`{4'd4, v - 8'd40}`: a 12-bit concatenation returned through an 8-bit function,
+so the tens nibble is discarded. `bin2bcd(40)` = `0x00`, `bin2bcd(33)` = `0x03`,
+`bin2bcd(17)` = `0x07`. Values under 10 convert correctly, which is exactly why
+it survives — track numbers are single digits on most discs, and the times a
+guest displays come from the 0x43 planes, which are binary. It is the Apple
+0xC1 BCD plane that is wrong, at all 15 call sites.
+
+Caught by bench case `cd9`, which asserts a lead-out of 40:33:17 and got
+00:03:07. **`rtl/cd_audio.sv` was byte-identical to MacLC's before this fix and
+is now divergent for the first time — a future re-sync of that file silently
+reintroduces the bug.** Worth sending upstream.
+
+**3. `cd_no_media` gated on the wrong flag.** The deleted Phase 2 machine's
+`toc_ready` was its one live consumer. Every TOC serve path already gates on
+`ca_toc_ready` and emits `0x00` when it is low, so keying readiness to a
+different, earlier flag opened a window where a TOC command took GOOD status
+with an all-zeros payload — which a driver cannot retry, because nothing told
+it anything was wrong. One flag, used by both.
+
+**4. `t43_hdr_fix` / `t2_fix` read module signals from their bodies**, which the
+note at `scsi.v:424` already documents as a foot-gun that caused stale CD
+responses once. Both now take their values as arguments.
+
+This one carries a lesson about the warnings themselves. `ca_t43_tot` was
+reported "assigned a value but never read" while `ca_t2_len` — syntactically the
+same kind of body read one function down — was not. The reason is that in the CD
+instance `ca_t2_len` is driven by a module OUTPUT PORT, and Quartus 10036 does
+not track those. **Both were equally broken; only one was visible. Never read
+the absence of a 10036 warning as evidence that a signal is used.**
+
+**5. The bench never asserted `sys_rst`.** Harmless while the CD target had no
+audio engine, fatal once it did: `cd_audio` initialises its state only in the
+reset branch, so every one of its outputs sat at `x` and `ca_io_active` poisoned
+the io arbitration. `tb_scsi_cdrom` was **already 8 of 34 failing at `6576e18`**
+— 3B never updated it and nobody ran it. Hardware came first and the bench
+rotted in the same commit that made it matter.
+
+##### Gates after the fix (commit `6e138b8`, build `6e138b82`)
+
+| Gate | Before | After |
+|---|---|---|
+| Icarus `tb_scsi_target` (disk) | 0/14 fail | 0/14 fail |
+| Icarus `tb_scsi_cdrom` (CD) | **8/34 fail** | 0/34 fail |
+| Icarus `tb_ncr5380_seam` | 0/63 fail | 0/63 fail |
+| Quartus A&S "never read" | 98 | **73**, none added |
+| Fit | 19,431 ALM | 19,373 ALM |
+| Worst setup slack | +0.551 ns | +0.594 ns |
+
+`seam9` needed repointing: it asserted on the module's `io_rd` output, which now
+legitimately carries the engine's own outstanding fetch when the HPS is switched
+off. The invariant it exists for is about the data-path request and `io_busy`,
+both of which read `io_rd_d`.
+
+##### Hardware validation of `6e138b82` (2026-08-26)
+
+Two folders copied disk-to-disk, SCSI 5 → SCSI 6, with the Panzer Dragoon II
+Zwei CUE mounted throughout. Verified OFF-BOARD against the source volume with a
+purpose-written HFS reader (`scratchpad/hfs.py` — deliberately not
+`hfsutils`/`machfs`, since the point is an implementation independent of the one
+under test):
+
+| | Files | Forks | Identical | Rsrc-header scratch only | **Real mismatches** |
+|---|---|---|---|---|---|
+| `System Extras` | 138 | 276 | 153 | 123 | **0** |
+| `Stacks` | 27 | 54 | 40 | 14 | **0** |
+
+14,384,915 bytes compared. Every data fork, every resource map, every byte of
+resource data matched, plus type and creator on all 165 files.
+
+The 137 "scratch" cases differ only at offsets inside the 256-byte resource fork
+header, outside the 16-byte header proper, outside the resource data and outside
+the resource map — checked against each file's own `dataOff`/`mapOff`/lengths
+rather than assumed. The Resource Manager rewrites that region when it creates a
+fork. **Expect this on any Finder copy; it is not a defect.**
+
+Volume reconciliation on the destination, the check established by the
+2026-08-23 soak:
+
+```
+data forks physical   3,125,248
+rsrc forks physical  15,485,952
+B-trees                 326,656
+accounted            18,937,856
+MDB in use           18,937,856    difference 0
+extents out of bounds 0     cross-linked blocks 0
+```
+
+**Why this is the test that mattered.** The corruption mode fixed above returns
+GOOD status with a full-length transfer. It is invisible to the probe deck and
+invisible to the Finder, and would land as wrong bytes inside a fork. 165 files
+across 14.4 MB with a CD mounted, and not one wrong byte.
+
+Note also: the Finder reported "197 files" and the volume holds 165. Both are
+right — 165 files + 30 subfolders + the 2 top-level folders = 197 ITEMS. The
+Finder counts items. This is the second time its counting has looked like
+evidence of a copy failure and been nothing of the kind (see the 2026-08-23
+`Icon` file discrepancy). **Check the byte accounting, never the count.**
+
+##### Still not exercised: frame streaming
+
+`win=audio` has still never been observed as a real engine fetch on hardware.
+It can be tested NOW, before 3C and 3D, and without hearing anything: a guest CD
+player issuing PLAY makes the engine stream frames regardless of whether
+`cd_snd_l`/`cd_snd_r` go anywhere. Watch `PIOS lba`, which is 22 bits and does
+not alias like the 8-bit counters — **it should advance ~75 per second**, that
+being the definition of CD-DA. MacLC's starvation bug (their HW capture
+2026-07-18) showed as ~42/s, so a delta of ~85 per 2 s sample rather than ~150
+would mean our permissive `ca_grant` did not survive the port after all.
 
 #### 3C — In-core DC blocker with a mount envelope
 
