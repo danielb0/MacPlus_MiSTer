@@ -1180,6 +1180,37 @@ latency** -- which is exactly the seam coverage this plan has asked for since
 Phase 3B and never got. Real HPS latency is not small: a write flush was
 measured at ~28 ms on 2026-08-26.
 
+##### Second reproduction attempt: seam17, also negative (2026-08-26)
+
+`cd38` failed to reproduce because `tb_scsi_cdrom` drives `scsi.v` directly with
+a fixed-latency HPS. `seam17` closes both gaps and **still does not reproduce
+it**:
+
+* goes through `ncr5380`'s real pseudo-DMA host-face (`pdma_arm` /
+  `dma_read_byte`), not straight at `scsi.v`;
+* a NEW HPS sector server with **randomised fill latency** (3-72 clocks) --
+  the "just-in-time fill" MacLC's note blames. The bench previously had NO
+  server that delivered data at all on this path; the old one only ACKed;
+* a 12-block READ (48 sectors) that wraps the 32-slot ring, then a 2-block
+  READ, every byte checked on both.
+
+58 fills served, both legs green. So the scenario as I understand it is now
+covered at the seam and is clean, which means my model of the failure is still
+missing something. Candidates, in order of suspicion:
+
+1. **Scale.** 58 fills against thousands of reads on hardware for a 1-in-55
+   file failure rate. The window may simply be rare; looping seam17 over many
+   LBA pairs would raise the odds cheaply.
+2. **Latency RANGE.** 3-72 clocks here; the real HPS was measured at ~28 ms
+   (~900,000 clocks) for a write flush. Longer latency should make the stall
+   MORE likely to hold, not less -- but the assumption is untested.
+3. **Real driver access patterns** -- mixed byte/word/longword prefixes and
+   command lengths that the bench's uniform byte reads do not produce.
+
+Two bench gaps were closed getting here, both worth keeping regardless of this
+defect: `buf_in` at 8 KB meant `tb_scsi_cdrom` could never exercise more than 16
+of the 32 ring slots, and the seam bench could not check READ DATA at all.
+
 ##### Method note, worth more than the bug
 
 Four mechanisms were proposed for this symptom during one session and all four

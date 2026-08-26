@@ -90,6 +90,9 @@ module tb_ncr5380_seam;
 	// bus and dropped BSY.
 	integer hps_delay = 20;
 	reg     hps_enable = 1'b1;
+	reg     hps_data_mode = 1'b0;      // see the sector server below
+	integer hps_seed = 32'h13579BDF;
+	integer hps_fills = 0;
 	integer hps_acks = 0;
 	reg     saw_io_rd = 0;
 
@@ -114,7 +117,7 @@ module tb_ncr5380_seam;
 		if (reset) begin
 			io_ack[CD_DEV] <= 0;
 			wait_n   = 0;
-		end else if (hps_manual) begin
+		end else if (hps_manual || hps_data_mode) begin
 			wait_n = 0;
 		end else begin
 			if (io_rd[CD_DEV] | io_wr[CD_DEV]) saw_io_rd <= 1'b1;
@@ -316,6 +319,43 @@ module tb_ncr5380_seam;
 	endtask
 
 	// Select a target by ID bit
+	// ---- HPS sector server with VARIABLE latency ------------------------
+	// The other model here only ACKS -- it never delivers bytes -- and
+	// tb_scsi_cdrom's does deliver but always in a fixed 8 clocks, and talks to
+	// scsi.v directly rather than through this file's pseudo-DMA host-face.
+	// Neither can produce a JUST-IN-TIME fill, which is the condition MacLC's
+	// note names for their equivalent ring-stale bug, and which the hardware
+	// failure of 2026-08-26 needs (real HPS latency is wildly variable -- a
+	// write flush measured ~28 ms that day).
+	//
+	// Serves the same pattern as tb_scsi_cdrom: byte n of HPS sector L is
+	// L[7:0] ^ n. Ack framing matches hps_io -- sd_ack asserted for the whole
+	// session, sd_buff_wr pulsing inside it.
+	always @(posedge clk) begin : hps_data
+		integer w, dly;
+		reg [7:0] eb, ob;
+		if (hps_data_mode && io_rd[CD_DEV] && !io_ack[CD_DEV]) begin
+			hps_seed = (hps_seed * 32'd1103515) + 32'd12345;
+			dly = 3 + ((hps_seed >> 9) % 70);      // 3..72 clocks
+			repeat (dly) @(posedge clk);
+			io_ack[CD_DEV] <= 1'b1;
+			@(posedge clk);
+			for (w = 0; w < 256; w = w + 1) begin
+				eb = io_lba[CD_DEV][7:0] ^ ((w*2)   & 8'hff);
+				ob = io_lba[CD_DEV][7:0] ^ ((w*2+1) & 8'hff);
+				sd_buff_addr <= w[7:0];
+				sd_buff_dout <= {ob, eb};
+				sd_buff_wr   <= 1'b1;
+				@(posedge clk);
+			end
+			sd_buff_wr <= 1'b0;
+			@(posedge clk);
+			io_ack[CD_DEV] <= 1'b0;
+			hps_fills = hps_fills + 1;
+			@(posedge clk);
+		end
+	end
+
 	// Emulate one hps_io session for `slot`: sd_ack names the slot, while
 	// sd_buff_addr/dout/wr are a SHARED bus every target can see. Writing 8
 	// words is plenty -- the defect shows on the first strobe.
@@ -1133,6 +1173,106 @@ module tb_ncr5380_seam;
 			if (!survived)
 				$display("          buffer went %04x/%04x -> %04x/%04x: the CD slot's data landed in the DISK's buffer",
 				         own0, own1, after0, after1);
+		end
+
+		// ==================================================================
+		// seam17: a ring-WRAPPING read, then a short one, through the real
+		// pseudo-DMA host-face and with VARIABLE HPS latency.
+		//
+		// Chasing the open defect of 2026-08-26: copying off a CD corrupted
+		// about one file in 55, and the wrong bytes were the previous
+		// command's data in the same ring slot (its sector 161, slot
+		// 161 mod 32 = 1, showing up at the next file's offset 512 = slot 1).
+		// Stale head, fresh tail -- the host ran PAST the fetch frontier that
+		// rd_cur_unfilled is supposed to hold it behind.
+		//
+		// cd38 in tb_scsi_cdrom does not reproduce it, and that bench drives
+		// scsi.v directly with a fixed-latency HPS. This one goes through
+		// ncr5380's DACK path with a randomised fill time, which is the
+		// "just-in-time fill" MacLC's note blames.
+		// ==================================================================
+		begin : seam17
+			integer i4, bad4, sec4, first4;
+			reg [7:0] got4, want4;
+			reg       drq4;
+			// seam15 leaves target 0 parked in CMD phase holding BSY, so the
+			// CD cannot win selection until the bus is cleared.
+			reset = 1'b1; repeat (8) @(posedge clk);
+			reset = 1'b0; repeat (16) @(posedge clk);
+			hps_data_mode = 1'b1;
+			hps_enable    = 1'b1;
+			hps_disk_enable = 1'b1;
+			mount_cd(32'd400000);
+			// the engine's TOC acquisition takes longer with randomised HPS
+			// latency than mount_cd's fixed wait allows; without this the READ
+			// is refused with cd_no_media and the test measures nothing.
+			begin : tocw
+				integer gt;
+				gt = 0;
+				while (!dut.target[CD_DEV].target.ca_toc_ready && gt < 60000) begin
+					@(posedge clk); gt = gt + 1;
+				end
+			end
+
+			// READ(10) lba 1000, 12 blocks = 48 HPS sectors: wraps the 32-slot ring
+			select_target(8'h08);
+			send_cmd_byte(8'h28); send_cmd_byte(8'h00);
+			send_cmd_byte(8'h00); send_cmd_byte(8'h00);
+			send_cmd_byte(8'h03); send_cmd_byte(8'he8);
+			send_cmd_byte(8'h00); send_cmd_byte(8'h00);
+			send_cmd_byte(8'h0c); send_cmd_byte(8'h00);
+			reg_write(`W_ICR, 8'h00);
+			pdma_arm;
+			bad4 = 0; first4 = -1;
+			for (i4 = 0; i4 < 24576; i4 = i4 + 1) begin
+				wait_drq(drq4);
+				if (!drq4) i4 = 24576;
+				else begin
+					dma_read_byte(got4);
+					sec4  = 4000 + (i4 / 512);
+					want4 = sec4[7:0] ^ (i4 % 512);
+					if (got4 !== want4) begin
+						if (first4 < 0) first4 = i4;
+						bad4 = bad4 + 1;
+					end
+				end
+			end
+			ok("seam17 - the ring-wrapping READ is byte-exact", bad4 == 0);
+			if (bad4) $display("          %0d wrong bytes, first at %0d (slot %0d)",
+			                   bad4, first4, (first4/512) % 32);
+			begin : fin17
+				integer g4;
+				g4 = 0;
+				while (dut.scsi_bsy && g4 < 40000) begin @(posedge clk); g4 = g4 + 1; end
+			end
+
+			// ...and the SHORT read straight after: slot 1 still holds sector
+			// 33 of the transfer above.
+			select_target(8'h08);
+			send_cmd_byte(8'h08); send_cmd_byte(8'h00);
+			send_cmd_byte(8'h07); send_cmd_byte(8'hd0);
+			send_cmd_byte(8'h02); send_cmd_byte(8'h00);
+			reg_write(`W_ICR, 8'h00);
+			pdma_arm;
+			bad4 = 0; first4 = -1;
+			for (i4 = 0; i4 < 4096; i4 = i4 + 1) begin
+				wait_drq(drq4);
+				if (!drq4) i4 = 4096;
+				else begin
+					dma_read_byte(got4);
+					sec4  = 8000 + (i4 / 512);
+					want4 = sec4[7:0] ^ (i4 % 512);
+					if (got4 !== want4) begin
+						if (first4 < 0) first4 = i4;
+						bad4 = bad4 + 1;
+					end
+				end
+			end
+			ok("seam17 - the READ after it does not inherit the ring", bad4 == 0);
+			if (bad4) $display("          %0d wrong bytes, first at %0d (slot %0d) -- STALE RING",
+			                   bad4, first4, (first4/512) % 32);
+			$display("          (%0d HPS fills served with randomised latency)", hps_fills);
+			hps_data_mode = 1'b0;
 		end
 
 		$display("");
