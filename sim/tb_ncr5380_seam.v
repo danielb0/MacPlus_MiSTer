@@ -95,6 +95,11 @@ module tb_ncr5380_seam;
 	integer hps_fills = 0;
 	integer hps_acks = 0;
 	reg     saw_io_rd = 0;
+	// Did the CPU hold-off ever actually engage? Without this, a seam18 that
+	// passes proves nothing -- a timing shift that stopped the pump outrunning
+	// the fill would look identical to the interlock doing its job.
+	reg     saw_bus_hold = 0;
+	always @(posedge clk) if (dut.bus_hold) saw_bus_hold <= 1'b1;
 	// Force the next hps_force_n data-mode fills to take hps_force_delay clocks
 	// instead of the randomised 1..400. seam18 uses this to make exactly one
 	// fill arrive later than a blind initiator's pump rate -- the condition the
@@ -280,7 +285,34 @@ module tb_ncr5380_seam;
 	endtask
 
 	// Read one byte through the DACK window (not the register file).
+	//
+	// The wait-state loop is the 68000's DTACK behaviour, and it is load-bearing:
+	// before rtl's bus_hold existed the SCSI space acknowledged unconditionally,
+	// this task always completed in a fixed 4 clocks, and so NO bench in this
+	// tree could observe a pacing violation -- which is why cd38, seam17 and a
+	// 694-fill sweep were all green against a deterministic hardware failure.
+	// Bounded rather than infinite so a stuck hold-off FAILS a test instead of
+	// hanging the bench; the bound is well above the target's io-stall watchdog,
+	// which is what releases a hold that can never be satisfied.
 	task dma_read_byte(output [7:0] b);
+		integer w;
+		begin
+			@(negedge clk); bus_cs = 1; dack = 1; ior = 1;
+			@(negedge clk);
+			w = 0;
+			while (dut.bus_hold && w < 100000) begin @(negedge clk); w = w + 1; end
+			b = rdata;
+			@(negedge clk); ior = 0; dack = 0; bus_cs = 0;
+			@(negedge clk);
+		end
+	endtask
+
+	// A DACK read that IGNORES bus_hold -- the Plus exactly as it was before the
+	// hold-off existed, and the model of any machine whose glue does not wire the
+	// target's back-pressure into DTACK. Used by seam19 to defeat fix (a) on
+	// purpose, so that fix (c) -- the CHECK CONDITION backstop -- stays testable
+	// once (a) has made the breach unreachable through the normal path.
+	task dma_read_byte_nowait(output [7:0] b);
 		begin
 			@(negedge clk); bus_cs = 1; dack = 1; ior = 1;
 			@(negedge clk);
@@ -291,10 +323,16 @@ module tb_ncr5380_seam;
 	endtask
 
 	// Write one byte through the DACK window (the pseudo-DMA send path).
+	// Same DTACK wait-state model as dma_read_byte -- a blind WRITE pump can
+	// overrun a flush that has not been read out of the slot yet, which is the
+	// same hazard in the other direction.
 	task dma_write_byte(input [7:0] b);
+		integer w;
 		begin
 			@(negedge clk); bus_cs = 1; dack = 1; wdata = b; iow = 1;
 			@(negedge clk);
+			w = 0;
+			while (dut.bus_hold && w < 100000) begin @(negedge clk); w = w + 1; end
 			@(negedge clk); iow = 0; dack = 0; bus_cs = 0;
 			@(negedge clk);
 		end
@@ -1443,11 +1481,10 @@ module tb_ncr5380_seam;
 				$display("          %0d of %0d wrong bytes are the ring slot's PREVIOUS occupant (stale head, fresh tail)",
 				         stale5, bad5);
 			end
-			// The pinned invariant, currently violated on hardware and here:
-			// a blind initiator must never be served an unfilled sector. This
-			// FAILS until the RTL can enforce its own frontier (hold-off or
-			// equivalent). It is the failing reproduction of the open
-			// CD->disk corruption defect (SCSI_UPGRADE_PLAN.md, 2026-08-26).
+			// The pinned invariant: a blind initiator must never be served an
+			// unfilled sector. RED before the bus hold-off, GREEN after -- this
+			// is the reproduction of the 2026-08-26 CD->disk corruption
+			// (SCSI_UPGRADE_PLAN.md) and the test that fix (a) closes it.
 			ok("seam18 - a blind pseudo-DMA pump cannot outrun the fetch frontier", drq5 && (bad5 == 0));
 			// Mechanism check: if corruption happened, it must be the previous
 			// occupant of the same ring slot -- the hardware signature. If this
@@ -1455,35 +1492,148 @@ module tb_ncr5380_seam;
 			// else and the model is wrong again.
 			ok("seam18b - any stale data is the ring slot's previous occupant",
 			   (bad5 == 0) || (stale5 == bad5));
-
-			// ---- option (c): the breach must not be SILENT --------------------
-			// (c) does not stop the pump -- seam18 above stays RED until a
-			// hold-off lands. What it changes is that the command which was
-			// served stale sectors can no longer claim GOOD, so the driver
-			// retries instead of writing garbage and reporting success.
-			ok("seam18c - premise: the target latched the frontier violation",
-			   dut.target[CD_DEV].target.frontier_violated === 1'b1);
-			begin : s18req
-				integer g7;
-				g7 = 0;
-				while (!dut.scsi_req && dut.scsi_bsy && g7 < 200000) begin
-					@(posedge clk); g7 = g7 + 1;
-				end
-			end
-			stat5 = 8'hff;
-			if (dut.scsi_req && dut.scsi_bsy) recv_byte(stat5);
-			ok("seam18d - a read served stale sectors reports CHECK CONDITION",
-			   stat5 == 8'h02);
-			// The encoding a driver would see from REQUEST SENSE. Key 0xB is
-			// shared with the io-stall abort, so the ASC is what tells them
-			// apart: 0x4b DATA PHASE ERROR here, the stalled opcode there.
-			ok("seam18e - sense is ABORTED COMMAND / DATA PHASE ERROR (B/4b)",
-			   (dut.target[CD_DEV].target.sense_key === 4'hb) &&
-			   (dut.target[CD_DEV].target.sense_asc === 8'h4b));
+			// Anti-vacuity. seam18 passing because the pump happened not to
+			// catch up with the fill would look exactly like seam18 passing
+			// because the interlock worked. This says the interlock ENGAGED.
+			ok("seam18f - premise: the CPU hold-off actually engaged", saw_bus_hold);
+			// See seam19's anti-alias guard: without distinguishable payload tags
+			// seam18 would pass whether or not the hold-off worked.
+			ok("seam18h - premise: stale and fresh payloads are distinguishable",
+			   (prev_sec5 % 256) != (((lba_s5 * 4) + 1) % 256));
+			// And the transfer that was stalled rather than corrupted must
+			// report GOOD -- a hold-off that turned corruption into a spurious
+			// error would be no better than the corruption.
+			ok("seam18g - a stalled (not corrupted) read still reports GOOD",
+			   !dut.target[CD_DEV].target.frontier_violated);
 			begin : fin_s5
 				integer g6;
 				g6 = 0;
 				while (dut.scsi_bsy && g6 < 60000) begin @(posedge clk); g6 = g6 + 1; end
+			end
+			hps_data_mode = 1'b0;
+			hps_force_delay = 0; hps_force_n = 0;
+		end
+
+		// ==================================================================
+		// seam19: fix (a) DEFEATED, to keep fix (c) honest.
+		//
+		// seam18 above proves the hold-off stops the blind pump. That makes the
+		// frontier breach unreachable through the normal path -- and therefore
+		// makes (c), the CHECK CONDITION backstop, untestable there. Both were
+		// built for a reason: (a) is the interlock, (c) is what happens if the
+		// interlock is ever wrong, bypassed, or ported to glue that does not
+		// wire DTACK. A backstop nothing exercises is a backstop nobody knows
+		// is broken.
+		//
+		// So this is seam18 byte for byte with ONE difference: the pump uses
+		// dma_read_byte_nowait and ignores bus_hold, which is the Plus exactly
+		// as it behaved before (a). The corruption MUST come back -- and it
+		// must be reported rather than passed off as GOOD.
+		// ==================================================================
+		begin : seam19
+			integer i6, bad6, stale6, sec6;
+			integer lba_l6, lba_s6, prev_sec6;
+			reg [7:0] got6, want6, stale_want6, stat6;
+			reg       drq6;
+			reg [31:0] hl6, hs6;
+			hps_data_mode = 1'b1;
+			hps_force_delay = 0; hps_force_n = 0;
+
+			lba_l6 = 3010;   // see the anti-alias guard below before changing
+			lba_s6 = 80000;
+
+			// ---- seed the ring, politely ----
+			select_target(8'h08);
+			hl6 = lba_l6;
+			send_cmd_byte(8'h28);            send_cmd_byte(8'h00);
+			send_cmd_byte(hl6[31:24]);       send_cmd_byte(hl6[23:16]);
+			send_cmd_byte(hl6[15:8]);        send_cmd_byte(hl6[7:0]);
+			send_cmd_byte(8'h00);            send_cmd_byte(8'h00);
+			send_cmd_byte(8'h0a);            send_cmd_byte(8'h00);
+			reg_write(`W_ICR, 8'h00);
+			pdma_arm;
+			for (i6 = 0; i6 < 10 * 2048; i6 = i6 + 1) begin
+				wait_drq(drq6);
+				if (!drq6) i6 = 10 * 2048;
+				else dma_read_byte(got6);
+			end
+			begin : fin_l6
+				integer g8;
+				g8 = 0;
+				while (dut.scsi_bsy && g8 < 60000) begin @(posedge clk); g8 = g8 + 1; end
+			end
+
+			// ---- short READ(6), pumped blind AND deaf to the hold-off ----
+			hps_force_delay = 12000; hps_force_n = 2;
+			select_target(8'h08);
+			hs6 = lba_s6;
+			send_cmd_byte(8'h08);
+			send_cmd_byte({3'd0, hs6[20:16]});
+			send_cmd_byte(hs6[15:8]);
+			send_cmd_byte(hs6[7:0]);
+			send_cmd_byte(8'h02);
+			send_cmd_byte(8'h00);
+			reg_write(`W_ICR, 8'h00);
+			pdma_arm;
+			begin : first_drq6
+				integer tr6;
+				drq6 = 0;
+				for (tr6 = 0; tr6 < 8 && !drq6; tr6 = tr6 + 1) wait_drq(drq6);
+			end
+			bad6 = 0; stale6 = 0;
+			prev_sec6 = (lba_l6 * 4) + 33;
+			if (drq6) begin
+				for (i6 = 0; i6 < 4096; i6 = i6 + 1) begin
+					repeat (12) @(posedge clk);
+					dma_read_byte_nowait(got6);       // <-- the only difference
+					sec6  = (lba_s6 * 4) + (i6 / 512);
+					want6 = sec6[7:0] ^ (i6 % 512);
+					if (got6 !== want6) begin
+						bad6 = bad6 + 1;
+						stale_want6 = prev_sec6[7:0] ^ (i6 % 512);
+						if (got6 === stale_want6) stale6 = stale6 + 1;
+					end
+				end
+			end
+			if (bad6)
+				$display("          seam19 hold-off DEFEATED: %0d wrong bytes, %0d of them the slot's previous occupant",
+				         bad6, stale6);
+			// ANTI-ALIAS GUARD. The payload byte is sec[7:0] ^ (i % 512), so if
+			// the ring slot's previous occupant and the sector being read share
+			// a low byte, stale data is BYTE-IDENTICAL to correct data and this
+			// bench silently proves nothing. That is not hypothetical: the first
+			// draft of seam19 picked lba 3000/80000, both tags came out as 0x01,
+			// and seam19 reported a clean read of data it had never fetched.
+			ok("seam19e - premise: stale and fresh payloads are distinguishable",
+			   (prev_sec6 % 256) != (((lba_s6 * 4) + 1) % 256));
+			// Premise. If this fails, seam19 proves nothing about (c) -- and it
+			// also means seam18's own premise has quietly stopped holding.
+			ok("seam19 - premise: ignoring the hold-off DOES corrupt the read",
+			   drq6 && (bad6 > 0) && (stale6 == bad6));
+			// (c): the breach was caught and the command cannot claim success.
+			ok("seam19b - the target latched the frontier violation",
+			   dut.target[CD_DEV].target.frontier_violated === 1'b1);
+			begin : s19req
+				integer g9;
+				g9 = 0;
+				while (!dut.scsi_req && dut.scsi_bsy && g9 < 200000) begin
+					@(posedge clk); g9 = g9 + 1;
+				end
+			end
+			stat6 = 8'hff;
+			if (dut.scsi_req && dut.scsi_bsy) recv_byte(stat6);
+			ok("seam19c - a read served stale sectors reports CHECK CONDITION",
+			   stat6 == 8'h02);
+			// The encoding a driver sees from REQUEST SENSE. Key 0xB is shared
+			// with the io-stall abort, so the ASC is what tells them apart:
+			// 0x4b DATA PHASE ERROR here, the stalled opcode there.
+			ok("seam19d - sense is ABORTED COMMAND / DATA PHASE ERROR (B/4b)",
+			   (dut.target[CD_DEV].target.sense_key === 4'hb) &&
+			   (dut.target[CD_DEV].target.sense_asc === 8'h4b));
+			begin : fin_s6
+				integer g10;
+				g10 = 0;
+				while (dut.scsi_bsy && g10 < 60000) begin @(posedge clk); g10 = g10 + 1; end
 			end
 			hps_data_mode = 1'b0;
 			hps_force_delay = 0; hps_force_n = 0;

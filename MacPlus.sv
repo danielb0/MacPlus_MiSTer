@@ -348,6 +348,7 @@ wire memoryLatch;
 wire vid_alt, loadPixels, pixelOut, _hblank, _vblank, hsync, vsync;
 wire memoryOverlayOn, selectSCSI, selectSCC, selectIWM, selectVIA, selectRAM, selectROM, selectSEOverlay;
 wire [15:0] scsi_dbg;   // raw 5380 state, for rtl/dbg_probes.sv
+wire        scsi_bus_hold; // SCSI pseudo-DMA back-pressure, see ncr5380.sv
 wire [15:0] dataControllerDataOut;
 
 // audio
@@ -424,7 +425,16 @@ always @(posedge clk_sys) begin
 end
 
 assign      _cpuVPA = (cpuFC == 3'b111) ? 1'b0 : ~(!_cpuAS && cpuAddr[23:21] == 3'b111);
-assign      _cpuDTACK = ~(!_cpuAS && cpuAddr[23:21] != 3'b111) | (status_turbo & !turbo_dtack_en);
+// SCSI back-pressure. Until now the SCSI space acknowledged unconditionally,
+// so a target that could not serve the next pseudo-DMA byte had no way to say
+// so and the transfer silently took stale data instead -- the release blocker
+// in SCSI_UPGRADE_PLAN.md 5.7, and the mechanism behind the 2026-08-26 CD->disk
+// corruption. scsi_bus_hold is already qualified down to a DACK data access
+// that cannot be served (see ncr5380.sv), so this only ever stretches the
+// pseudo-DMA window; register reads, and every other device, are untouched.
+// Bounded by the target's ~516 ms io-stall watchdog, which aborts the command
+// and thereby releases the hold.
+assign      _cpuDTACK = ~(!_cpuAS && cpuAddr[23:21] != 3'b111) | (status_turbo & !turbo_dtack_en) | scsi_bus_hold;
 
 wire        cpu_en_p      = status_turbo ? clk16_en_p : clk8_en_p;
 wire        cpu_en_n      = status_turbo ? clk16_en_n : clk8_en_n;
@@ -624,6 +634,7 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.cpuDataIn(cpuDataOut),
 	.cpuDataOut(dataControllerDataOut), 	
 	.scsi_dbg(scsi_dbg),
+	.scsi_bus_hold(scsi_bus_hold),
 	.cpuAddrRegHi(cpuAddr[12:9]),
 	.cpuAddrRegMid(cpuAddr[6:4]),  // for SCSI
 	.cpuAddrRegLo(cpuAddr[2:1]),		

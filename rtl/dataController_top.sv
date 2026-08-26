@@ -21,6 +21,8 @@ module dataController_top(
 	// Raw 5380 state for the JTAG probe deck (rtl/dbg_probes.sv). Unused, and
 	// pruned, in a build without the deck.
 	output [15:0] scsi_dbg,
+	// SCSI pseudo-DMA hold-off -> MacPlus.sv withholds DTACK. See ncr5380.sv.
+	output        scsi_bus_hold,
 
 	// CD-DA pair from the SCSI CD target's audio engine (Phase 3B). Exact
 	// zeros when not playing; the mixer that consumes them is Phase 3D.
@@ -235,6 +237,7 @@ module dataController_top(
 		.iow(!_cpuLDS),
 		.dack(cpuAddrRegHi[0]),   // A9
 		.dbg_bus(scsi_dbg),
+		.bus_hold(scsi_bus_hold),
 		.cd_snd_l(cd_snd_l),
 		.cd_snd_r(cd_snd_r),
 		.wdata(cpuDataIn[15:8]),

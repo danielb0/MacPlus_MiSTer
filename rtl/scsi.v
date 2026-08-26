@@ -74,6 +74,16 @@ module scsi
 	// build without the probe deck, where it costs nothing.
 	output  [1:0] dbg_abort,
 
+	// CPU BUS HOLD-OFF. High while this target is in a data phase and physically
+	// cannot serve or accept the next byte -- the same condition that withdraws
+	// REQ. ncr5380.sv turns it into a withheld DTACK on the pseudo-DMA window, so
+	// a blind pump STALLS instead of transferring a stale byte. Deliberately
+	// scoped to the DATA phases: a DACK access outside them already cannot ACK
+	// (dma_ack is gated on the bus phase), and stalling the driver's status poll
+	// on it would be a hang, not an interlock. See SCSI_UPGRADE_PLAN.md option (a)
+	// and the frontier-breach detector below.
+	output        data_holdoff,
+
 	// CD-DA sample pair from the audio engine. EXACT zeros whenever the
 	// drive is not playing, so a build with no disc mixes bit-identically
 	// to one without the engine. Constant 0 on a disk target.
@@ -259,6 +269,15 @@ wire   data_done = data_complete || (data_len == 32'd0);
 wire   data_phase_complete = ((phase == PHASE_DATA_OUT) || (phase == PHASE_DATA_IN)) && data_done;
 
 assign req = (phase != PHASE_IDLE) && !ack && !io_busy && !data_phase_complete;
+
+// The hold-off is io_busy's two DATA-phase clauses and nothing else. io_busy's
+// third clause covers the non-data phases, where a DACK access is already inert.
+// Explicitly zero under reset. Everywhere else in this file an undefined
+// `phase` is harmless -- it settles before anything reads it -- but this signal
+// reaches _cpuDTACK, where a spurious hold at power-on would freeze the CPU
+// with nothing to release it. Cyclone V registers do power up at 0
+// (= PHASE_IDLE), so this is belt and braces; on the CPU bus that is cheap.
+assign data_holdoff = !any_rst && ((phase == PHASE_DATA_OUT) || (phase == PHASE_DATA_IN)) && io_busy;
 
 assign bsy = (phase != PHASE_IDLE);
 

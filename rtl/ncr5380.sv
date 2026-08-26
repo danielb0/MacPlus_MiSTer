@@ -90,6 +90,28 @@ module ncr5380
 	// stays one flat vector of things that already exist and the debug logic
 	// stays in one file. Pruned entirely when the deck is not instantiated.
 	,output     [15:0] dbg_bus
+
+	// CPU BUS HOLD-OFF -- the fix for the advisory-frontier defect.
+	//
+	// Everything else in this file serves a DACK access unconditionally: rdata
+	// returns cur_data on any DACK read, and dma_ack is gated on the bus phase
+	// alone, never on scsi_req. So REQ withdrawal is ADVISORY -- a blind
+	// pseudo-DMA pump (which is what the Mac Plus SCSI Manager runs) walks
+	// through the fetch frontier and is served the ring slot's previous
+	// occupant. That is the 2026-08-26 CD->disk corruption; seam18 reproduces it.
+	//
+	// Rather than teach three separate places to refuse an ACK, this makes the
+	// pump STOPPABLE: MacPlus.sv withholds DTACK while this is high, so the 68000
+	// inserts wait states until the target can actually serve the byte. That is
+	// what the SE's glue did with DRQ, and what a period drive's sustained-
+	// streaming guarantee did on the Plus -- a guarantee an HPS-backed target
+	// cannot make, which is why the interlock has to live here instead.
+	//
+	// Safe against a fetch that never completes: the target's io-stall watchdog
+	// (scsi.v, ~516 ms) aborts the command, which moves the phase out of DATA and
+	// so drops data_holdoff. Worst case is a bounded stall ending in CHECK
+	// CONDITION, never a hang.
+	,output            bus_hold
 );
 	parameter DEVS = 2;
 	// Index of the CD-ROM target within the DEVS arrays, or DEVS for "none".
@@ -117,6 +139,15 @@ module ncr5380
 	// polling BSR=0x98 -- DRQ clear -- forever. Hiding DRQ from this driver is
 	// what breaks it. The confirmed defect is fixed by gating dma_ack alone.
 	assign dreq = scsi_req & dma_en;
+
+	// Hold the CPU only on a pseudo-DMA (DACK) data access that cannot be served.
+	// Register accesses are NEVER held: the driver learns about the frontier by
+	// polling BSR.DRQ, so stalling that poll would deadlock the very initiator
+	// this is meant to protect. Qualified on dma_en to match dma_ack's own gate --
+	// a DACK access with pseudo-DMA unarmed cannot consume a byte anyway.
+	// An idle target is not in a data phase, so |target_holdoff is exactly the
+	// selected target's indication.
+	assign bus_hold = bus_cs & dack & (ior | iow) & dma_en & (|target_holdoff);
 
 	reg  [7:0] mr;        /* Mode Register */
 	reg  [7:0] icr;       /* Initiator Command Register */
@@ -435,6 +466,7 @@ module ncr5380
 	                   scsi_req, scsi_io, scsi_cd, scsi_msg, |target_bsy };
 
 	wire [DEVS-1:0] target_wdog, target_iostall;
+	wire [DEVS-1:0] target_holdoff;
 
 	// input signals from targets
 	wire [DEVS-1:0] target_bsy;
@@ -522,6 +554,7 @@ module ncr5380
 				.sd_buff_wr( sd_buff_wr & io_ack[i] ),
 
 				.dbg_abort( { target_iostall[i], target_wdog[i] } ),
+				.data_holdoff( target_holdoff[i] ),
 				.cd_snd_l( target_snd_l[i] ),
 				.cd_snd_r( target_snd_r[i] )
 			);

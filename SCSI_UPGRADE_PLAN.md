@@ -1335,6 +1335,93 @@ Consequences:
   with CHECK CONDITION -- turns silent corruption into a driver-visible,
   retryable error. (b) and (c) compose; only (a) closes the hole.
 
+##### FIXED (2026-08-26): (c) then (a), both landed, seam18 is GREEN
+
+(b) was not built. It is structurally the same move MacLC made -- tuning a
+margin around a frontier nothing enforces -- and their four commits plus a
+permanent marginality note are what that buys.
+
+**(c) the backstop, first.** `frontier_breach` in `scsi.v` catches an ACK
+landing while `rd_cur_unfilled` inside a live read data phase; the command then
+ends in CHECK CONDITION with sense `0xB / 0x4b` (ABORTED COMMAND / DATA PHASE
+ERROR) instead of GOOD, so a driver retries rather than writing garbage and
+reporting success. Key 0xB is shared with the io-stall abort deliberately -- it
+is the retryable key -- and the FIXED asc `0x4b` is what tells the two apart in
+a REQUEST SENSE, since the io-stall abort carries the stalled opcode there.
+
+Detection is exact rather than heuristic, which is what makes it safe to leave
+in permanently: inside a read data phase `rd_cur_unfilled` can only RISE from
+the initiator's own advance across a sector boundary, and `rd_hps_blk` only
+ever grows, which clears it -- so there is no poll-to-read race and an
+initiator that honours the withdrawn REQ can never trip it.
+
+**(a) the interlock, second.** `scsi.v` exports `data_holdoff` (io_busy's two
+DATA-phase clauses); `ncr5380.sv` qualifies it down to a pseudo-DMA access that
+cannot be served -- `bus_cs & dack & (ior|iow) & dma_en & |target_holdoff` --
+and `MacPlus.sv` ORs the result into `_cpuDTACK`. The blind pump now takes wait
+states instead of a stale byte. **This closes the 5.7 release blocker**: the
+SCSI space no longer acknowledges unconditionally.
+
+Three things made this far more tractable than "don't touch CPU bus timing"
+suggests:
+
+* **The deadlock escape hatch already existed.** The io-stall watchdog runs
+  only while `io_busy`, expires at ~516 ms, and aborts the command -- which
+  moves the phase out of DATA and so drops the hold-off. Worst case is a
+  bounded stall ending in CHECK CONDITION, never a hang. It was built for the
+  REQ-suppression case and pinned by seam9; (a) inherits it for free.
+* **Register accesses are never held.** The driver learns about the frontier by
+  polling BSR.DRQ, so stalling that poll would deadlock the very initiator the
+  hold-off protects. Scoping to the DATA phases is not a nicety.
+* `data_holdoff` is explicitly zero under reset. Everywhere else an undefined
+  `phase` settles harmlessly, but this one reaches `_cpuDTACK`, where a
+  spurious power-on hold would freeze the CPU with nothing to release it.
+
+**The bench change that made any of this visible.** `dma_read_byte` /
+`dma_write_byte` now model the 68000's DTACK wait states. Before, a DACK access
+always completed in a fixed 4 clocks, so NO bench in this tree could observe a
+pacing violation -- which is the real reason cd38, seam17 and a 694-fill sweep
+were all green against a deterministic hardware failure. The bench was missing
+the bus, not the latency.
+
+**Both fixes stay tested, which needed two benches.** (a) makes the breach
+unreachable through the normal path, and a backstop nothing exercises is a
+backstop nobody knows is broken:
+
+* **seam18** -- blind pump that HONOURS the hold-off. Zero wrong bytes, status
+  GOOD. `seam18f` pins that the hold-off actually engaged (otherwise a timing
+  shift would look identical to the interlock working) and `seam18g` that a
+  stalled read still reports GOOD -- a hold-off that turned corruption into a
+  spurious error would be no better than the corruption.
+* **seam19** -- the same read pumped with `dma_read_byte_nowait`, which ignores
+  `bus_hold`: the Plus exactly as it behaved before (a), and the model of any
+  glue that does not wire back-pressure into DTACK. The corruption returns
+  (298 wrong bytes, all of them the ring slot's previous occupant) and (c)
+  catches it: CHECK CONDITION, sense B/4b.
+
+**An anti-alias guard now sits in both** (`seam18h`, `seam19e`), and it is not
+hypothetical. The payload byte is `sec[7:0] ^ (i % 512)`, so when the ring
+slot's previous occupant and the sector being read share a low byte, stale data
+is BYTE-IDENTICAL to correct data. The first draft of seam19 picked lba
+3000/80000, both tags came out `0x01`, and it reported a clean read of data it
+had never fetched. Same failure mode as the aliasing probe counters in the
+2026-08-23 soak: a checker that cannot fail is not a checker.
+
+Gates: `tb_ncr5380_seam` 76/76, `tb_scsi_target` 18/18, `tb_scsi_cdrom` 37/37,
+`tb_dbg_probes` PASS (its one FAIL is the committed `build_tag = 0` policy,
+confirmed by stamping a tag and re-running).
+
+**NOT YET COMPILED OR RUN ON HARDWARE.** Quartus timing on the new
+combinational path into `_cpuDTACK` is unverified, and so is the real driver's
+behaviour under wait states. Both need a compile and a CD->disk copy of
+`DRA01E01.GRB`.
+
+Still open, deliberately: whether the Plus schematic really has no DRQ->DTACK
+hold-off. It does not change the engineering -- a period drive's sustained-
+streaming guarantee is one an HPS-backed target cannot make, so the interlock
+has to live somewhere -- but it decides whether (a) is described as restoring
+SE-style glue or as adding what the Plus never had.
+
 ##### Method note, worth more than the bug
 
 Four mechanisms were proposed for this symptom during one session and all four
