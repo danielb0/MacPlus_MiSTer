@@ -1101,6 +1101,47 @@ wire new_cmd = (phase == PHASE_CMD_IN) && cmd_cpl && !cmd_cpl_d;
 // The eject actually happens (drops `mounted`) only if the medium is not locked.
 wire cd_eject_pulse = new_cmd && cmd_cd_eject_any && !cd_prevent;
 
+// ---- fetch-frontier violation detector -----------------------------------
+// The frontier guard (`io_busy` -> `req`) is ADVISORY: it only removes REQ.
+// Nothing in this target, and nothing in ncr5380.sv, refuses an ACK -- rdata
+// serves cur_data on any DACK read, dma_ack is gated on the bus phase alone,
+// and data_cnt advances on every ACK edge. A BLIND pseudo-DMA pump therefore
+// walks straight through the frontier and is handed the ring slot's PREVIOUS
+// occupant until the late fill lands: stale head, fresh tail, GOOD status.
+// That is the 2026-08-26 CD->disk corruption, reproduced by seam18 in
+// sim/tb_ncr5380_seam.v. The Mac Plus SCSI Manager runs exactly such a pump,
+// and the Plus has no bus hold-off with which to stop it.
+//
+// This does NOT stop the pump -- only a hold-off can (SCSI_UPGRADE_PLAN.md
+// option (a)). It makes the breach LOUD: a read that was served unfilled
+// sectors ends in CHECK CONDITION instead of GOOD, so the driver retries
+// rather than writing garbage to disk and reporting success.
+//
+// Detection is exact, not heuristic. Inside a read data phase rd_cur_unfilled
+// can only RISE as a result of the initiator's own advance across a sector
+// boundary (rd_cur_blk = data_cnt[31:9]), and rd_hps_blk only ever grows,
+// which clears it. So there is no poll-to-read race: an initiator that honours
+// the withdrawn REQ cannot present an ACK while this holds, and a polite
+// initiator therefore never trips it.
+//
+// The condition mirrors io_busy's READ clause term for term -- `mounted`
+// included, because media loss mid-READ deliberately does not stall (see
+// io_busy) and so is not a frontier breach; it keeps reporting through its own
+// path. `data_phase_complete` is added because it too suppresses REQ, so an
+// ACK past the transfer length is a DIFFERENT violation and must not be
+// reported as this one.
+wire frontier_breach = stb_ack && (phase == PHASE_DATA_OUT) && cmd_read
+                       && mounted && rd_cur_unfilled && !data_phase_complete;
+
+// Sticky for the command, cleared by the next CDB -- the same lifetime the
+// sense latch uses, so the status byte and a follow-up REQUEST SENSE always
+// agree about what happened.
+reg frontier_violated = 1'b0;
+always @(posedge clk) begin
+	if (any_rst || new_cmd)   frontier_violated <= 1'b0;
+	else if (frontier_breach) frontier_violated <= 1'b1;
+end
+
 always @(posedge clk) begin
 	if (any_rst) begin
 		sense_key  <= 4'd0;
@@ -1114,6 +1155,15 @@ always @(posedge clk) begin
 		// that would otherwise have been an unrecoverable hang.
 		sense_key <= 4'hB;
 		sense_asc <= op_code;
+	end else if (frontier_breach) begin
+		// ABORTED COMMAND / DATA PHASE ERROR. Key 0xB is the retryable key, and
+		// it is already what wdog_abort uses for the other "target could not
+		// sustain this transfer" case; the FIXED asc 0x4b is what tells the two
+		// apart in a REQUEST SENSE, since wdog_abort carries the stalled opcode
+		// there instead. Deliberately not MEDIUM ERROR: the medium is fine, the
+		// target failed to keep the data phase fed.
+		sense_key <= 4'hB;
+		sense_asc <= 8'h4b;
 	end else if (new_cmd) begin
 		if (!cmd_ok) begin
 			sense_key <= 4'h5;  // ILLEGAL REQUEST
@@ -1336,7 +1386,14 @@ always @(posedge clk) begin
 		// data_done, not data_complete: a zero-length data phase never sees an
 		// ACK edge, so data_complete would never assert and the phase would hang.
 		else if(phase == PHASE_DATA_OUT) begin
-			if(data_done) phase <= PHASE_STATUS_OUT;
+			if(data_done) begin
+				// A read that was served unfilled sectors must not report GOOD.
+				// The bytes have already gone to the initiator, so this cannot
+				// un-corrupt the transfer -- it makes it RETRYABLE instead of
+				// silent, which is the whole point. See frontier_breach.
+				if(frontier_violated) status <= `STATUS_CHECK_CONDITION;
+				phase <= PHASE_STATUS_OUT;
+			end
 		end
 
 		else if(phase == PHASE_DATA_IN) begin

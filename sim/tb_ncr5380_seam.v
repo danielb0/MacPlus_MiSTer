@@ -1351,7 +1351,7 @@ module tb_ncr5380_seam;
 		begin : seam18
 			integer i5, bad5, stale5, first5, last5, sec5;
 			integer lba_l5, lba_s5, prev_sec5;
-			reg [7:0] got5, want5, stale_want5;
+			reg [7:0] got5, want5, stale_want5, stat5;
 			reg       drq5;
 			reg [31:0] hl5, hs5;
 			hps_data_mode = 1'b1;
@@ -1455,6 +1455,31 @@ module tb_ncr5380_seam;
 			// else and the model is wrong again.
 			ok("seam18b - any stale data is the ring slot's previous occupant",
 			   (bad5 == 0) || (stale5 == bad5));
+
+			// ---- option (c): the breach must not be SILENT --------------------
+			// (c) does not stop the pump -- seam18 above stays RED until a
+			// hold-off lands. What it changes is that the command which was
+			// served stale sectors can no longer claim GOOD, so the driver
+			// retries instead of writing garbage and reporting success.
+			ok("seam18c - premise: the target latched the frontier violation",
+			   dut.target[CD_DEV].target.frontier_violated === 1'b1);
+			begin : s18req
+				integer g7;
+				g7 = 0;
+				while (!dut.scsi_req && dut.scsi_bsy && g7 < 200000) begin
+					@(posedge clk); g7 = g7 + 1;
+				end
+			end
+			stat5 = 8'hff;
+			if (dut.scsi_req && dut.scsi_bsy) recv_byte(stat5);
+			ok("seam18d - a read served stale sectors reports CHECK CONDITION",
+			   stat5 == 8'h02);
+			// The encoding a driver would see from REQUEST SENSE. Key 0xB is
+			// shared with the io-stall abort, so the ASC is what tells them
+			// apart: 0x4b DATA PHASE ERROR here, the stalled opcode there.
+			ok("seam18e - sense is ABORTED COMMAND / DATA PHASE ERROR (B/4b)",
+			   (dut.target[CD_DEV].target.sense_key === 4'hb) &&
+			   (dut.target[CD_DEV].target.sense_asc === 8'h4b));
 			begin : fin_s5
 				integer g6;
 				g6 = 0;
