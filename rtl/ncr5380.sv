@@ -487,13 +487,39 @@ module ncr5380
 				.io_lba ( io_lba[i] ),
 				.io_rd  ( io_rd[i] ),
 				.io_wr  ( io_wr[i] ),
-				.io_ack ( io_ack[i] & target_bsy[i] ),
+				// FRAMING: sd_ack names the slot; sd_buff_addr/dout/wr are a
+				// SHARED bus every target sees. Qualifying on SCSI BSY instead
+				// is a proxy that holds only while every HPS transfer belongs
+				// to whichever target owns the bus -- true until the CD-audio
+				// engine, which fetches while bus-IDLE. Consequences, both real
+				// and both fixed here (sim: seam15; HW 2026-08-26):
+				//
+				//   * `& target_bsy[i]` on sd_buff_wr let a BUSY DISK capture
+				//     the CD slot's frames into its sector buffers, and the
+				//     next flush wrote CD-DA audio onto the disk image at a
+				//     legitimate LBA. It destroyed two mounted volumes.
+				//   * `& target_bsy[i]` on the CD's io_ack meant the engine's
+				//     fetches only completed while the CD happened to be BSY --
+				//     about twice a second, from the player's status polls.
+				//     That was the "2 frames/s", not ca_grant.
+				//
+				// io_ack[i] IS sd_ack[i], which is what hps_io publishes for
+				// exactly this purpose.
+				//
+				// The BSY term SURVIVES on io_ack for the disks, and that is
+				// deliberate: it blanks a LATE ack arriving after the target
+				// left the bus, which seam9 exists to pin. The CD target must
+				// not have it -- its whole point is transferring while idle.
+				// This diverges from MacLC, whose disk targets still carry
+				// `& target_bsy[i]` on sd_buff_wr and so, on our reading, carry
+				// the same corruption hazard.
+				.io_ack ( (i == CD_DEV) ? io_ack[i] : (io_ack[i] & target_bsy[i]) ),
 
 				.sd_buff_addr( sd_buff_addr ),
 				.sd_buff_addr_hi( sd_buff_addr_hi ),
 				.sd_buff_dout( sd_buff_dout ),
 				.sd_buff_din( sd_buff_din[i] ),
-				.sd_buff_wr( sd_buff_wr & target_bsy[i] ),
+				.sd_buff_wr( sd_buff_wr & io_ack[i] ),
 
 				.dbg_abort( { target_iostall[i], target_wdog[i] } ),
 				.cd_snd_l( target_snd_l[i] ),

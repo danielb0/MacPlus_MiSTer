@@ -98,9 +98,14 @@ module tb_ncr5380_seam;
 	// hps_disk_enable low = the disk slot's HPS never answers, which is what
 	// seam14 needs to stall a WRITE flush.
 	reg     hps_disk_enable = 1'b1;
+	// hps_manual hands both slot servers over to the test, so it can emulate
+	// hps_io serving a CHOSEN slot -- which is the only way to reproduce one
+	// slot's session landing in another target's buffer.
+	reg     hps_manual = 1'b0;
 	always @(posedge clk) begin : hps_disk
 		if (reset) io_ack[0] <= 1'b0;
-		else       io_ack[0] <= hps_disk_enable &
+		else if (!hps_manual)
+		           io_ack[0] <= hps_disk_enable &
 		                        (io_rd[0] | io_wr[0]) & ~io_ack[0];
 	end
 
@@ -109,6 +114,8 @@ module tb_ncr5380_seam;
 		if (reset) begin
 			io_ack[CD_DEV] <= 0;
 			wait_n   = 0;
+		end else if (hps_manual) begin
+			wait_n = 0;
 		end else begin
 			if (io_rd[CD_DEV] | io_wr[CD_DEV]) saw_io_rd <= 1'b1;
 			if ((io_rd[CD_DEV] | io_wr[CD_DEV]) && hps_enable && !io_ack[CD_DEV]) begin
@@ -309,6 +316,37 @@ module tb_ncr5380_seam;
 	endtask
 
 	// Select a target by ID bit
+	// Emulate one hps_io session for `slot`: sd_ack names the slot, while
+	// sd_buff_addr/dout/wr are a SHARED bus every target can see. Writing 8
+	// words is plenty -- the defect shows on the first strobe.
+	task hps_session(input integer slot, input [15:0] seed);
+		integer k;
+		begin
+			io_ack[slot] = 1'b1;
+			@(posedge clk);
+			for (k = 0; k < 8; k = k + 1) begin
+				sd_buff_addr = k[7:0];
+				sd_buff_dout = seed + k[15:0];
+				sd_buff_wr   = 1'b1;
+				@(posedge clk);
+			end
+			sd_buff_wr = 1'b0;
+			@(posedge clk);
+			io_ack[slot] = 1'b0;
+			@(posedge clk);
+		end
+	endtask
+
+	// Read target 0's sector buffer back through its HPS read port.
+	task hps_peek(input [7:0] a, output [15:0] d);
+		begin
+			sd_buff_addr = a;
+			@(posedge clk);
+			@(posedge clk);
+			d = sd_buff_din[0];
+		end
+	endtask
+
 	task select_target(input [7:0] id_bit);
 		integer guard;
 		begin
@@ -1051,6 +1089,51 @@ module tb_ncr5380_seam;
 		recv_byte(dma_b);
 		ok("seam14 - the NEXT command still works after a stalled flush",
 		   dma_b == 8'h00);
+
+		// ==================================================================
+		// seam15: a target's sector buffer must capture ONLY its own slot's
+		// HPS session.
+		//
+		// hps_io gives sd_ack per slot but sd_buff_addr/dout/wr are a SHARED
+		// bus. ncr5380 qualified the strobe with the target's SCSI BSY instead
+		// of its slot ack, which is a proxy that is only correct while every
+		// HPS transfer belongs to whichever target happens to own the bus.
+		// The CD-audio engine broke that assumption: it fetches while bus-IDLE,
+		// so its frames landed in whatever OTHER target was busy at the time.
+		//
+		// On hardware 2026-08-26 that wrote CD-DA audio into two mounted disk
+		// images -- sector-aligned, at legitimate LBAs, destroying both volume
+		// headers. Reads are corrupted by the same path.
+		// ==================================================================
+		begin : seam15
+			reg [15:0] own0, own1, after0, after1;
+			reg        landed, survived;
+			reset = 1'b1; repeat (8) @(posedge clk);
+			reset = 1'b0; repeat (8) @(posedge clk);
+			hps_disk_enable = 1'b0;
+			select_target(8'h40);            // target 0 = SCSI ID 6
+			send_cmd_byte(8'h12);            // stay in CMD phase, BSY asserted
+			hps_manual = 1'b1;
+
+			hps_session(0, 16'h1100);        // the disk's OWN session: must land
+			hps_peek(8'd0, own0);
+			hps_peek(8'd3, own1);
+			landed = (own0 === 16'h1100) && (own1 === 16'h1103);
+
+			hps_session(CD_DEV, 16'hEE00);   // ANOTHER slot's session: must not
+			hps_peek(8'd0, after0);
+			hps_peek(8'd3, after1);
+			survived = (after0 === own0) && (after1 === own1);
+
+			hps_manual = 1'b0;
+			hps_disk_enable = 1'b1;
+
+			ok("seam15 - a target captures its OWN slot's HPS session", landed);
+			ok("seam15 - and is NOT written by another slot's session", survived);
+			if (!survived)
+				$display("          buffer went %04x/%04x -> %04x/%04x: the CD slot's data landed in the DISK's buffer",
+				         own0, own1, after0, after1);
+		end
 
 		$display("");
 		$display("SEAM: %0d of %0d failing", fails, tests);

@@ -1017,6 +1017,86 @@ On hardware the check is `PIOS lba` advancing ~150 per 2 s sample, and the
 honest guest-side proxy is the player's elapsed time counting up in real time —
 there is still no audio output until 3D.
 
+#### DATA-LOSS DEFECT: HPS buffer strobes were framed by SCSI BSY (2026-08-26)
+
+**This one destroyed user data.** Two mounted disk images were written with
+CD-DA audio -- sector-aligned, at legitimate LBAs -- wrecking both volume
+headers. Found the same day it was introduced.
+
+##### The contract that was broken
+
+`hps_io` publishes a SHARED bus plus a per-slot selector (`sys/hps_io.sv:137`):
+`sd_ack` is a per-slot vector; `sd_buff_addr`, `sd_buff_dout` and `sd_buff_wr`
+are broadcast to every consumer at once. **Each consumer must qualify on its own
+`sd_ack` bit.** `ncr5380.sv` qualified on `target_bsy[i]` -- the target's SCSI
+BSY -- instead.
+
+For a disk-only core the two are indistinguishable: a disk transfers over the
+HPS channel only while executing a command, and is BSY exactly then. The proxy
+was correct by coincidence for the entire history of this core. It fails the
+moment a device transfers while NOT owning the SCSI bus -- which is exactly what
+the CD-audio engine does, by design (`ca_grant` permits fetches at PHASE_IDLE).
+
+##### One wrong qualifier, two opposite failures
+
+* **Over-permissive on the disks.** `sd_buff_wr & target_bsy[i]` let a BUSY DISK
+  latch the CD slot's frames into its sector buffers. Port A of buffer0/buffer1
+  is the HPS port, so during a write flush the Mac's bytes were overwritten by
+  audio immediately before `q_a` handed them to the HPS. Reads corrupt by the
+  same path (`hps_addr = {rd_hps_slot, sd_buff_addr}`), serving audio as sector
+  data.
+* **Under-permissive on the CD.** `io_ack[i] & target_bsy[i]` meant the engine's
+  fetches only completed while the CD happened to be BSY -- about twice a second,
+  from the player's status polls. **That was the "2 frames/s" measured on
+  2026-08-26, and it was NOT ca_grant starvation** as first diagnosed.
+
+##### Why it appeared on `08A07275` and not before
+
+Before `6e138b8`, `ca_io_rd_w` reached nothing, so the engine never fetched and
+no CD burst existed: the flaw was inert. Fixing the request path is what turned
+a latent design fault into live data loss. The morning's 165-file copy verified
+byte-perfect because no PLAY was ever issued during it -- the only CD transfer
+was a single TOC fetch at mount, which did not coincide with a disk write.
+
+##### The fix
+
+```verilog
+.io_ack     ( (i == CD_DEV) ? io_ack[i] : (io_ack[i] & target_bsy[i]) ),
+.sd_buff_wr ( sd_buff_wr & io_ack[i] ),
+```
+
+The BSY term SURVIVES on the disks' `io_ack` deliberately: it blanks a LATE ack
+arriving after the target left the bus, which `seam9` exists to pin. The bench
+caught that -- the first attempt stripped it everywhere. Only the CD target
+loses it, its whole purpose being to transfer while idle.
+
+**Diverges from MacLC**, whose disk targets still carry `& target_bsy[i]` on
+`sd_buff_wr`; on our reading they retain the same hazard, which is consistent
+with their "ring-stale corruption class" chased across four commits (17 Jul,
+29 Jul, 1 Aug, Finder colour-icon noise 3 Aug) and their permanent marginality
+anchor in `MacLC.sv`. Worth sending upstream.
+
+##### The test, which is the point
+
+`seam15` needs no audio engine -- it tests the invariant directly, which is why
+it is nine lines and hard to argue with. Target 0 is put in CMD phase with BSY
+asserted; an HPS session for slot 0 writes a pattern; then an HPS session for
+the CD slot writes another. **Two assertions, deliberately**: the first pins
+that the target's OWN slot data still lands (without it, a fix that blocked
+`sd_buff_wr` outright would pass and prove nothing), the second that another
+slot's data does not.
+
+Pre-fix it fails with `buffer went 1100/1103 -> ee00/ee03`. Post-fix both pass.
+
+##### Method note
+
+The first three diagnoses of this symptom were wrong, in order: frame
+starvation, then `ca_grant`, then a timing regression from the +6 ALM fit. What
+finally named it was reading the RTL's framing against `hps_io`'s published
+contract, prompted by finding PCM inside a disk image. **Audio bytes at a disk
+LBA can only arrive through the sector buffer**, and there is exactly one write
+port into it.
+
 #### 3C — In-core DC blocker with a mount envelope
 
 **Decided 2026-08-25.** Four decisions, in the order they were made:
