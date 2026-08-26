@@ -287,17 +287,37 @@ function [7:0] bcd2bin;
 	input [7:0] b;
 	bcd2bin = {4'd0, b[7:4]} * 8'd10 + {4'd0, b[3:0]};
 endfunction
+// DIVERGES FROM MacLC (2026-08-26). The original read
+//
+//   bin2bcd = v >= 8'd90 ? {4'd9, (v - 8'd90)-8'd0} : ... : v;
+//
+// where every arm concatenates a 4-bit tens digit with an 8-BIT remainder. The
+// concat is therefore 12 bits wide and the 8-bit return TRUNCATES IT, discarding
+// the tens nibble: bin2bcd(40) = 12'h400 -> 8'h00, bin2bcd(33) -> 8'h03,
+// bin2bcd(17) -> 8'h07. Every value under 10 converts correctly, which is why
+// it survives casual use -- track NUMBERS are single digits on most discs, and
+// the times a guest actually displays come from the 0x43 planes, which are
+// binary. It is the Apple 0xC1 (BCD) plane that is wrong, in all 15 call sites.
+//
+// Caught by sim/tb_scsi_cdrom.v cd9, which asserts a lead-out of 40:33:17 and
+// got 00:03:07. This is an UPSTREAM MacLC defect, not a porting slip: our
+// cd_audio.sv was byte-identical to theirs before this change.
 function [7:0] bin2bcd;                // 0..99
 	input [7:0] v;
-	bin2bcd = v >= 8'd90 ? {4'd9, (v - 8'd90)-8'd0} :
-	          v >= 8'd80 ? {4'd8, v - 8'd80} :
-	          v >= 8'd70 ? {4'd7, v - 8'd70} :
-	          v >= 8'd60 ? {4'd6, v - 8'd60} :
-	          v >= 8'd50 ? {4'd5, v - 8'd50} :
-	          v >= 8'd40 ? {4'd4, v - 8'd40} :
-	          v >= 8'd30 ? {4'd3, v - 8'd30} :
-	          v >= 8'd20 ? {4'd2, v - 8'd20} :
-	          v >= 8'd10 ? {4'd1, v - 8'd10} : v;
+	reg [3:0] tens;
+	reg [3:0] units;   // MUST be its own 4-bit reg: {4-bit, 8-bit} is a 12-bit
+	                   // concat and the 8-bit return would truncate the tens
+	                   // digit away again -- that IS the bug being fixed.
+	begin
+		tens = v >= 8'd90 ? 4'd9 : v >= 8'd80 ? 4'd8 :
+		       v >= 8'd70 ? 4'd7 : v >= 8'd60 ? 4'd6 :
+		       v >= 8'd50 ? 4'd5 : v >= 8'd40 ? 4'd4 :
+		       v >= 8'd30 ? 4'd3 : v >= 8'd20 ? 4'd2 :
+		       v >= 8'd10 ? 4'd1 : 4'd0;
+		// the remainder is 0..9, so narrowing it to 4 bits is exact
+		units   = v - ({4'd0, tens} * 8'd10);
+		bin2bcd = {tens, units};
+	end
 endfunction
 function [31:0] msf2lba;               // BCD M/S/F -> LBA
 	input [7:0] m, s, f;

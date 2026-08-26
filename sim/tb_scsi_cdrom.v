@@ -87,6 +87,10 @@ module tb_scsi_cdrom;
       .io_ack(io_ack),
 
       .sd_buff_addr(sd_buff_addr),
+      // hps_io drives 13 address bits; the model only ever fills 256 words, so
+      // the top 5 are 0. Leaving this unconnected floats it to x and corrupts
+      // the audio engine's blob capture without failing anything visibly.
+      .sd_buff_addr_hi(5'd0),
       .sd_buff_dout(sd_buff_dout),
       .sd_buff_din(sd_buff_din),
       .sd_buff_wr(sd_buff_wr)
@@ -151,12 +155,21 @@ module tb_scsi_cdrom;
    // ======================================================================
    // Initiator model
    // ======================================================================
+   // `rst` is the SCSI BUS reset; `sys_rst` is the SYSTEM reset, and cd_audio
+   // takes the latter. The bench used to leave sys_rst at 0 forever, which was
+   // invisible while the CD target had no audio engine and fatal once it did:
+   // cd_audio initialises its state ONLY in the reset branch, so with rst never
+   // asserted every one of its outputs stayed x, ca_io_active poisoned the io
+   // arbitration, and the TOC never arrived. Hardware is unaffected -- the real
+   // sys_rst pulses at power-on and Quartus powers registers up at 0 anyway --
+   // but a bench that never resets the DUT is testing a machine that cannot
+   // exist.
    task do_reset;
       begin
-         rst = 1'b1; sel = 1'b0; ack = 1'b0; din = 8'h00;
+         rst = 1'b1; sys_rst = 1'b1; sel = 1'b0; ack = 1'b0; din = 8'h00;
          hps_enable = 1'b0;
          repeat (8) @(posedge clk);
-         rst = 1'b0;
+         rst = 1'b0; sys_rst = 1'b0;
          repeat (4) @(posedge clk);
          hps_enable = 1'b1;
          @(posedge clk);
@@ -179,16 +192,16 @@ module tb_scsi_cdrom;
          // conversion that has not started. Wait for the converter to pick the
          // strobe up (toc_ready drops) before waiting for it to finish.
          guard = 0;
-         while (dut.toc_ready && guard < 100) begin
+         while (dut.ca_toc_ready && guard < 100) begin
             @(posedge clk); #1;
             guard = guard + 1;
          end
          guard = 0;
-         while (!dut.toc_ready && guard < 5000) begin
+         while (!dut.ca_toc_ready && guard < 5000) begin
             @(posedge clk); #1;
             guard = guard + 1;
          end
-         if (!dut.toc_ready) $display("       WARNING: TOC never became ready");
+         if (!dut.ca_toc_ready) $display("       WARNING: TOC never became ready");
       end
    endtask
 
@@ -210,7 +223,7 @@ module tb_scsi_cdrom;
    // than racing it.
    reg watch_toc    = 1'b0;
    reg saw_toc_busy = 1'b0;
-   always @(posedge clk) if (watch_toc && !dut.toc_ready) saw_toc_busy <= 1'b1;
+   always @(posedge clk) if (watch_toc && !dut.ca_toc_ready) saw_toc_busy <= 1'b1;
 
    reg       timed_out = 1'b0;
    reg [7:0] sampled   = 8'h00;
@@ -777,9 +790,9 @@ module tb_scsi_cdrom;
          send_cdb(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00,0,0,0,0,0,0, 6);
          finish_command;
          ok = (post_eject == 8'h02) && (!timed_out) && (status_byte == 8'h00)
-              && dut.mounted && dut.toc_ready;
+              && dut.mounted && dut.ca_toc_ready;
          if (!ok) $display("       (post_eject=%02x remount=%02x mounted=%b toc=%b)",
-                           post_eject, status_byte, dut.mounted, dut.toc_ready);
+                           post_eject, status_byte, dut.mounted, dut.ca_toc_ready);
       end
       report(ok, "cd18 - post-eject reports no disc, remount restores the drive");
 

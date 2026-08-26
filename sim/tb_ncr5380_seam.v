@@ -867,8 +867,17 @@ module tb_ncr5380_seam;
 		// re-enabled: re-enabling it answers the outstanding fetch and clears
 		// io_rd by itself, which masks the difference entirely (the first two
 		// versions of this test both passed with the clear removed).
+		//
+		// io_rd_d, not the module's io_rd output. Since the 3B arbitration fix
+		// the output is `io_rd_d | ca_io_rd_w`, and with the HPS switched off the
+		// CD-audio engine's own TOC fetch is legitimately still outstanding here
+		// -- it is not the SCSI command's request and the watchdog has no
+		// business clearing it. The invariant this test exists for is about the
+		// DATA-PATH request, and specifically about io_busy, which reads io_rd_d
+		// alone; the leg below (the next command still works) checks that end of
+		// it behaviourally.
 		ok("seam9 - the stalled request is cleared, not left asserted",
-		   !io_rd[CD_DEV]);
+		   !dut.target[CD_DEV].target.io_rd_d);
 
 		// Releasing the bus is not enough. A stale io_rd left asserted keeps
 		// io_busy high, which suppresses REQ for the NEXT command too -- the

@@ -52,7 +52,7 @@ module scsi
 	input         img_mounted,
 	input  [31:0] img_blocks,
 	output [31:0] io_lba,
-	output reg 	  io_rd,
+	output        io_rd,
 	output reg 	  io_wr,
 	input         io_ack,
 
@@ -250,7 +250,7 @@ assign io = (phase == PHASE_DATA_OUT) || (phase == PHASE_STATUS_OUT) || (phase =
 wire   rd_cur_unfilled = (rd_cur_blk >= rd_hps_blk);
 wire   io_busy = (phase == PHASE_DATA_OUT && cmd_read && mounted && rd_cur_unfilled) ||
                  (phase == PHASE_DATA_IN  && (io_wr | wr_pending | (io_ack & ~ca_io_active)) && data_cnt[9] == sd_buff_sel) ||
-                 (phase != PHASE_DATA_OUT && phase != PHASE_DATA_IN && (io_rd | io_wr | wr_pending | (io_ack & ~ca_io_active)));
+                 (phase != PHASE_DATA_OUT && phase != PHASE_DATA_IN && (io_rd_d | io_wr | wr_pending | (io_ack & ~ca_io_active)));
 
 // A zero-length data phase (allocation length 0) never sees an ACK edge, so
 // data_complete -- which only sets on one -- would never assert and REQ would be
@@ -526,135 +526,12 @@ reg        cd_astat_vol_r = 1'b0;    // AUDIO STATUS asked for volumes, CDB[3]==
 reg [31:0] cd_alloc10_r   = 32'd0;   // raw 10-byte-CDB allocation, CDB[7:8]
 reg [31:0] cd_hdr_addr_r  = 32'd0;   // READ HEADER address echo, CDB[2:5]
 
-// A data CD's table of contents is: one track, number 1, type data (ADR/control
-// 0x14), starting at LBA 0, plus a lead-out at the end of the disc. Everything
-// is a constant except the lead-out address, which needs one LBA -> MSF
-// conversion: m = lba/4500, s = (lba%4500)/75, f = lba%75.
-//
-// The two planes disagree on purpose, and this is easy to get wrong:
-//   * the Apple 0xC1 plane reports raw LBA-derived MSF, in BCD
-//   * the standard 0x43 plane reports MSF + 150 (the 2-second pre-gap), binary
-// Both come from the same iterative subtract, run twice at mount time. That is
-// ~150 cycles a pass against a mount event, so a real divider would be fabric
-// spent on nothing.
-function [7:0] cd_bin2bcd;   // 0..99
-	input [7:0] v;
-	begin
-		cd_bin2bcd = ((v / 8'd10) << 4) | (v % 8'd10);
-	end
-endfunction
-
-// Lead-out, in CD frames. For a data disc one frame is one 2048-byte logical
-// block, so this is the 2048-block count == capacity + 1.
-wire [31:0] toc_lo_lba = capacity + 1'd1;
-
-reg [6:0]  toc_m, toc_s;
-reg [31:0] toc_v;
-reg [7:0]  c1_m  = 8'd0, c1_s  = 8'd0, c1_f  = 8'd0;   // 0xC1 plane, BCD
-reg [7:0]  t43_m = 8'd0, t43_s = 8'd2, t43_f = 8'd0;   // 0x43 plane, binary
-reg [1:0]  toc_st = 2'd0;
-reg        toc_pass = 1'b0;
-reg        toc_ready = 1'b0;
-reg        cd_mount_d = 1'b0;
-
-always @(posedge clk) begin
-	// one cycle behind the mount so `capacity` (and therefore toc_lo_lba) is
-	// already the new image's
-	cd_mount_d <= img_mounted && (|img_blocks);
-
-	if (any_rst) begin
-		toc_st    <= 2'd0;
-		toc_ready <= 1'b0;
-	end else if (CDROM != 0) begin
-		case (toc_st)
-		2'd0: if (cd_mount_d) begin
-			toc_v <= toc_lo_lba; toc_m <= 7'd0; toc_s <= 7'd0;
-			toc_pass <= 1'b0; toc_ready <= 1'b0; toc_st <= 2'd1;
-		end
-		2'd1: if ((toc_v >= 32'd4500) && (toc_m != 7'd99)) begin
-			toc_v <= toc_v - 32'd4500; toc_m <= toc_m + 7'd1;
-		end else if (toc_v >= 32'd75) begin
-			toc_v <= toc_v - 32'd75; toc_s <= toc_s + 7'd1;
-		end else
-			toc_st <= 2'd2;
-		default: begin
-			if (!toc_pass) begin
-				c1_m <= cd_bin2bcd({1'b0, toc_m});
-				c1_s <= cd_bin2bcd({1'b0, toc_s});
-				c1_f <= cd_bin2bcd(toc_v[7:0]);
-				// second pass: the same lead-out, +150, for the 0x43 plane
-				toc_v <= toc_lo_lba + 32'd150;
-				toc_m <= 7'd0; toc_s <= 7'd0;
-				toc_pass <= 1'b1; toc_st <= 2'd1;
-			end else begin
-				t43_m <= {1'b0, toc_m};
-				t43_s <= {1'b0, toc_s};
-				t43_f <= toc_v[7:0];
-				toc_ready <= 1'b1; toc_st <= 2'd0;
-			end
-		end
-		endcase
-	end
-end
-
-// ---- Apple vendor READ TOC (0xC1) ----------------------------------------
-// The operation lives in the CONTROL byte's top two bits (cmd[9][7:6]) -- the
-// AppleCD driver's actual dialect. Response planes:
-//   00 -> {first track, last track (BCD), 0, 0}
-//   01 -> lead-out {M, S, F, 0}, BCD
-//   10 -> per-track descriptor {ADR/control, M, S, F}, BCD, indexed by CDB[5]
-// With a single track, every descriptor request clamps to track 1 at LBA 0 --
-// MAME's "keep returning the last track" behaviour, which is what a request
-// running past the real track count is supposed to see.
-function [7:0] cd_toc_byte;
-	input [31:0] cnt;
-	input [1:0]  op;
-	input [7:0]  lo_m, lo_s, lo_f;
-	begin
-		case (op)
-		2'b01:   cd_toc_byte = (cnt == 32'd0) ? lo_m :
-		                       (cnt == 32'd1) ? lo_s :
-		                       (cnt == 32'd2) ? lo_f : 8'h00;
-		2'b10:   cd_toc_byte = (cnt[1:0] == 2'd0) ? 8'h14 : 8'h00;
-		default: cd_toc_byte = (cnt == 32'd0) ? 8'h01 :   // first track
-		                       (cnt == 32'd1) ? 8'h01 :   // last track, BCD
-		                       8'h00;
-		endcase
-	end
-endfunction
-// Serve EXACTLY the allocation, zero-filled past the real payload (the serve
-// functions already return 0 past their payload). A fixed-size response that
-// ignores a larger allocation strands a blind host exactly like the page 0x0E
-// under-serve did. Op 10 streams whole 4-byte descriptors.
-
-// ---- standard READ TOC (0x43), format 0, MSF form ------------------------
-// 20 bytes: 4-byte header, track 1 descriptor, lead-out (0xAA) descriptor.
-// Track 1 starts at LBA 0, which in this plane is MSF 00:02:00.
-function [7:0] cd_toc43_byte;
-	input [31:0] cnt;
-	input [7:0]  lo_m, lo_s, lo_f;
-	begin
-		cd_toc43_byte =
-			(cnt == 32'd1 )?8'd18:   // data length = 20 - 2
-			(cnt == 32'd2 )?8'h01:   // first track
-			(cnt == 32'd3 )?8'h01:   // last track
-			// track 1 descriptor [4..11]
-			(cnt == 32'd5 )?8'h14:   // ADR 1 / control 4 (data track)
-			(cnt == 32'd6 )?8'h01:   // track number
-			(cnt == 32'd10)?8'd2:    // 00:02:00
-			// lead-out descriptor [12..19]
-			(cnt == 32'd13)?8'h14:
-			(cnt == 32'd14)?8'hAA:   // lead-out track number
-			(cnt == 32'd17)?lo_m:
-			(cnt == 32'd18)?lo_s:
-			(cnt == 32'd19)?lo_f:
-			8'h00;
-	end
-endfunction
-
 // ---- sub-channel ---------------------------------------------------------
-// No audio engine yet (Phase 3), so the position is always "stopped at the
-// start of track 1" and the audio status is 0x13 (play completed / stopped).
+// STILL Phase 2 CONSTANTS. The engine now tracks a real position (ca_ast_code,
+// ca_cur_trk, ca_abs_*, ca_rel_* are wired out of it and go nowhere), but these
+// three responses have not been repointed at it yet -- that is step 3B+. Until
+// then the drive always reports "stopped at the start of track 1", audio status
+// 0x13, so a player's position display will not move even while audio plays.
 localparam [7:0] CD_AST_STOPPED = 8'h13;
 
 // Apple READ Q SUBCODE (0xC2), 9 bytes:
@@ -771,6 +648,26 @@ end
 // wr_pending lives at module scope because io_busy must include it (see there).
 reg wr_pending;
 
+// Data-path io_rd (the sector-ring engine's own request). The MODULE OUTPUT is
+// that ORed with the CD-audio engine's request.
+//
+// MISSING FROM THE 3B PORT, found 2026-08-26 by simulation. `ca_io_rd_w` was
+// wired out of cd_audio and then read by nothing, so the audio/TOC engine could
+// never raise a request on the HPS channel at all. Two consequences, and the
+// second is the dangerous one:
+//
+//   * the engine can only make progress by PIGGY-BACKING on a disk fetch that
+//     happens to be in flight, because io_lba is already muxed to its address;
+//   * therefore a disk fetch issued while ca_io_active is high is served the
+//     ENGINE's block, silently, into the sector ring. The `!io_rd` guard below
+//     is what is supposed to prevent that, and it was blind.
+//
+// Three sites read io_rd_d (this register, io_busy, ca_grant) and exactly one
+// reads the shared wire: the prefetch start guard, which is the interlock.
+// Follows MacLC scsi.v:1812-1848 site for site.
+reg io_rd_d;
+assign io_rd = io_rd_d | ca_io_rd_w;
+
 always @(posedge clk) begin
 	reg old_wr;
 	reg rd_busy;   // a read-prefetch sector fetch is outstanding
@@ -787,7 +684,7 @@ always @(posedge clk) begin
 	// data_cnt[9] == sd_buff_sel, so a pending flush does not always hold it),
 	// and a stale request left over an abort poisons the next command.
 	if(any_rst || wdog_abort) begin
-		io_rd      <= 1'b0;
+		io_rd_d    <= 1'b0;
 		io_wr      <= 1'b0;
 		wr_pending <= 1'b0;
 		old_wr     <= 1'b0;
@@ -801,8 +698,10 @@ always @(posedge clk) begin
 		// filled ahead of the Mac. rd_busy holds across a fetch until rd_hps_blk
 		// advances on the io_ack falling edge, so exactly one fetch is issued per
 		// sector and the next can start immediately after.
-		if(io_ack) io_rd <= 1'b0;
-		else if(req_rd && !io_rd && !rd_busy) begin io_rd <= 1'b1; rd_busy <= 1'b1; end
+		// io_rd in the guard is the SHARED wire on purpose: an audio block in
+		// flight defers the ring's next fetch by one HPS block, nothing more.
+		if(io_ack) io_rd_d <= 1'b0;
+		else if(req_rd && !io_rd && !rd_busy) begin io_rd_d <= 1'b1; rd_busy <= 1'b1; end
 		if(old_io_ack & ~io_ack) rd_busy <= 1'b0;
 
 		// WRITE flush engine -- unchanged two-slot double-buffer behavior.
@@ -1073,13 +972,20 @@ wire  cmd_ok = (CDROM != 0) ? cmd_ok_cd : cmd_ok_hd;
 wire  cd_needs_media = cmd_test_unit_ready || cmd_read || cmd_read_capacity ||
 		  cmd_cd_toc || cmd_cd_subq || cmd_cd_astat || cmd_cd_actl ||
 		  cmd_cd_toc43 || cmd_cd_subq43 || cmd_cd_hdr || cmd_cd_audio_nop;
-// !toc_ready: the lead-out MSF conversion runs for ~150 cycles after a mount.
-// Serving media commands in that window returned the PREVIOUS disc's TOC, which
-// is the wrong answer after a disc swap. Report the drive as not-ready-yet
-// instead -- the correct SCSI answer for a drive still spinning up, and what the
-// driver's retry path already handles. (Quartus caught this: toc_ready was
-// assigned but never read, i.e. the readiness flag existed but gated nothing.)
-wire  cd_no_media = (CDROM != 0) && (!mounted || !toc_ready) && cd_needs_media;
+// !ca_toc_ready: the engine fetches the real TOC from Main's MCDA blob after a
+// mount, which is an HPS round-trip, not the ~150 cycles Phase 2's local MSF
+// conversion took. Serving media commands in that window returned the PREVIOUS
+// disc's TOC, which is the wrong answer after a disc swap. Report the drive as
+// not-ready-yet instead -- the correct SCSI answer for a drive still spinning
+// up, and what the driver's retry path already handles.
+//
+// This MUST be the engine's flag and not a local one. Phase 3B moved TOC
+// serving to the engine's RAMs, and every one of those serve paths already
+// gates on ca_toc_ready and emits 0x00 when it is low. Gating readiness on a
+// DIFFERENT, earlier flag therefore opened a window where a TOC command took
+// GOOD status and an all-zeros payload -- a driver cannot retry that, because
+// nothing told it anything was wrong. One flag, used by both.
+wire  cd_no_media = (CDROM != 0) && (!mounted || !ca_toc_ready) && cd_needs_media;
 
 // READ HEADER in MSF form: rejected (see cd_hdr_byte).
 wire  cd_hdr_msf_rej = cmd_cd_hdr && cmd[1][1];
@@ -1407,6 +1313,12 @@ wire  [9:0] ca_t2_len;
 wire        ca_disc_audio;
 
 // ---- TOC serving from the engine's pre-rendered response RAMs -----------
+// Serve EXACTLY the armed allocation, zero-filled past the real payload. A
+// fixed-size response that ignores a larger allocation strands a blind host
+// exactly like the page 0x0E under-serve did (the 2026-08-20 boot wedge), so
+// each plane below pads rather than stopping short. Carried over from the
+// Phase 2 synthesis this replaced; the rule outlived the code that taught it.
+//
 // Phase 2 synthesized a single-track TOC from `capacity`. The engine builds the
 // real one from Main's MCDA blob, so these address its images instead. All
 // three RAMs are 1-clock registered reads, the same latency as the sector
@@ -1449,14 +1361,24 @@ wire  [9:0] ca_t43_flen  = {(7'd1 + ca_t43_nreal - ca_t43_soff), 3'b000} + 10'd2
 wire  [9:0] ca_t43_tot   = ca_t43_flen + 10'd2;
 wire  [8:0] ca_t43_addr  = (data_cnt < 32'd4) ? data_cnt[8:0]
                          : (9'd4 + {ca_t43_soff, 3'b000} + (data_cnt[8:0] - 9'd4));
+// `tot` and `flen` are passed IN rather than read from the body, per the rule
+// established at cd_mode_sense_byte above. Reading them from the body is what
+// the 2026-08-26 A&S caught: `ca_t43_tot` was reported assigned-but-never-read
+// while `ca_t2_len` -- syntactically the same kind of body read one function
+// down -- was not, so the two disagreed about a rule the file already knows.
+// Passing them in is correct by construction and settles it either way.
 function [7:0] t43_hdr_fix;
 	input [31:0] cnt;
+	input [9:0]  tot;
+	input [9:0]  flen;
 	input [7:0]  raw;
-	t43_hdr_fix = (cnt >= {22'd0, ca_t43_tot}) ? 8'h00 :
-	              (cnt == 32'd0) ? {6'd0, ca_t43_flen[9:8]} :
-	              (cnt == 32'd1) ? ca_t43_flen[7:0] : raw;
+	t43_hdr_fix = (cnt >= {22'd0, tot}) ? 8'h00 :
+	              (cnt == 32'd0) ? {6'd0, flen[9:8]} :
+	              (cnt == 32'd1) ? flen[7:0] : raw;
 endfunction
-wire  [7:0] cd_toc43_dout = ca_toc_ready ? t43_hdr_fix(data_cnt, ca_t43_q0) : 8'h00;
+wire  [7:0] cd_toc43_dout = ca_toc_ready
+                          ? t43_hdr_fix(data_cnt, ca_t43_tot, ca_t43_flen, ca_t43_q0)
+                          : 8'h00;
 
 // Format 2 (FULL TOC) / format 1 (SESSION INFO): the T2 plane IS the response
 // image, linear addressing, session page at [496..507]. Zero-fill past the real
@@ -1465,8 +1387,9 @@ wire  [7:0] cd_toc43_dout = ca_toc_ready ? t43_hdr_fix(data_cnt, ca_t43_q0) : 8'
 wire  [8:0] ca_t2_addr = (cmd_cd_t43f1 ? 9'd496 : 9'd0) + data_cnt[8:0];
 function [7:0] t2_fix;
 	input [31:0] cnt;
+	input [9:0]  len;
 	input [7:0]  raw;
-	t2_fix = (cnt >= {22'd0, ca_t2_len}) ? 8'h00 : raw;
+	t2_fix = (cnt >= {22'd0, len}) ? 8'h00 : raw;
 endfunction
 function [7:0] sess_fix;
 	input [31:0] cnt;
@@ -1475,7 +1398,7 @@ function [7:0] sess_fix;
 endfunction
 wire  [7:0] cd_toc2_dout = !ca_toc_ready ? 8'h00 :
                            cmd_cd_t43f1 ? sess_fix(data_cnt, ca_t2_q0)
-                                        : t2_fix(data_cnt, ca_t2_q0);
+                                        : t2_fix(data_cnt, ca_t2_len, ca_t2_q0);
 
 // A data READ aimed at an audio track must CHECK, not be served as garbage.
 // Without this an audio-only disc mounts with a non-zero capacity and returns
@@ -1509,7 +1432,7 @@ wire  [7:0] cd_ap_ch1 = 8'h02, cd_ap_vol1 = 8'hff;
 // acks out of the data-path accounting. DATA_IN (writes) stays excluded: a CD
 // is read-only so it never occurs.
 wire ca_grant = (phase == PHASE_IDLE || (cmd_read && phase == PHASE_DATA_OUT))
-                && !io_rd && !io_wr && !io_ack && mounted;
+                && !io_rd_d && !io_wr && !io_ack && mounted;
 
 generate if (CDROM != 0) begin : g_cd_audio
 	cd_audio #(.CLK_HZ(32'd32_500_000)) cd_audio_i (   // clk_sys rate; audio pitch verifies it
