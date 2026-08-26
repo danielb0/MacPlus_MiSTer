@@ -29,6 +29,7 @@
 //   PIO2  CD/disk io_rd vs io_ack counts + live handshake bits
 //   PIO3  {wr_stuck, d0_io_lba} -- the WRITE-side twin of PIOS
 //   PIO4  disk write/ack counts + live write handshake bits
+//   PHLD  CPU hold-off engagements + longest stall + frontier breaches
 //   PRG0-3  ring of the last 8 SCSI register accesses -- the CONVERSATION,
 //           not just its last line
 //   PDMA  the discriminating word: DACK reads since the arm, watchdog fire
@@ -64,7 +65,14 @@ module dbg_probes (
 
 	// Raw 5380 state, tapped in rtl/ncr5380.sv. Bit assignments are defined
 	// there; all counting, epochs and sticky logic live here.
-	input  wire [15:0] scsi_dbg
+	input  wire [15:0] scsi_dbg,
+
+	// CPU bus hold-off and frontier-breach pulse (rtl/ncr5380.sv). These are the
+	// only way a hardware run can distinguish "the interlock held" from "the HPS
+	// happened not to lag this time" -- a clean copy proves the second, not the
+	// first, and the two look identical from the guest.
+	input  wire        scsi_hold,
+	input  wire        scsi_breach
 );
 
 	wire dbg_bsy    = scsi_dbg[0];
@@ -470,7 +478,34 @@ module dbg_probes (
 	                    (|cd_io_lba[31:22])            ? 2'd3 :   // unrecognised
 	                                                     2'd0;    // data
 
-	reg [31:0] pios_r, pio2_r, pio3_r, pio4_r;
+	// ---- PHLD: did the CPU hold-off actually engage? ----------------------
+	// hold_events counts RISING edges (one per stalled access, not per cycle);
+	// max_hold is the longest single stall in clk cycles, which is what says
+	// whether a stall is a 0.6 ms fill lag or something pathological; breach_cnt
+	// must be ZERO -- any count means a DACK access got past the hold-off and
+	// only the CHECK CONDITION backstop caught it.
+	//
+	// All three saturate rather than wrap. A wrapped counter that reads 3 is
+	// indistinguishable from a real 3, and this deck exists to be trusted.
+	reg [11:0] hold_events = 0;
+	reg [15:0] max_hold    = 0;
+	reg  [3:0] breach_cnt  = 0;
+	reg [15:0] hold_len    = 0;
+	reg        hold_d      = 0;
+	always @(posedge clk) begin
+		hold_d <= scsi_hold;
+		if (scsi_hold) begin
+			if (!hold_d) begin
+				hold_len <= 16'd1;
+				if (~&hold_events) hold_events <= hold_events + 1'd1;
+			end
+			else if (~&hold_len) hold_len <= hold_len + 1'd1;
+			if (hold_len > max_hold) max_hold <= hold_len;
+		end
+		if (scsi_breach && ~&breach_cnt) breach_cnt <= breach_cnt + 1'd1;
+	end
+
+	reg [31:0] pios_r, pio2_r, pio3_r, pio4_r, phld_r;
 	always @(posedge clk) begin
 		pios_r <= {rd_stuck, cd_win, cd_io_lba[21:0]};
 		// PIO2[7] is a PROBE-FORMAT MARKER, not a signal. It says "PIOS carries a
@@ -490,6 +525,7 @@ module dbg_probes (
 		pio3_r <= {wr_stuck, d0_io_lba[23:0]};
 		pio4_r <= {d0_wr_cnt, d0_ack_cnt, d1_wr_cnt,
 		           5'd0, d0_io_wr, d0_io_ack, d1_io_wr};
+		phld_r <= {hold_events, max_hold, breach_cnt};
 	end
 
 	// ---- which bitstream is this? -----------------------------------------
@@ -567,6 +603,14 @@ module dbg_probes (
 		.instance_id ("PIO4"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
 	) cp_pio4 (.probe(pio4_r), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	// 19th instance. MacLC notes a ~20 ceiling above which the name table reads
+	// back corrupted, so this is close to the last one that can be added
+	// without pruning something first.
+	altsource_probe #(
+		.instance_id ("PHLD"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_phld (.probe(phld_r), .source(), .source_clk(clk), .source_ena(1'b1));
 
 	altsource_probe #(
 		.instance_id ("PDMA"), .probe_width (32), .source_width (1),

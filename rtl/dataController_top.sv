@@ -23,6 +23,8 @@ module dataController_top(
 	output [15:0] scsi_dbg,
 	// SCSI pseudo-DMA hold-off -> MacPlus.sv withholds DTACK. See ncr5380.sv.
 	output        scsi_bus_hold,
+	// Frontier-breach pulse for the probe deck. Zero on a healthy build.
+	output        scsi_frontier_evt,
 
 	// CD-DA pair from the SCSI CD target's audio engine (Phase 3B). Exact
 	// zeros when not playing; the mixer that consumes them is Phase 3D.
@@ -238,6 +240,7 @@ module dataController_top(
 		.dack(cpuAddrRegHi[0]),   // A9
 		.dbg_bus(scsi_dbg),
 		.bus_hold(scsi_bus_hold),
+		.frontier_evt(scsi_frontier_evt),
 		.cd_snd_l(cd_snd_l),
 		.cd_snd_r(cd_snd_r),
 		.wdata(cpuDataIn[15:8]),

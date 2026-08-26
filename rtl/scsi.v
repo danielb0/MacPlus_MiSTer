@@ -72,7 +72,7 @@ module scsi
 	// driver missed REQ and a watchdog rescued the bus" from "the transaction
 	// completed invisibly" -- see SCSI_UPGRADE_PLAN.md 5.6. Unconnected in a
 	// build without the probe deck, where it costs nothing.
-	output  [1:0] dbg_abort,
+	output  [2:0] dbg_abort,
 
 	// CPU BUS HOLD-OFF. High while this target is in a data phase and physically
 	// cannot serve or accept the next byte -- the same condition that withdraws
@@ -1312,7 +1312,12 @@ wire wdog_abort   = (wdog_expired && (phase != PHASE_IDLE)) || iostall_abort;
 // Debug export. wdog_abort already includes iostall_abort, so report the bus
 // watchdog on its own bit -- otherwise one io stall would look like two
 // different failures.
-assign dbg_abort = { iostall_abort, wdog_abort && !iostall_abort };
+// Bit 2 is the FRONTIER BREACH pulse, added above the existing two so their
+// meanings are unchanged. It should be permanently zero on a build with the
+// CPU hold-off: if it ever counts, the hold-off has a hole and (c) is the only
+// thing standing between the guest and silent corruption. That is precisely
+// what a hardware capture needs to be able to say.
+assign dbg_abort = { frontier_breach, iostall_abort, wdog_abort && !iostall_abort };
 
 always @(posedge clk) begin
 	if (any_rst || (phase == PHASE_IDLE) || stb_ack || stb_adv || io_busy || wdog_abort)

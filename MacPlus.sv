@@ -349,6 +349,7 @@ wire vid_alt, loadPixels, pixelOut, _hblank, _vblank, hsync, vsync;
 wire memoryOverlayOn, selectSCSI, selectSCC, selectIWM, selectVIA, selectRAM, selectROM, selectSEOverlay;
 wire [15:0] scsi_dbg;   // raw 5380 state, for rtl/dbg_probes.sv
 wire        scsi_bus_hold; // SCSI pseudo-DMA back-pressure, see ncr5380.sv
+wire        scsi_frontier_evt; // frontier breach pulse, for the probe deck
 wire [15:0] dataControllerDataOut;
 
 // audio
@@ -635,6 +636,7 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.cpuDataOut(dataControllerDataOut), 	
 	.scsi_dbg(scsi_dbg),
 	.scsi_bus_hold(scsi_bus_hold),
+	.scsi_frontier_evt(scsi_frontier_evt),
 	.cpuAddrRegHi(cpuAddr[12:9]),
 	.cpuAddrRegMid(cpuAddr[6:4]),  // for SCSI
 	.cpuAddrRegLo(cpuAddr[2:1]),		
@@ -1052,7 +1054,9 @@ dbg_probes dbg_probes_inst
 	.d0_io_ack  ( sd_ack[0]               ),
 	.d0_io_lba  ( scsi_sd_lba[0]          ),
 	.d1_io_wr   ( scsi_sd_wr[1]           ),
-	.scsi_dbg   ( scsi_dbg                )
+	.scsi_dbg   ( scsi_dbg                ),
+	.scsi_hold  ( scsi_bus_hold           ),
+	.scsi_breach( scsi_frontier_evt       )
 );
 `endif
 

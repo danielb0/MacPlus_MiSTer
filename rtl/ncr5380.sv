@@ -112,6 +112,11 @@ module ncr5380
 	// so drops data_holdoff. Worst case is a bounded stall ending in CHECK
 	// CONDITION, never a hang.
 	,output            bus_hold
+
+	// Frontier-breach pulse, any target. Zero on a healthy build -- see scsi.v.
+	// Counted by the probe deck so a hardware run can prove the hold-off held,
+	// rather than merely failing to prove it did not.
+	,output            frontier_evt
 );
 	parameter DEVS = 2;
 	// Index of the CD-ROM target within the DEVS arrays, or DEVS for "none".
@@ -148,6 +153,7 @@ module ncr5380
 	// An idle target is not in a data phase, so |target_holdoff is exactly the
 	// selected target's indication.
 	assign bus_hold = bus_cs & dack & (ior | iow) & dma_en & (|target_holdoff);
+	assign frontier_evt = |target_frontier;
 
 	reg  [7:0] mr;        /* Mode Register */
 	reg  [7:0] icr;       /* Initiator Command Register */
@@ -467,6 +473,7 @@ module ncr5380
 
 	wire [DEVS-1:0] target_wdog, target_iostall;
 	wire [DEVS-1:0] target_holdoff;
+	wire [DEVS-1:0] target_frontier;
 
 	// input signals from targets
 	wire [DEVS-1:0] target_bsy;
@@ -553,7 +560,7 @@ module ncr5380
 				.sd_buff_din( sd_buff_din[i] ),
 				.sd_buff_wr( sd_buff_wr & io_ack[i] ),
 
-				.dbg_abort( { target_iostall[i], target_wdog[i] } ),
+				.dbg_abort( { target_frontier[i], target_iostall[i], target_wdog[i] } ),
 				.data_holdoff( target_holdoff[i] ),
 				.cd_snd_l( target_snd_l[i] ),
 				.cd_snd_r( target_snd_r[i] )

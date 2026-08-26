@@ -102,6 +102,7 @@ for {set n 0} {$n < $samples} {incr n} {
 	set pio2 [b2i [rd PIO2]]
 	set pio3 [b2i [rd PIO3]]
 	set pio4 [b2i [rd PIO4]]
+	set phld [b2i [rd PHLD]]
 	set pifa [b2i [rd PIFA]]
 	set pact [b2i [rd PACT]]
 	set pscs [b2i [rd PSCS]]
@@ -177,6 +178,20 @@ for {set n 0} {$n < $samples} {incr n} {
 	puts [format "  PIO2  cd rd=%d ack=%d  disk0 rd=%d   live: cd_rd=%d cd_wr=%d cd_ack=%d d0_rd=%d d0_ack=%d" [expr {($pio2 >> 24) & 0xff}] [expr {($pio2 >> 16) & 0xff}] [expr {($pio2 >> 8) & 0xff}] [expr {($pio2 >> 4) & 1}] [expr {($pio2 >> 3) & 1}] [expr {($pio2 >> 2) & 1}] [expr {($pio2 >> 1) & 1}] [expr {$pio2 & 1}]]
 	puts [format "  PIO3  disk write stuck=%-3d lba=%d" [expr {($pio3 >> 24) & 0xff}] [expr {$pio3 & 0xffffff}]]
 	puts [format "  PIO4  disk0 wr=%d ack=%d (ack covers rd+wr)  disk1 wr=%d   live: d0_wr=%d d0_ack=%d d1_wr=%d" [expr {($pio4 >> 24) & 0xff}] [expr {($pio4 >> 16) & 0xff}] [expr {($pio4 >> 8) & 0xff}] [expr {($pio4 >> 2) & 1}] [expr {($pio4 >> 1) & 1}] [expr {$pio4 & 1}]]
+	# PHLD: the CPU hold-off. holds=0 after a CD read means the interlock was
+	# never exercised -- a clean copy then says nothing about whether it works.
+	# breaches MUST be 0; any count means a DACK access got past the hold-off
+	# and only the CHECK CONDITION backstop stood between it and corruption.
+	set phld_holds   [expr {($phld >> 20) & 0xfff}]
+	set phld_maxhold [expr {($phld >> 4)  & 0xffff}]
+	set phld_breach  [expr {$phld & 0xf}]
+	set s_holds $phld_holds
+	if {$phld_holds == 4095} { set s_holds "${phld_holds}+ (SAT)" }
+	set s_max "${phld_maxhold} clk"
+	if {$phld_maxhold == 65535} { set s_max "${phld_maxhold}+ clk (SAT)" }
+	set s_breach "0 (good)"
+	if {$phld_breach != 0} { set s_breach "$phld_breach <<< FRONTIER BREACHED" }
+	puts [format "  PHLD  cpu hold-off: holds=%-12s longest=%-18s breaches=%s" $s_holds $s_max $s_breach]
 	# The access ring, newest first. Entry = {rw,dack,reg,3'b0,val}.
 	puts [format "  PRG   recent non-poll SCSI accesses (newest first); DACK reads so far: %d" [expr {($pscs >> 8) & 0xf}]]
 	foreach pr {PRG0 PRG1 PRG2 PRG3} {
@@ -355,6 +370,14 @@ puts "    the CD-DA window (0x40000000+lba), or the TOC blob (0x7FFF0000)."
 puts "    Without it an audio frame for block n is indistinguishable from a"
 puts "    data read of block n -- which is the whole Phase 3B question, since"
 puts "    cd_audio.sv and the SCSI target share this one channel."
+puts "  * PHLD is the one that says whether the CD->disk fix was TESTED, not"
+puts "    merely un-contradicted. holds=0 after a CD read means the HPS never"
+puts "    lagged and the interlock was never exercised: rerun with a colder"
+puts "    cache or a longer seek before believing a clean copy. breaches>0"
+puts "    means the hold-off has a hole and the CHECK CONDITION backstop is"
+puts "    all that caught it -- expect sense 0xB/0x4b in the driver's log."
+puts "    longest= is the worst single CPU stall; ~20k clk is a normal 0.6ms"
+puts "    fill lag at 32.5MHz, SATURATED (65535) needs investigating."
 puts "  * PIO3/PIO4 are the same test for the WRITE side, which is what the"
 puts "    2026-08-22 wedge actually was. PIO3 stuck>0 with PIO4 d0_wr=1 and"
 puts "    PIO4 wr+PIO2 rd > PIO4 ack = a FLUSH the HPS never answered, and"

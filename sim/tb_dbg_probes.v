@@ -98,7 +98,9 @@ module tb_dbg_probes;
 		// DEVS=2 with CD_DEV=1, so there is no second DISK in this bench; the
 		// d1 counter uses the same edge-count idiom as d0 immediately above it.
 		.d1_io_wr(1'b0),
-		.scsi_dbg(scsi_dbg)
+		.scsi_dbg(scsi_dbg),
+		.scsi_hold(dut.bus_hold),
+		.scsi_breach(dut.frontier_evt)
 	);
 
 	integer fails = 0, tests = 0;
@@ -415,6 +417,39 @@ module tb_dbg_probes;
 		   probes.pio3_r[23:0] == 24'h001234);
 		ok("probe - PIO3 carries the write-stall age in its top byte",
 		   probes.pio3_r[31:24] === probes.wr_stuck);
+
+		// ---- PHLD: the deck must be able to say the hold-off ENGAGED --------
+		// Without this field a hardware capture cannot tell "the interlock
+		// held" from "the HPS never lagged this run", and a clean CD->disk copy
+		// proves only the second. Drive bus_hold directly rather than staging a
+		// whole late-fill scenario: what is under test here is the DECK's
+		// counting, not the RTL's hold-off (seam18/seam19 own that).
+		force dut.bus_hold = 1'b1;
+		repeat (25) @(posedge clk);
+		release dut.bus_hold;
+		repeat (4) @(posedge clk);
+		force dut.bus_hold = 1'b1;
+		repeat (8) @(posedge clk);
+		release dut.bus_hold;
+		repeat (8) @(posedge clk);
+		ok("probe - PHLD counted BOTH hold-off engagements, not cycles",
+		   probes.phld_r[31:20] == 12'd2);
+		ok("probe - PHLD reports the LONGER of the two stalls",
+		   probes.phld_r[19:4] >= 16'd24 && probes.phld_r[19:4] <= 16'd26);
+		// Must be zero: nothing in this bench breaches the frontier, and on a
+		// healthy build nothing on hardware should either.
+		ok("probe - PHLD shows no frontier breach",
+		   probes.phld_r[3:0] == 4'd0);
+		// And the deck must be able to SEE a breach when there is one, or a
+		// permanent zero would be indistinguishable from a dead counter.
+		// negedge boundaries so the force spans exactly one posedge: applying it
+		// in the same delta as the sampling edge is the race this tree has been
+		// bitten by before.
+		@(negedge clk); force dut.frontier_evt = 1'b1;
+		@(negedge clk); release dut.frontier_evt;
+		repeat (4) @(posedge clk);
+		ok("probe - PHLD counts a frontier breach when one occurs",
+		   probes.phld_r[3:0] == 4'd1);
 		// The disk LBA is the field that did not exist at all before; PIOS
 		// carries the CD's LBA and would have read 0 here, which is precisely
 		// how a stalled disk write used to look identical to no disk IO.
