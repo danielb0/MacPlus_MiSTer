@@ -1238,6 +1238,103 @@ the bench timeout had to go 20 ms -> 160 ms for the sweep; the first run's
 `FAIL: bench timeout -- initiator stuck` was the harness running out of clock,
 not a wedge.
 
+##### Fourth attempt: REPRODUCED (seam18, 2026-08-26) -- the initiator is blind
+
+All three negative reproductions shared one modeling error, and it was in the
+INITIATOR, not the HPS: every read loop in every bench polls BSR.DRQ before
+every byte (`wait_drq` in `tb_ncr5380_seam.v`; REQ pacing in `tb_scsi_cdrom`).
+A polite initiator can never pass the fetch frontier -- `rd_cur_unfilled` drops
+REQ, DRQ follows, and the initiator waits. The benches were structurally unable
+to fail no matter what latency the HPS server produced, which is why sweeping
+694 fills changed nothing.
+
+The real Mac Plus is not polite. Its blind pseudo-DMA loop reads the DACK
+window at instruction rate without re-polling. A note on the history, because
+the RELEASE BLOCKER section ("SCSI has no back-pressure to the CPU bus") says
+"unlike real hardware" without qualification: it is the SE whose glue delays
+/DTACK on the pseudo-DMA space until DRQ; the PLUS reportedly has no hold-off
+at all, which is exactly why Apple documented blind transfers as risky on that
+machine and why drives of the era guaranteed sustained streaming once they
+raised DRQ at a block boundary. (Worth verifying against a Plus schematic
+before building the fix; the engineering conclusion is unchanged either way --
+OUR "drive" cannot make the streaming guarantee a real one could, so the core
+must supply the interlock the real machine got from its drive.) On the RTL
+side the pump-cannot-be-stopped fact is structural, in three places that
+compose into the defect:
+
+* `ncr5380.sv:166` -- `rdata = dack ? cur_data : ...` serves a byte on every
+  DACK read, REQ or no REQ;
+* `ncr5380.sv:162` -- `dma_ack <= dma_en & bus_data_phase` on the access's
+  falling edge: gated on the PHASE only, never on `scsi_req`;
+* `scsi.v:877` -- `data_cnt` advances on every ACK falling edge (`stb_adv`),
+  unconditionally.
+
+So the frontier guard is ADVISORY. `rd_cur_unfilled` only ever suppresses
+REQ/DRQ (`scsi.v:250,261`); nothing refuses the ACK. A blind pump that has
+started a transfer consumes ring slots at its own pace, and any HPS fill that
+lands later than the pump reaches that slot is read as the slot's PREVIOUS
+occupant until the fill catches up mid-sector. Stale head, fresh tail, GOOD
+status, correct length -- byte for byte the hardware signature.
+
+**This also explains the determinism that killed the "rare window" model: the
+corruption starts at slot 1 because slot 1 is the FIRST slot the initiator's
+one per-transfer DRQ handshake cannot protect.** The driver waits for DRQ once
+before pumping; that wait absorbs fill 0's latency, however long. Nothing
+absorbs fill 1's. `DRA01E01.GRB`'s read follows a 407-block seek off the tail
+of a 96 KB sequential read, so its fills hit the ARM cold -- the same lag at
+the same place every run, with only the catch-up point jittering (378 vs 404
+stale bytes).
+
+**seam18** (`tb_ncr5380_seam.v`) is the failing reproduction: seed the ring
+with a 40-sector READ, then pump a 2-block READ blind -- one initial DRQ wait,
+then DACK reads at a fixed pace with no re-polling -- against a fill forced to
+~1.5x the pump's per-sector time (both scaled under the bench's shortened
+io-stall watchdog; see the SCALING comment). Result, first run:
+
+```
+seam18 BLIND pump: 298 wrong bytes, offsets 512..809 (slot 1..1)
+298 of 298 wrong bytes are the ring slot's PREVIOUS occupant (stale head, fresh tail)
+FAIL: seam18 - a blind pseudo-DMA pump cannot outrun the fetch frontier
+PASS: seam18b - any stale data is the ring slot's previous occupant
+```
+
+Slot 1 only; stale head, fresh tail; every stale byte is the previous
+occupant; the target's own probe shows `rd_hps_blk=1` while `data_cnt` runs
+past 512 -- the guard evaluated correctly and was ignored. `seam18` stays RED
+until the RTL can enforce its own frontier ([[plan-doc-before-implementation]]
+convention: the failing test precedes the fix). `seam18b` is the mechanism
+check and must stay green alongside it.
+
+Two scaling notes from getting the reproduction honest: a pump at 4 clk/byte
+corrupts EVERYTHING from byte 1 -- that is the ACK->data_cnt->dpram settle
+path, an artifact no 8 MHz 68000 can produce, not the defect; and a fill
+forced above the bench's IOWDOG_LOG(14) window aborts the command with CHECK
+CONDITION instead of corrupting (phase=STATUS, 0x02 served -- which is the
+io-stall watchdog doing its job, and on hardware sits at ~516 ms, far above
+the ~0.6 ms lag that corrupts).
+
+Consequences:
+
+* **This is the release blocker manifesting, not a new defect.** 5.7 records
+  that a pacing violation corrupts silently instead of hanging and that 8 MHz
+  operation was "design or luck"; the CD source ended the luck. The hazard
+  predates the ring -- the old two-slot double buffer had the same advisory
+  REQ -- and disk->disk stays clean only because .vhd fills never lag enough.
+* **MacLC almost certainly carries the same class** -- their "ring-stale
+  corruption class" was chased across four commits and anchored with a
+  permanent marginality note, which is what tuning margins around an
+  unenforceable frontier looks like. Upstream-worthy once fixed here.
+* Candidate fixes, undecided (in order of completeness): (a) ENFORCE the
+  frontier -- hold the CPU off in the DACK window while `io_busy` (the SE
+  wires DRQ into the bus handshake for exactly this reason); this is also the
+  5.7 release-blocker fix. (b) Withhold a read data phase's FIRST REQ/DRQ
+  until the ring is primed (`min(RING_BLOCKS, total)` sectors) -- gives a
+  blind pump 16 KB of runway, absorbs isolated fill lag, target-local and
+  cheap, but a sustained-slow source can still breach it. (c) Detect the
+  violation (an ACK landing while `rd_cur_unfilled`) and fail the command
+  with CHECK CONDITION -- turns silent corruption into a driver-visible,
+  retryable error. (b) and (c) compose; only (a) closes the hole.
+
 ##### Method note, worth more than the bug
 
 Four mechanisms were proposed for this symptom during one session and all four

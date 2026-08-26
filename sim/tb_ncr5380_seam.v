@@ -95,6 +95,12 @@ module tb_ncr5380_seam;
 	integer hps_fills = 0;
 	integer hps_acks = 0;
 	reg     saw_io_rd = 0;
+	// Force the next hps_force_n data-mode fills to take hps_force_delay clocks
+	// instead of the randomised 1..400. seam18 uses this to make exactly one
+	// fill arrive later than a blind initiator's pump rate -- the condition the
+	// randomised sweep cannot hold still.
+	integer hps_force_delay = 0;
+	integer hps_force_n = 0;
 
 	// Disk slot 0 gets its own trivial always-ack server: seam12 needs a WRITE
 	// target, and the CD is read-only.
@@ -340,6 +346,10 @@ module tb_ncr5380_seam;
 			// fill completes just as the host arrives, so the range has to
 			// straddle the host's own byte rate rather than sit under it.
 			dly = 1 + ((hps_seed >> 7) % 400);
+			if (hps_force_n > 0) begin
+				dly = hps_force_delay;
+				hps_force_n = hps_force_n - 1;
+			end
 			repeat (dly) @(posedge clk);
 			io_ack[CD_DEV] <= 1'b1;
 			@(posedge clk);
@@ -1307,6 +1317,151 @@ module tb_ncr5380_seam;
 			$display("          (%0d HPS fills at randomised latency, %0d iterations)",
 			         hps_fills, it);
 			hps_data_mode = 1'b0;
+		end
+
+		// ==================================================================
+		// seam18: a BLIND pseudo-DMA pump against one late HPS fill.
+		//
+		// Every read loop above polls BSR.DRQ before every byte, so the
+		// initiator can never pass the fetch frontier -- rd_cur_unfilled drops
+		// REQ, DRQ follows, and the polite initiator waits. That is why cd38,
+		// seam17 and the 694-fill sweep were all green against a hardware
+		// failure that is deterministic.
+		//
+		// The real Mac Plus is not polite. Its SCSI Manager blind loop reads
+		// the DACK window at instruction rate without re-polling, and the Plus
+		// has no hardware hold-off (DRQ is not wired to DTACK -- see the
+		// release-blocker note in SCSI_UPGRADE_PLAN.md 5.x): once the pump
+		// starts, nothing the target does can stop it. On the RTL side the
+		// same is true structurally: `rdata = dack ? cur_data` serves a byte
+		// regardless of REQ, dma_ack is gated only on dma_en & bus_data_phase,
+		// and data_cnt advances on every ACK edge. REQ/DRQ negation is
+		// ADVISORY. So one HPS fill arriving later than the pump's per-sector
+		// time hands the initiator the ring slot's PREVIOUS occupant until the
+		// fill catches up mid-sector: stale head, fresh tail, GOOD status --
+		// byte for byte the 2026-08-26 hardware signature (DRA01E01.GRB,
+		// slot 1, ~378/~404 stale bytes, both runs).
+		//
+		// Here: a 40-sector READ seeds the ring, then a 2-block READ is pumped
+		// blind after ONE initial DRQ wait (the wait covers slot 0 -- which is
+		// exactly why the hardware corruption starts at slot 1, the first slot
+		// the initial handshake cannot protect). Fills 0 and 1 are forced to
+		// 3000 clocks; the pump crosses into slot 1 at ~2000.
+		// ==================================================================
+		begin : seam18
+			integer i5, bad5, stale5, first5, last5, sec5;
+			integer lba_l5, lba_s5, prev_sec5;
+			reg [7:0] got5, want5, stale_want5;
+			reg       drq5;
+			reg [31:0] hl5, hs5;
+			hps_data_mode = 1'b1;
+			hps_force_delay = 0; hps_force_n = 0;
+
+			lba_l5 = 2000;    // 10 blocks = 40 sectors: ring slot 1 last holds sector 33
+			lba_s5 = 70000;
+
+			// ---- seed the ring: long READ(10), pumped politely ----
+			select_target(8'h08);
+			hl5 = lba_l5;
+			send_cmd_byte(8'h28);            send_cmd_byte(8'h00);
+			send_cmd_byte(hl5[31:24]);       send_cmd_byte(hl5[23:16]);
+			send_cmd_byte(hl5[15:8]);        send_cmd_byte(hl5[7:0]);
+			send_cmd_byte(8'h00);            send_cmd_byte(8'h00);
+			send_cmd_byte(8'h0a);            send_cmd_byte(8'h00);
+			reg_write(`W_ICR, 8'h00);
+			pdma_arm;
+			for (i5 = 0; i5 < 10 * 2048; i5 = i5 + 1) begin
+				wait_drq(drq5);
+				if (!drq5) i5 = 10 * 2048;
+				else dma_read_byte(got5);
+			end
+			begin : fin_l5
+				integer g5;
+				g5 = 0;
+				while (dut.scsi_bsy && g5 < 60000) begin @(posedge clk); g5 = g5 + 1; end
+			end
+
+			// ---- short READ(6), pumped BLIND ----
+			// Fills 0 and 1 both take 12000 clocks. The single first-DRQ wait
+			// absorbs fill 0 (that is the initiator's per-transfer handshake);
+			// nothing absorbs fill 1, because a blind pump does not look again.
+			//
+			// SCALING: on hardware the Plus blind loop moves one byte per
+			// ~1.5 us (~50 clocks) and a laggard HPS fill costs ~1 ms
+			// (~30k clocks), far under the real 516 ms io-stall watchdog. This
+			// bench builds with IOWDOG_LOG=14 (~16k clocks) so a 30k fill would
+			// abort with CHECK CONDITION instead of corrupting. Keep the
+			// PROPORTIONS (fill ~1.5x the pump's per-sector time, both under
+			// the watchdog) by pacing the pump at 16 clocks/byte: a sector
+			// takes 8192 clocks and the pump crosses into slot 1 ~4k clocks
+			// before its fill lands.
+			hps_force_delay = 12000; hps_force_n = 2;
+			select_target(8'h08);
+			hs5 = lba_s5;
+			send_cmd_byte(8'h08);
+			send_cmd_byte({3'd0, hs5[20:16]});
+			send_cmd_byte(hs5[15:8]);
+			send_cmd_byte(hs5[7:0]);
+			send_cmd_byte(8'h02);
+			send_cmd_byte(8'h00);
+			reg_write(`W_ICR, 8'h00);
+			pdma_arm;
+			// ONE handshake, then blind. Re-invoked only because wait_drq's
+			// poll bound is shorter than the forced 30k-clock fill; this is
+			// still a single logical "wait for the first DRQ".
+			begin : first_drq
+				integer tr5;
+				drq5 = 0;
+				for (tr5 = 0; tr5 < 8 && !drq5; tr5 = tr5 + 1) wait_drq(drq5);
+			end
+			bad5 = 0; stale5 = 0; first5 = -1; last5 = -1;
+			prev_sec5 = (lba_l5 * 4) + 33;   // slot 1's previous occupant
+			if (drq5) begin
+				for (i5 = 0; i5 < 4096; i5 = i5 + 1) begin
+					repeat (12) @(posedge clk);   // + 4 in dma_read_byte = 16 clk/byte (see SCALING)
+					dma_read_byte(got5);
+					sec5  = (lba_s5 * 4) + (i5 / 512);
+					want5 = sec5[7:0] ^ (i5 % 512);
+					if (got5 !== want5) begin
+						if (first5 < 0) first5 = i5;
+						last5 = i5;
+						bad5 = bad5 + 1;
+						stale_want5 = prev_sec5[7:0] ^ (i5 % 512);
+						if (got5 === stale_want5) stale5 = stale5 + 1;
+						if (bad5 <= 12)
+							$display("            mism i=%0d got=%02x want=%02x (phase=%0d data_cnt=%0d rd_hps_blk=%0d)",
+							         i5, got5, want5,
+							         dut.target[CD_DEV].target.phase,
+							         dut.target[CD_DEV].target.data_cnt,
+							         dut.target[CD_DEV].target.rd_hps_blk);
+					end
+				end
+			end
+			if (bad5) begin
+				$display("          seam18 BLIND pump: %0d wrong bytes, offsets %0d..%0d (slot %0d..%0d)",
+				         bad5, first5, last5, (first5/512) % 32, (last5/512) % 32);
+				$display("          %0d of %0d wrong bytes are the ring slot's PREVIOUS occupant (stale head, fresh tail)",
+				         stale5, bad5);
+			end
+			// The pinned invariant, currently violated on hardware and here:
+			// a blind initiator must never be served an unfilled sector. This
+			// FAILS until the RTL can enforce its own frontier (hold-off or
+			// equivalent). It is the failing reproduction of the open
+			// CD->disk corruption defect (SCSI_UPGRADE_PLAN.md, 2026-08-26).
+			ok("seam18 - a blind pseudo-DMA pump cannot outrun the fetch frontier", drq5 && (bad5 == 0));
+			// Mechanism check: if corruption happened, it must be the previous
+			// occupant of the same ring slot -- the hardware signature. If this
+			// one FAILS while seam18 fails, the corruption came from somewhere
+			// else and the model is wrong again.
+			ok("seam18b - any stale data is the ring slot's previous occupant",
+			   (bad5 == 0) || (stale5 == bad5));
+			begin : fin_s5
+				integer g6;
+				g6 = 0;
+				while (dut.scsi_bsy && g6 < 60000) begin @(posedge clk); g6 = g6 + 1; end
+			end
+			hps_data_mode = 1'b0;
+			hps_force_delay = 0; hps_force_n = 0;
 		end
 
 		$display("");
