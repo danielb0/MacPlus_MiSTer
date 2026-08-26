@@ -100,6 +100,19 @@ module tb_ncr5380_seam;
 	// the fill would look identical to the interlock doing its job.
 	reg     saw_bus_hold = 0;
 	always @(posedge clk) if (dut.bus_hold) saw_bus_hold <= 1'b1;
+	// Direction-split, because "the hold-off engaged" is not specific enough.
+	// When seam20 was written, instrumented coverage over the whole bench read
+	// 307 read-side engagements and ZERO write-side: the iow half of bus_hold
+	// was a CPU-stall condition that had never once executed, in simulation or
+	// on hardware. seam20 exists to close exactly that.
+	reg     saw_hold_rd = 0, saw_hold_wr = 0, hold_dir_d = 0;
+	always @(posedge clk) begin
+		hold_dir_d <= dut.bus_hold;
+		if (dut.bus_hold && !hold_dir_d) begin
+			if (dut.ior) saw_hold_rd <= 1'b1;
+			if (dut.iow) saw_hold_wr <= 1'b1;
+		end
+	end
 	// Force the next hps_force_n data-mode fills to take hps_force_delay clocks
 	// instead of the randomised 1..400. seam18 uses this to make exactly one
 	// fill arrive later than a blind initiator's pump rate -- the condition the
@@ -116,11 +129,25 @@ module tb_ncr5380_seam;
 	// hps_io serving a CHOSEN slot -- which is the only way to reproduce one
 	// slot's session landing in another target's buffer.
 	reg     hps_manual = 1'b0;
+	// hps_disk_delay makes a disk fill/flush LAG by that many clocks instead of
+	// answering next cycle. hps_disk_enable=0 is the pathological "never
+	// answers" case (seam14); this is the far more common one -- an HPS that is
+	// merely SLOW -- and it is what seam20 needs, because the write-side
+	// hold-off only asserts while a flush is still in flight AND the CPU has
+	// come back round to the half being flushed. At delay 0 this is
+	// bit-identical to the original always-ack server.
+	integer hps_disk_delay = 0;
+	integer dsk_cnt = 0;
 	always @(posedge clk) begin : hps_disk
-		if (reset) io_ack[0] <= 1'b0;
-		else if (!hps_manual)
-		           io_ack[0] <= hps_disk_enable &
-		                        (io_rd[0] | io_wr[0]) & ~io_ack[0];
+		if (reset) begin io_ack[0] <= 1'b0; dsk_cnt <= 0; end
+		else if (!hps_manual) begin
+			if (io_ack[0]) begin
+				io_ack[0] <= 1'b0; dsk_cnt <= 0;
+			end else if (hps_disk_enable && (io_rd[0] | io_wr[0])) begin
+				if (dsk_cnt >= hps_disk_delay) begin io_ack[0] <= 1'b1; dsk_cnt <= 0; end
+				else dsk_cnt <= dsk_cnt + 1;
+			end else dsk_cnt <= 0;
+		end
 	end
 
 	always @(posedge clk) begin : hps
@@ -1637,6 +1664,111 @@ module tb_ncr5380_seam;
 			end
 			hps_data_mode = 1'b0;
 			hps_force_delay = 0; hps_force_n = 0;
+		end
+
+		// ==================================================================
+		// seam20: the WRITE-side hold-off -- the twin of seam18.
+		//
+		// seam18/seam19 cover reads. The write direction has its own hazard and
+		// its own clause in io_busy (scsi.v): a WRITE uses a two-slot double
+		// buffer, and while a flush is reading one half out, a blind pump that
+		// has come back round to that same half will drop a byte into a slot
+		// the HPS has not finished with. Same shape as the read defect --
+		// REQ withdrawal is advisory, nothing refuses the ACK -- and the same
+		// fix covers it, because bus_hold includes iow.
+		//
+		// It had NEVER been exercised. Instrumented coverage over the whole
+		// bench read 307 read-side hold-offs and 0 write-side, and the 197-file
+		// hardware disk->disk copy gave holds=0 too: the .vhd path simply never
+		// lags. So this was a CPU-stall condition that had never run anywhere.
+		//
+		// Arithmetic: a 3-block WRITE, pumped at dma_write_byte's 4 clk/byte, so
+		// 512 bytes = ~2048 clk. The flush is forced to 3000 clk. Block 0's
+		// flush (slot 0) therefore is still in flight when the pump, having
+		// filled slot 1, wraps back to slot 0 at data_cnt=1024 -- which is
+		// exactly the io_busy condition data_cnt[9] == sd_buff_sel. 3000 is well
+		// under this bench's IOWDOG_LOG(14) ~16k window, so the stall must be
+		// RELEASED by the flush completing, not by an abort.
+		// ==================================================================
+		begin : seam20
+			integer i7, g7;
+			reg [31:0] dcnt7;
+			reg [7:0] stat7, msg7;
+			hps_data_mode = 1'b0;
+
+			img_size = 32'd2048;
+			img_mounted[0] = 1'b1;
+			@(posedge clk); @(posedge clk);
+			img_mounted[0] = 1'b0;
+			repeat (50) @(posedge clk);
+
+			saw_hold_wr = 1'b0;
+			s11_abort = 0; s11_watch = 1;
+			hps_disk_delay = 3000;
+
+			select_target(8'h40);                 // disk at ID 6
+			send_cmd_byte(8'h0A);                 // WRITE(6)
+			send_cmd_byte(8'h00);
+			send_cmd_byte(8'h00);
+			send_cmd_byte(8'h00);
+			send_cmd_byte(8'h03);                 // 3 blocks = 1536 bytes
+			send_cmd_byte(8'h00);
+			reg_write(`W_ICR, 8'h00);
+			reg_write(`W_TCR, 8'h00);             // data OUT
+			reg_write(`W_MR,  8'h02);
+			reg_write(`W_DMAS, 8'h00);            // Start DMA Send
+			wait_raw_req;
+
+			// BLIND: no re-poll of DRQ between bytes. dma_write_byte models the
+			// 68000's DTACK wait states, so if the hold-off works the pump is
+			// stalled here rather than overwriting the flushing slot.
+			for (i7 = 0; i7 < 1536; i7 = i7 + 1)
+				dma_write_byte(((i7 / 512) * 8'h5a) ^ i7[7:0]);
+
+			// THE POINT OF THE TEST: the write-side clause actually fired.
+			// Without this, seam20 passing would say nothing at all -- a pump
+			// that never caught up with the flush looks identical to one the
+			// interlock protected.
+			ok("seam20 - premise: the WRITE-side hold-off ENGAGED", saw_hold_wr);
+
+			// Sample data_cnt HERE, not after the handshake: it is cleared the
+			// moment the phase leaves DATA/STATUS/MESSAGE (scsi.v), so reading
+			// it once the bus is released only ever reports 0.
+			// Settle first: the last byte's ACK has to fall and reach stb_adv
+			// before data_cnt reflects it. Sampling immediately reads 1535.
+			repeat (8) @(posedge clk);
+			dcnt7 = dut.target[0].target.data_cnt;
+
+			// And it RELEASED. A hold-off that engages but cannot be satisfied
+			// is a hang; the flush completing is what must clear it, not the
+			// io-stall watchdog (3000 clk is far under the ~16k window here).
+			reg_write(`W_MR, 8'h00);
+			g7 = 0;
+			while (!dut.scsi_req && dut.scsi_bsy && g7 < 200000) begin
+				@(posedge clk); g7 = g7 + 1;
+			end
+			stat7 = 8'hff; msg7 = 8'hff;
+			if (dut.scsi_req && dut.scsi_bsy) recv_byte(stat7);
+			g7 = 0;
+			while (!dut.scsi_req && dut.scsi_bsy && g7 < 200000) begin
+				@(posedge clk); g7 = g7 + 1;
+			end
+			if (dut.scsi_req && dut.scsi_bsy) recv_byte(msg7);
+			s11_watch = 0;
+
+			ok("seam20b - every byte was accepted, none dropped or refused",
+			   dcnt7 == 32'd1536);
+			ok("seam20c - the stalled WRITE still completes with GOOD status",
+			   stat7 == 8'h00);
+			ok("seam20d - released by the flush, NOT by a watchdog abort",
+			   !s11_abort);
+			begin : rel20
+				integer g8;
+				g8 = 0;
+				while (dut.scsi_bsy && g8 < 200000) begin @(posedge clk); g8 = g8 + 1; end
+			end
+			ok("seam20e - bus released", !dut.scsi_bsy);
+			hps_disk_delay = 0;
 		end
 
 		$display("");
