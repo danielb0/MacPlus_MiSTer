@@ -336,7 +336,10 @@ module tb_ncr5380_seam;
 		reg [7:0] eb, ob;
 		if (hps_data_mode && io_rd[CD_DEV] && !io_ack[CD_DEV]) begin
 			hps_seed = (hps_seed * 32'd1103515) + 32'd12345;
-			dly = 3 + ((hps_seed >> 9) % 70);      // 3..72 clocks
+			// 1..400 clocks. The window that corrupts is the one where the
+			// fill completes just as the host arrives, so the range has to
+			// straddle the host's own byte rate rather than sit under it.
+			dly = 1 + ((hps_seed >> 7) % 400);
 			repeat (dly) @(posedge clk);
 			io_ack[CD_DEV] <= 1'b1;
 			@(posedge clk);
@@ -1192,9 +1195,11 @@ module tb_ncr5380_seam;
 		// "just-in-time fill" MacLC's note blames.
 		// ==================================================================
 		begin : seam17
-			integer i4, bad4, sec4, first4;
+			integer it, i4, bad4, sec4, first4, badtot, firstit;
+			integer lba_l, lba_s, nblk_l;
 			reg [7:0] got4, want4;
 			reg       drq4;
+			reg [31:0] hl, hs;
 			// seam15 leaves target 0 parked in CMD phase holding BSY, so the
 			// CD cannot win selection until the bus is cleared.
 			reset = 1'b1; repeat (8) @(posedge clk);
@@ -1203,75 +1208,104 @@ module tb_ncr5380_seam;
 			hps_enable    = 1'b1;
 			hps_disk_enable = 1'b1;
 			mount_cd(32'd400000);
-			// the engine's TOC acquisition takes longer with randomised HPS
-			// latency than mount_cd's fixed wait allows; without this the READ
-			// is refused with cd_no_media and the test measures nothing.
+			// the engine's TOC acquisition outlasts mount_cd's fixed wait once
+			// latency is randomised; without this the READs are refused with
+			// cd_no_media and the test measures nothing.
 			begin : tocw
 				integer gt;
 				gt = 0;
-				while (!dut.target[CD_DEV].target.ca_toc_ready && gt < 60000) begin
+				while (!dut.target[CD_DEV].target.ca_toc_ready && gt < 200000) begin
 					@(posedge clk); gt = gt + 1;
 				end
 			end
 
-			// READ(10) lba 1000, 12 blocks = 48 HPS sectors: wraps the 32-slot ring
-			select_target(8'h08);
-			send_cmd_byte(8'h28); send_cmd_byte(8'h00);
-			send_cmd_byte(8'h00); send_cmd_byte(8'h00);
-			send_cmd_byte(8'h03); send_cmd_byte(8'he8);
-			send_cmd_byte(8'h00); send_cmd_byte(8'h00);
-			send_cmd_byte(8'h0c); send_cmd_byte(8'h00);
-			reg_write(`W_ICR, 8'h00);
-			pdma_arm;
-			bad4 = 0; first4 = -1;
-			for (i4 = 0; i4 < 24576; i4 = i4 + 1) begin
-				wait_drq(drq4);
-				if (!drq4) i4 = 24576;
-				else begin
-					dma_read_byte(got4);
-					sec4  = 4000 + (i4 / 512);
-					want4 = sec4[7:0] ^ (i4 % 512);
-					if (got4 !== want4) begin
-						if (first4 < 0) first4 = i4;
-						bad4 = bad4 + 1;
+			badtot = 0; firstit = -1;
+			// SWEEP. The hardware failure was 1 file in 55, so a single pair of
+			// reads is unlikely to land in the window. Each iteration moves the
+			// LBAs, the long transfer's length (always > 32 sectors so the ring
+			// still wraps) and, through the server's PRNG, every fill latency.
+			for (it = 0; it < 14 && firstit < 0; it = it + 1) begin
+				nblk_l = 9 + (it % 4);                  // 9..12 blocks = 36..48 sectors
+				lba_l  = 1000 + it * 131;
+				lba_s  = 60000 + it * 97;
+
+				// ---- long READ(10), wraps the ring ----
+				select_target(8'h08);
+				hl = lba_l;
+				send_cmd_byte(8'h28);            send_cmd_byte(8'h00);
+				send_cmd_byte(hl[31:24]);        send_cmd_byte(hl[23:16]);
+				send_cmd_byte(hl[15:8]);         send_cmd_byte(hl[7:0]);
+				send_cmd_byte(8'h00);            send_cmd_byte(8'h00);
+				send_cmd_byte(nblk_l[7:0]);      send_cmd_byte(8'h00);
+				reg_write(`W_ICR, 8'h00);
+				pdma_arm;
+				bad4 = 0; first4 = -1;
+				for (i4 = 0; i4 < nblk_l * 2048; i4 = i4 + 1) begin
+					wait_drq(drq4);
+					if (!drq4) i4 = nblk_l * 2048;
+					else begin
+						dma_read_byte(got4);
+						sec4  = (lba_l * 4) + (i4 / 512);
+						want4 = sec4[7:0] ^ (i4 % 512);
+						if (got4 !== want4) begin
+							if (first4 < 0) first4 = i4;
+							bad4 = bad4 + 1;
+						end
 					end
 				end
-			end
-			ok("seam17 - the ring-wrapping READ is byte-exact", bad4 == 0);
-			if (bad4) $display("          %0d wrong bytes, first at %0d (slot %0d)",
-			                   bad4, first4, (first4/512) % 32);
-			begin : fin17
-				integer g4;
-				g4 = 0;
-				while (dut.scsi_bsy && g4 < 40000) begin @(posedge clk); g4 = g4 + 1; end
+				if (bad4 && firstit < 0) begin
+					firstit = it; badtot = bad4;
+					$display("          it %0d LONG read: %0d wrong, first at %0d (slot %0d)",
+					         it, bad4, first4, (first4/512) % 32);
+				end
+				begin : fin_l
+					integer g4;
+					g4 = 0;
+					while (dut.scsi_bsy && g4 < 60000) begin @(posedge clk); g4 = g4 + 1; end
+				end
+
+				// ---- short READ(6) straight after: the ring still holds the
+				//      long transfer's occupants in slots 0..31 ----
+				select_target(8'h08);
+				hs = lba_s;
+				send_cmd_byte(8'h08);
+				send_cmd_byte({3'd0, hs[20:16]});
+				send_cmd_byte(hs[15:8]);
+				send_cmd_byte(hs[7:0]);
+				send_cmd_byte(8'h02);
+				send_cmd_byte(8'h00);
+				reg_write(`W_ICR, 8'h00);
+				pdma_arm;
+				bad4 = 0; first4 = -1;
+				for (i4 = 0; i4 < 4096; i4 = i4 + 1) begin
+					wait_drq(drq4);
+					if (!drq4) i4 = 4096;
+					else begin
+						dma_read_byte(got4);
+						sec4  = (lba_s * 4) + (i4 / 512);
+						want4 = sec4[7:0] ^ (i4 % 512);
+						if (got4 !== want4) begin
+							if (first4 < 0) first4 = i4;
+							bad4 = bad4 + 1;
+						end
+					end
+				end
+				if (bad4 && firstit < 0) begin
+					firstit = it; badtot = bad4;
+					$display("          it %0d SHORT read: %0d wrong, first at %0d (slot %0d) -- STALE RING",
+					         it, bad4, first4, (first4/512) % 32);
+				end
+				begin : fin_s
+					integer g5;
+					g5 = 0;
+					while (dut.scsi_bsy && g5 < 60000) begin @(posedge clk); g5 = g5 + 1; end
+				end
 			end
 
-			// ...and the SHORT read straight after: slot 1 still holds sector
-			// 33 of the transfer above.
-			select_target(8'h08);
-			send_cmd_byte(8'h08); send_cmd_byte(8'h00);
-			send_cmd_byte(8'h07); send_cmd_byte(8'hd0);
-			send_cmd_byte(8'h02); send_cmd_byte(8'h00);
-			reg_write(`W_ICR, 8'h00);
-			pdma_arm;
-			bad4 = 0; first4 = -1;
-			for (i4 = 0; i4 < 4096; i4 = i4 + 1) begin
-				wait_drq(drq4);
-				if (!drq4) i4 = 4096;
-				else begin
-					dma_read_byte(got4);
-					sec4  = 8000 + (i4 / 512);
-					want4 = sec4[7:0] ^ (i4 % 512);
-					if (got4 !== want4) begin
-						if (first4 < 0) first4 = i4;
-						bad4 = bad4 + 1;
-					end
-				end
-			end
-			ok("seam17 - the READ after it does not inherit the ring", bad4 == 0);
-			if (bad4) $display("          %0d wrong bytes, first at %0d (slot %0d) -- STALE RING",
-			                   bad4, first4, (first4/512) % 32);
-			$display("          (%0d HPS fills served with randomised latency)", hps_fills);
+			ok("seam17 - READ data survives a ring wrap, swept over LBAs and latencies",
+			   firstit < 0);
+			$display("          (%0d HPS fills at randomised latency, %0d iterations)",
+			         hps_fills, it);
 			hps_data_mode = 1'b0;
 		end
 
@@ -1282,8 +1316,12 @@ module tb_ncr5380_seam;
 		$finish;
 	end
 
+	// Raised from 20 ms for seam17's sweep: byte-at-a-time pseudo-DMA over
+	// ~25 KB per iteration costs roughly 3 ms of sim time, and the sweep needs
+	// enough iterations to have a chance at a rare window. Still a real
+	// backstop -- a genuine wedge trips it long before this.
 	initial begin
-		#20_000_000;
+		#160_000_000;
 		$display("FAIL: bench timeout -- initiator stuck (this is the wedge)");
 		$display("NCR5380 SEAM GATE: FAIL");
 		$finish;

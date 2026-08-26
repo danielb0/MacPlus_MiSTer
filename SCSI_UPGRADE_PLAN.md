@@ -1211,6 +1211,33 @@ Two bench gaps were closed getting here, both worth keeping regardless of this
 defect: `buf_in` at 8 KB meant `tb_scsi_cdrom` could never exercise more than 16
 of the 32 ring slots, and the seam bench could not check READ DATA at all.
 
+##### Third attempt: swept, 694 fills, also negative
+
+`seam17` extended to a sweep -- 14 iterations moving the LBAs, the long
+transfer's length (36-48 sectors, always wrapping the 32-slot ring) and every
+fill latency, with the range widened to 1-400 clocks so it STRADDLES the host's
+byte rate instead of sitting under it. **694 HPS fills, all byte-exact.**
+
+Three constructed reproductions, three negatives, at increasing fidelity. The
+reasonable conclusion is that the MODEL is wrong, not that the window is rare.
+
+**Stop constructing conditions; bisect the real one.** The hardware failure is
+deterministic -- same file, same offset, same source block, two runs, different
+file sets. So it can be narrowed directly on hardware, which is far cheaper than
+guessing:
+
+1. Copy ONLY `DRA01A.MTB` then `DRA01E01.GRB`. If that corrupts, the
+   reproduction is two files instead of 59.
+2. Copy ONLY `DRA01E01.GRB`. If it corrupts alone, the previous-file theory --
+   which the ring-slot arithmetic supports and which all three benches were
+   built around -- is wrong, and that is worth knowing before any more
+   simulation.
+
+Whatever the minimal hardware case turns out to be is the thing to model. Note
+the bench timeout had to go 20 ms -> 160 ms for the sweep; the first run's
+`FAIL: bench timeout -- initiator stuck` was the harness running out of clock,
+not a wedge.
+
 ##### Method note, worth more than the bug
 
 Four mechanisms were proposed for this symptom during one session and all four
