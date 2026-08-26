@@ -822,6 +822,40 @@ module tb_scsi_cdrom;
       report(ok, "cd19 - READ SUB-CHANNEL (0xC2 and 0x42) report track 1, stopped");
 
       // ==================================================================
+      // Test 19b: the sub-channel must report what the drive is ACTUALLY
+      // doing. THIS IS THE REGRESSION TEST FOR THE 2026-08-26 HARDWARE
+      // DEFECT, and cd19 above could never have caught it: cd19 asserts
+      // "stopped", which was precisely the stale constant being served.
+      //
+      // On hardware the player issued PLAY, polled 0x42, was told
+      // 0x13 "play operation completed", concluded the track had finished,
+      // stepped to the next one and wrapped -- track counter 1 -> 2 -> 1
+      // forever. A stale "stopped" does not degrade playback, it prevents
+      // it, so the discriminating assertion is that the status CHANGES.
+      // ==================================================================
+      select_target;
+      // PLAY AUDIO TRACK/INDEX (0x48): start track 1 index 1, end track 1.
+      send_cdb(8'h48,8'h00,8'h00,8'h00,8'h01,8'h01,8'h00,8'h01,8'h00,8'h00,0,0, 10);
+      finish_command;
+      begin : t19b
+         reg [7:0] play_status;
+         reg       accepted;
+         accepted = (!timed_out) && (status_byte == 8'h00);
+         repeat (200) @(posedge clk);
+         select_target;
+         send_cdb(8'h42,8'h02,8'h40,8'h01,8'h00,8'h00,8'h00,8'h00,8'd16,8'h00,0,0, 10);
+         read_data_phase(32);
+         finish_command;
+         play_status = buf_in[1];
+         ok = accepted && (!timed_out) && (buf_len == 16)
+              && (play_status !== 8'h13);          // anything but "completed"
+         if (!ok) $display("       (accepted=%b len=%0d status=%02x -- 13 means the",
+                           accepted, buf_len, play_status);
+         if (!ok) $display("        stale constant is back; the player will loop 1->2->1)");
+      end
+      report(ok, "cd19b - the sub-channel reports PLAYING once a PLAY is accepted");
+
+      // ==================================================================
       // Test 20: READ HEADER LBA form serves mode 1 + the echoed address;
       // the MSF form is cleanly rejected rather than answered with a wrong
       // address, since this path has no LBA->MSF divide of its own.

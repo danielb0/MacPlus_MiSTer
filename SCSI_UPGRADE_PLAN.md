@@ -925,6 +925,98 @@ being the definition of CD-DA. MacLC's starvation bug (their HW capture
 2026-07-18) showed as ~42/s, so a delta of ~85 per 2 s sample rather than ~150
 would mean our permissive `ca_grant` did not survive the port after all.
 
+#### 3B+ — Live sub-channel and audio status (DONE 2026-08-26)
+
+**Reprioritised from "polish, after 3D" to "prerequisite for any playback at
+all", by a hardware capture.** The original entry called this a display nicety:
+the sub-channel served Phase 2 constants, so a player's position readout would
+sit still while audio played. That was wrong, and the way it was wrong is worth
+keeping.
+
+On build `6E138B82` with Audio CD Access installed, pressing Play made the
+player's track counter go **1 → 2 → back to 1**, with the engine visibly
+starting a fetch each time and being cut short. `PIOS` showed `win=audio` and an
+LBA advancing about 4 per 2 s — roughly 2 frames/second against the 75 that CD-DA
+requires — which looked exactly like the frame starvation MacLC hit in July, and
+was diagnosed as such at first.
+
+It was not starvation. `PODR` showed a repeated 16-byte data-in command and
+`PDMA` confirmed a real DATA-IN phase of exactly 16 bytes: **0x42 READ
+SUB-CHANNEL, format 1**, the player polling its own display. The answer we
+returned, every time, was the constant:
+
+```
+audio status 0x13  =  "play operation completed"
+```
+
+So the player issued PLAY, asked what the drive was doing, was told the play had
+already finished, stepped to the next track, and wrapped. The slow LBA creep was
+the engine dutifully starting playback on each new PLAY before being cut short.
+
+**A stale "stopped" does not degrade playback, it prevents it.** The mistake in
+scheduling this after 3C/3D came from assuming these bytes only drive a display;
+they are a control signal, and a driver acts on them.
+
+##### What changed
+
+Three serve functions in `scsi.v` repointed from constants to the engine's live
+registers, which were already wired out of `cd_audio` and read by nothing:
+
+| Command | Dialect | Reports |
+|---|---|---|
+| 0x42 READ SUB-CHANNEL fmt 1 | standard | **mapped** status (0x11/0x12/0x13), **binary** M/S/F, abs + rel |
+| 0xC2 READ Q SUBCODE | Apple | **BCD** M/S/F, BCD track |
+| 0xCC AUDIO STATUS | Apple | the engine's **raw** `ast_code`, BCD M/S/F |
+
+Layouts follow MacLC `scsi.v:853-923`, which is known to work against this
+driver. Two asymmetries there are deliberate and easy to "tidy" into bugs:
+
+1. **The standard plane maps the status code; the Apple planes do not.** The
+   engine's `ast_code` is a raw drive code (0/1/3/5); only 0x42 needs the
+   0x11/0x12/0x13 translation. `CD_AST_STOPPED` is still the right answer when
+   the engine is idle — what was wrong before was reporting it ALWAYS.
+2. **0xC2 byte 0 stays `0x00`**, not the current control nibble, despite the
+   field nominally being ADR/control. That is MacLC's shipped behaviour, so it
+   is inherited rather than corrected.
+
+Every value is passed into the serve functions as an ARGUMENT, per the rule at
+the `cd_mode_sense_byte` note — none read from a function body. The new
+`cd_bin2bcd` builds its nibbles from explicit 4-bit regs so the 12-bit-concat
+truncation fixed in `cd_audio` cannot recur here.
+
+##### The compiler had been pointing at this the whole time
+
+A&E "never read" warnings fell 73 → 55, and the nine that disappeared are
+exactly `ca_ast_code`, `ca_cur_ctrl`, `ca_cur_trk`, `ca_abs_m/s/f`,
+`ca_rel_m/s/f` — the engine's live position, computed every frame and thrown
+away. **The warning list named the defect before the hardware did**, and it was
+read past twice: once when the engine was instantiated, and again on 2026-08-26
+while auditing that very list for the `io_rd` fix.
+
+##### Test
+
+`cd19b` in `tb_scsi_cdrom`: issue PLAY AUDIO TRACK/INDEX (0x48), then poll 0x42
+and require the status to be **anything other than 0x13**. Verified to FAIL
+against the pre-fix RTL and pass after — the direction that matters.
+
+The pre-existing `cd19` could never have caught this: it asserts "track 1,
+stopped", which is the stale constant itself. **A test written from the
+implementation agrees with the implementation.** cd19 is kept, since idle really
+should report stopped, but it is not the coverage that counts here.
+
+##### Still not proven
+
+Frame streaming at rate. The bench's synthesized TOC has one track and no MCDA
+blob, so `cd19b` proves the status transitions, not that frames arrive at 75/s.
+Measuring the rate offline needs the bench HPS model to serve a real multi-track
+MCDA blob — worth building before 3C, since it would answer the `ca_grant`
+starvation question without hardware and give 3C/3D a playing engine to test
+against.
+
+On hardware the check is `PIOS lba` advancing ~150 per 2 s sample, and the
+honest guest-side proxy is the player's elapsed time counting up in real time —
+there is still no audio output until 3D.
+
 #### 3C — In-core DC blocker with a mount envelope
 
 **Decided 2026-08-25.** Four decisions, in the order they were made:

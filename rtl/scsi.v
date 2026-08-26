@@ -277,9 +277,9 @@ wire [7:0] cmd_dout =
 		cmd_cd_toc?cd_toc_dout:
 		(cmd_cd_t43f2 || cmd_cd_t43f1)?cd_toc2_dout:
 		cmd_cd_toc43?cd_toc43_dout:
-		cmd_cd_subq?cd_subq_byte(data_cnt):
-		cmd_cd_subq43?cd_subq43_byte(data_cnt):
-		cmd_cd_astat?cd_astat_byte(data_cnt, cd_astat_vol_r):
+		cmd_cd_subq?cd_subq_dout:
+		cmd_cd_subq43?cd_subq43_dout:
+		cmd_cd_astat?cd_astat_dout:
 		cmd_cd_hdr?cd_hdr_byte(data_cnt, cd_hdr_addr_r):
 		8'h00;
 
@@ -527,52 +527,115 @@ reg [31:0] cd_alloc10_r   = 32'd0;   // raw 10-byte-CDB allocation, CDB[7:8]
 reg [31:0] cd_hdr_addr_r  = 32'd0;   // READ HEADER address echo, CDB[2:5]
 
 // ---- sub-channel ---------------------------------------------------------
-// STILL Phase 2 CONSTANTS. The engine now tracks a real position (ca_ast_code,
-// ca_cur_trk, ca_abs_*, ca_rel_* are wired out of it and go nowhere), but these
-// three responses have not been repointed at it yet -- that is step 3B+. Until
-// then the drive always reports "stopped at the start of track 1", audio status
-// 0x13, so a player's position display will not move even while audio plays.
+// LIVE from the engine since 3B+ (2026-08-26). These were Phase 2 constants,
+// and that was NOT the cosmetic limitation it was recorded as.
+//
+// HARDWARE 2026-08-26, build 6E138B82: pressing Play made the track counter go
+// 1 -> 2 -> back to 1, with the engine visibly starting a fetch each time and
+// being cut short. The probe capture named the cause -- PODR showed a repeated
+// 16-byte data-in command (0x42 READ SUB-CHANNEL format 1, the player polling
+// its display) and we answered, every single time:
+//
+//     audio status 0x13  =  "play operation completed"
+//
+// So the player issued PLAY, asked what was happening, was told the play had
+// finished, stepped to the next track, and wrapped. **Reporting a stale
+// "stopped" does not degrade playback, it PREVENTS it.** 3B+ is a prerequisite
+// for audio working at all, not a polish step; it was scheduled after 3C/3D on
+// the strength of a wrong guess about what these bytes are for.
+//
+// Layouts follow MacLC scsi.v:853-923, which is known to work with this driver.
+// Two asymmetries in it are deliberate and easy to "tidy" into bugs:
+//
+//   * the STANDARD 0x42 plane reports mapped status (0x11 play / 0x12 paused /
+//     0x13 completed) and BINARY M/S/F; the APPLE 0xC2 and 0xCC planes report
+//     the engine's RAW ast_code and BCD M/S/F. Same facts, two dialects.
+//   * 0xC2 byte 0 is 0x00, not the current control nibble, even though the
+//     field is nominally ADR/control. That is MacLC's shipped behaviour against
+//     the real AppleCD driver, so it is inherited rather than corrected.
 localparam [7:0] CD_AST_STOPPED = 8'h13;
+
+// Vendor-dialect BCD for the Apple planes. NOT cd_audio's bin2bcd, which had
+// the 12-bit-concat truncation bug fixed in 6e138b8 -- this one builds the
+// nibbles explicitly so the same mistake cannot recur.
+function [7:0] cd_bin2bcd;             // 0..99
+	input [7:0] v;
+	reg [3:0] tens;
+	reg [3:0] units;
+	begin
+		tens  = (v >= 8'd90) ? 4'd9 : (v >= 8'd80) ? 4'd8 :
+		        (v >= 8'd70) ? 4'd7 : (v >= 8'd60) ? 4'd6 :
+		        (v >= 8'd50) ? 4'd5 : (v >= 8'd40) ? 4'd4 :
+		        (v >= 8'd30) ? 4'd3 : (v >= 8'd20) ? 4'd2 :
+		        (v >= 8'd10) ? 4'd1 : 4'd0;
+		units = v - ({4'd0, tens} * 8'd10);
+		cd_bin2bcd = {tens, units};
+	end
+endfunction
 
 // Apple READ Q SUBCODE (0xC2), 9 bytes:
 // {control, track BCD, index, rel M/S/F, abs M/S/F}
 function [7:0] cd_subq_byte;
 	input [31:0] cnt;
+	input [7:0]  trk;
+	input [7:0]  rm, rs, rf;
+	input [7:0]  am, as_, af;
 	begin
-		cd_subq_byte = (cnt == 32'd1) ? 8'h01 :   // track 1
-		               (cnt == 32'd2) ? 8'h01 :   // index 1
-		               8'h00;
+		cd_subq_byte = (cnt == 32'd1) ? cd_bin2bcd(trk) :
+		               (cnt == 32'd2) ? 8'h01 :          // index 1
+		               (cnt == 32'd3) ? cd_bin2bcd(rm) :
+		               (cnt == 32'd4) ? cd_bin2bcd(rs) :
+		               (cnt == 32'd5) ? cd_bin2bcd(rf) :
+		               (cnt == 32'd6) ? cd_bin2bcd(am) :
+		               (cnt == 32'd7) ? cd_bin2bcd(as_) :
+		               (cnt == 32'd8) ? cd_bin2bcd(af) : 8'h00;
 	end
 endfunction
 
-// standard READ SUB-CHANNEL (0x42), format 1 (current position), 16 bytes
+// standard READ SUB-CHANNEL (0x42), format 1 (current position), 16 bytes.
+// BINARY M/S/F here, unlike the Apple planes above -- see the dialect note.
 function [7:0] cd_subq43_byte;
 	input [31:0] cnt;
+	input [7:0]  ast;                 // already mapped to 0x11/0x12/0x13
+	input [7:0]  ctrl, trk;
+	input [7:0]  am, as_, af;
+	input [7:0]  rm, rs, rf;
 	begin
 		cd_subq43_byte =
-			(cnt == 32'd1 )?CD_AST_STOPPED:
+			(cnt == 32'd1 )?ast:
 			(cnt == 32'd3 )?8'd12:    // data length
 			(cnt == 32'd4 )?8'h01:    // format code: current position
-			(cnt == 32'd5 )?8'h14:    // ADR/control
-			(cnt == 32'd6 )?8'h01:    // track
+			(cnt == 32'd5 )?ctrl:     // ADR/control
+			(cnt == 32'd6 )?trk:      // track
 			(cnt == 32'd7 )?8'h01:    // index
-			(cnt == 32'd10)?8'd2:     // absolute MSF 00:02:00
-			8'h00;                    // relative MSF 00:00:00
+			(cnt == 32'd9 )?am:       // absolute MSF
+			(cnt == 32'd10)?as_:
+			(cnt == 32'd11)?af:
+			(cnt == 32'd13)?rm:       // relative MSF
+			(cnt == 32'd14)?rs:
+			(cnt == 32'd15)?rf:
+			8'h00;
 	end
 endfunction
 
 // Apple AUDIO STATUS (0xCC), 6 bytes. CDB[3]==1 asks for the channel volumes
 // instead of the position; report both channels at full.
+// RAW ast_code here, not the mapped standard one -- this is the Apple dialect.
 function [7:0] cd_astat_byte;
 	input [31:0] cnt;
 	input        vol_form;
+	input [7:0]  ast_raw;
+	input [7:0]  ctrl;
+	input [7:0]  am, as_, af;
 	begin
 		if (vol_form)
 			cd_astat_byte = ((cnt == 32'd4) || (cnt == 32'd5)) ? 8'hff : 8'h00;
 		else
-			cd_astat_byte = (cnt == 32'd0) ? CD_AST_STOPPED :
-			                (cnt == 32'd2) ? 8'h14 :
-			                (cnt == 32'd4) ? 8'd2 : 8'h00;   // abs MSF 00:02:00
+			cd_astat_byte = (cnt == 32'd0) ? ast_raw :
+			                (cnt == 32'd2) ? ctrl :
+			                (cnt == 32'd3) ? cd_bin2bcd(am) :
+			                (cnt == 32'd4) ? cd_bin2bcd(as_) :
+			                (cnt == 32'd5) ? cd_bin2bcd(af) : 8'h00;
 	end
 endfunction
 
@@ -1399,6 +1462,29 @@ endfunction
 wire  [7:0] cd_toc2_dout = !ca_toc_ready ? 8'h00 :
                            cmd_cd_t43f1 ? sess_fix(data_cnt, ca_t2_q0)
                                         : t2_fix(data_cnt, ca_t2_len, ca_t2_q0);
+
+// ---- live sub-channel / audio status serving ----------------------------
+// The engine's position registers only become readable here, where they are in
+// scope; the serve functions live up with the other CD responses and take every
+// value as an ARGUMENT, per the rule at the cd_mode_sense_byte note.
+//
+// Standard audio-status codes ([PIONEER] 2-27C via Snow): the engine's ast_code
+// is a raw drive code (0/1/3/5) and the 0x42 plane needs 0x11 play / 0x12
+// paused / 0x13 completed. CD_AST_STOPPED remains the correct answer when the
+// engine is not playing -- what was wrong before was reporting it ALWAYS.
+wire  [7:0] ca_ast_std  = (ca_ast_code == 8'd0) ? 8'h11 :
+                          (ca_ast_code == 8'd1) ? 8'h12 : CD_AST_STOPPED;
+
+wire  [7:0] cd_subq_dout   = cd_subq_byte(data_cnt, ca_cur_trk,
+                                          ca_rel_m, ca_rel_s, ca_rel_f,
+                                          ca_abs_m, ca_abs_s, ca_abs_f);
+wire  [7:0] cd_subq43_dout = cd_subq43_byte(data_cnt, ca_ast_std,
+                                            ca_cur_ctrl, ca_cur_trk,
+                                            ca_abs_m, ca_abs_s, ca_abs_f,
+                                            ca_rel_m, ca_rel_s, ca_rel_f);
+wire  [7:0] cd_astat_dout  = cd_astat_byte(data_cnt, cd_astat_vol_r,
+                                           ca_ast_code, ca_cur_ctrl,
+                                           ca_abs_m, ca_abs_s, ca_abs_f);
 
 // A data READ aimed at an audio track must CHECK, not be served as garbage.
 // Without this an audio-only disc mounts with a non-zero capacity and returns
