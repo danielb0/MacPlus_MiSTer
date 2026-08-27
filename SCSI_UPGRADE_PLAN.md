@@ -1689,6 +1689,36 @@ Step 10 is directly checkable: with the CD-ROM Drive OSD item set to Disabled,
 the bus is already bit-identical to a pre-CD build (§5.5), and with the §3C
 mount gate the audio path should be too.
 
+#### The hold-off is validated on BOTH CPU cores (2026-08-27)
+
+Selecting 68010 or 68020 swaps the CPU core from fx68k to TG68K
+(`is68000 ? fx68_* : tg68_*`), whose bus state machine is structurally
+different. Our DTACK interlock had only ever run against fx68k.
+
+| CPU / clock | `holds` | `longest` | `breaches` |
+|---|---|---|---|
+| fx68k @ 8 MHz | 1 | 1.10 ms | 0 |
+| fx68k @ 16 MHz | 3 | 1.78 ms | 0 |
+| **TG68K (68020) @ 8 MHz** | **1** | **0.92 ms** | **0** |
+
+TG68K tracks fx68k at the same clock-enable rate. Counters balanced throughout
+(`disk0 rd=240 + wr=198 = 438`, `ack=182` = 438-256, one wrap of the 8-bit
+counter), no watchdog fires, and this run included deletes — HFS catalog and
+bitmap updates, i.e. small scattered writes rather than a bulk sequential
+stream — plus CD audio playback and a 40-file CD->disk copy.
+
+**68010 is covered by construction, not by inference from behaviour.** The
+wait-state logic (`rtl/tg68k/tg68k.v:103`) does not reference the `cpu`
+parameter — `s_state` parks at 4 until `dtack_n` asserts, identically for both
+models. Testing 68020 tested the same lines 68010 would use.
+
+So the SCSI interlock holds across every CPU/speed combination the OSD offers.
+Whether the 68020 MODE should ship is a separate question, and not a
+correctness one: it boots, it runs, it does SCSI I/O. The case against it is
+that no 8 MHz 68020 ever existed and no Plus ever had one, that TG68K's own
+comment calls it partial, and that selecting it silently swaps in a
+non-cycle-accurate CPU.
+
 #### 16 MHz turbo VALIDATED for the SCSI path (2026-08-27)
 
 Tested with Speed=16MHz and CPU left on **68000**, so `is68000` keeps fx68k
