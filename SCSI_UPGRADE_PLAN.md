@@ -1689,6 +1689,52 @@ Step 10 is directly checkable: with the CD-ROM Drive OSD item set to Disabled,
 the bus is already bit-identical to a pre-CD build (§5.5), and with the §3C
 mount gate the audio path should be too.
 
+#### 16 MHz turbo VALIDATED for the SCSI path (2026-08-27)
+
+Tested with Speed=16MHz and CPU left on **68000**, so `is68000` keeps fx68k
+selected and turbo is the only variable — selecting 68010/68020 would swap the
+CPU core to TG68K at the same time and confound the result.
+
+CD->disk copy in turbo:
+
+| | 8 MHz | 16 MHz |
+|---|---|---|
+| `PHLD holds` | 1 | **3** |
+| holds per file | 0.015 | **0.064** |
+| `longest` | 35,867 clk (1.10 ms) | **57,791 clk (1.78 ms)** |
+| `breaches` | 0 | **0** |
+
+Also clean in turbo: CD audio, Lode Runner, a 197-file disk->disk copy, no
+watchdog fires, and 40/40 CD files byte-exact in the destination volume.
+
+**`longest` rising at higher clock is CORRECT, not a regression.** The stall
+runs from when the CPU reaches the frontier until the fill lands; a faster pump
+arrives earlier in a fixed-duration fetch and therefore waits longer. The
+prediction going in was "roughly unchanged" and it was wrong for exactly this
+reason.
+
+The holds RATE is the more telling number — 4x for 2x the clock. 8 MHz was
+running much closer to the frontier than a single `holds=1` suggests, which
+quantifies how little margin the old advisory-REQ design actually had.
+
+**Method note, twice bitten.** Verifying copied files by searching the .vhd for
+their content has two traps, both hit on 2026-08-27:
+
+* **Low-entropy anchors alias.** Matching on a file's first 512 bytes found five
+  phantom "corrupt" files in a volume that did not contain them at all — the
+  anchors were runs of zeros/common headers matching boot blocks. Require a
+  window with >=64 distinct byte values. `DRA01E01.GRB` itself has only 13 and
+  must be checked by explicit LBA instead.
+* **Deleted copies persist.** HFS does not zero data blocks, so free space holds
+  ghosts of earlier copies. This cuts BOTH ways: it means a scan cannot
+  attribute a copy to a particular run, but it also biases the scan toward
+  FINDING corruption, since the search returns the first occurrence and the
+  pre-fix ghost sits at a lower offset than the live copy.
+
+Which is why `PHLD` is the primary evidence and the file scan is corroboration:
+the counters are zeroed at core load, so `breaches=0` covers the session
+unambiguously.
+
 #### 3C/3D HARDWARE-CONFIRMED (2026-08-27, `MacPlus_09a277b3_cdmix.rbf`)
 
 Compile: 0 errors, 118 warnings (same count as the previous build — nothing
