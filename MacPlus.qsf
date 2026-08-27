@@ -235,6 +235,10 @@ set_global_assignment -name QIP_FILE rtl/fx68k/fx68k.qip
 set_global_assignment -name VERILOG_FILE rtl/sdram.v
 set_global_assignment -name VERILOG_FILE rtl/scsi.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ncr5380.sv
+# Phase 3C/3D audio: in-core DC blocker (K=12, a local copy of sys's because
+# that one is hardcoded K=9 and is downstream of our sum) and the CD mixer.
+set_global_assignment -name VERILOG_FILE rtl/dc_blocker_slow.v
+set_global_assignment -name VERILOG_FILE rtl/cd_mix.v
 # CD-DA engine, instantiated inside scsi.v behind the CDROM parameter.
 # Its one include, rtl/cd_vol_lut.vh, resolves relative to this file -
 # no SEARCH_PATH needed (MacLC.qsf:373 registers it the same way).

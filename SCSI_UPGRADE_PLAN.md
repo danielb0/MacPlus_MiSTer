@@ -1586,7 +1586,7 @@ Cheapest first, per the standing practice. Steps 1-5 need no permission;
 | 2 | Icarus: new arbitration seam cases (§3B) | Audio fetches do not disturb data transfers |
 | 3 | Icarus: new DC-blocker + envelope bench | Pedestal clears; no step at mount/unmount; a settled filter sits at 0, not -1 LSB |
 | 4 | `quartus_map --analyze_file` on each new file | Syntax |
-| 5 | `quartus_map --analysis_and_elaboration MacPlus` | Ports and connectivity. **Baseline 0 errors, 20 warnings** |
+| 5 | `quartus_map --analysis_and_elaboration MacPlus` | Ports and connectivity. ~~Baseline 0 errors, 20 warnings~~ **STALE — that figure predates the whole SCSI upgrade. 2026-08-27: 0 errors, 81 warnings, none of them naming new code. Attribute by grepping the warnings for the file, not by counting them.** |
 | 6 | Full compile — **ask first** | Baseline 0 errors, 57 warnings, timing met |
 | 7 | Hardware: 3A alone (data CUE/CHD) | Host loop proven before any audio RTL exists |
 | 8 | Hardware: audio playback | The actual feature |
@@ -1601,6 +1601,52 @@ titles named in bug #7.
 Step 10 is directly checkable: with the CD-ROM Drive OSD item set to Disabled,
 the bus is already bit-identical to a pre-CD build (§5.5), and with the §3C
 mount gate the audio path should be too.
+
+#### 3C/3D IMPLEMENTED (2026-08-27)
+
+`rtl/dc_blocker_slow.v` (K parameterised, instantiated K=12), `rtl/cd_mix.v`
+(envelope + volume + saturating mixer), wired in `MacPlus.sv`, benched by
+`sim/tb_cd_mix.v` — **18/18, ladder steps 1-5 green.** Not compiled.
+
+Measured, not merely intended:
+
+* largest single-sample step across mount and unmount: **4**, against the
+  28,448 an unramped switch would produce
+* attack reaches full scale in **exactly 8192 samples** (171 ms at 48 kHz)
+* a settled filter with zero input sits at **exactly 0**, not -1 LSB — the
+  `>>>`-rounds-toward-minus-infinity foot-gun the `{din,23'd0}` fixed point
+  exists to dodge
+* with no disc mounted the output is the raw Mac audio **bit for bit**, both
+  signs — the property that makes this a provable no-op for non-users
+
+**Two corrections to the text above, both found while implementing it.**
+
+1. **Do not gate on `disc_audio`.** 3C names it as a candidate; it is defined
+   `toc_valid && !t2_has_data`, i.e. AUDIO-ONLY disc, so it reads 0 for a
+   mixed-mode disc — a data track plus CD audio, which is exactly what a game
+   with CD audio is. The gate would never engage for the main use case and the
+   pedestal would stay in place under the sum. `MacPlus.sv` latches actual CD
+   presence from `img_mounted[4]`/`img_size` instead (and drops it when the OSD
+   disables the drive). The DECISION in 3C — gate on mounted, not playing — is
+   unchanged and right; only the suggested signal was wrong.
+2. **3D's mixer snippet has a literal overflow.** `-16'sd32768` is a unary minus
+   on `16'sd32768`, which a signed 16-bit literal cannot hold (max +32767), so
+   it negates an already-wrapped value; Quartus flags it as warning 10259. Use
+   `16'sh8000`, which IS -32768 in two's complement. The 18-bit comparison
+   operand is fine as written.
+
+A bench note worth keeping: the first draft of the 3D volume tests compared
+ABSOLUTE output levels and failed, because it was really measuring the DC
+blocker still settling from the previous test's step (`dc_est` was 174, not 0).
+They now measure the CD's CONTRIBUTION — output with the CD applied minus output
+with it silent, taken with no `ce` edge in between so the Mac channel is
+provably identical across the pair. A volume test that moves when the filter
+moves is not testing volume.
+
+Still to do: ladder step 6 (full compile, **ask first**) and steps 7-10 on
+hardware, of which **step 9, the bug #7 toggle-sound regression set, is the one
+most likely to be skipped and most likely to matter**. The startup chime does
+not exercise it.
 
 #### Open items
 

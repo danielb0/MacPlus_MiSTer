@@ -76,6 +76,12 @@ localparam CONF_STR = {
 	// equivalent slot plainly, and an `h` prefix hid the item outright.
 	"SC4,ISOTO*CUEBINCHD,Mount CD-ROM;",
 	"OI,CD-ROM Drive,Enabled,Disabled;",
+	// Index 0 MUST be Full: `status` defaults to zero and unity is the wanted
+	// default. Independent of the Mac's volume control on purpose -- on real
+	// hardware the Mac's setting had no effect on the drive, which had its own
+	// knob; this is the honest equivalent of that knob, and without it there is
+	// no way to balance the two sources at all. Bits 15-16 (F,G) were free.
+	"OFG,CD Volume,Full,3/4,1/2,Off;",
 	"-;",
 	"O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
@@ -263,8 +269,53 @@ assign VGA_F1 = 0;
 assign VGA_SL = 0;
 
 wire [10:0] audio;
-assign AUDIO_L = {audio[10:0], 5'b00000};
-assign AUDIO_R = {audio[10:0], 5'b00000};
+
+// ---- Phase 3C/3D: reclaim the Mac channel's headroom, then sum in CD-DA ----
+// `audio` is SIGNED (audio_latch x volume, so +-127*7), and it carries a
+// +28,448 pedestal whenever sound is DISABLED -- deliberately, see
+// dataController_top.sv:171 and PR #12 / bug #7. MiSTer's own DC_blocker
+// strips that downstream, which is why nobody hears it today; but downstream is
+// AFTER our sum, so full-scale CD audio would be added onto the pedestal and
+// clipped before the framework ever saw it. rtl/cd_mix.v does the blocking in
+// here, ahead of the adder. See SCSI_UPGRADE_PLAN.md 3C/3D.
+
+// 48 kHz strobe: that is where sys/audio_out.sv point-samples AUDIO_L/R.
+// 32.5 MHz / 677 = 48,006 Hz, 0.01% off -- irrelevant against a 1.9 Hz corner.
+reg  [9:0] snd_ce_div = 0;
+reg        snd_ce = 0;
+always @(posedge clk_sys) begin
+	if (snd_ce_div == 10'd676) begin snd_ce_div <= 0; snd_ce <= 1'b1; end
+	else                       begin snd_ce_div <= snd_ce_div + 1'd1; snd_ce <= 1'b0; end
+end
+
+// The mount gate. NOT cd_audio.sv's `disc_audio`, despite the plan text
+// suggesting it: that is `toc_valid && !t2_has_data`, i.e. AUDIO-ONLY disc, so
+// it reads 0 for a mixed-mode disc -- a data track plus CD audio, which is
+// exactly what a game with CD audio is -- and the correction would never engage
+// for the main use case. Latch actual presence instead, the same way the floppy
+// slots do above. Gated on mounted rather than playing because "playing" flips
+// many times per disc and each flip would be a transition to manage mid-listen.
+reg cd_mounted = 0;
+always @(posedge clk_sys) begin
+	if (img_mounted[4]) cd_mounted <= (img_size != 0);
+	if (~cd_enable)     cd_mounted <= 1'b0;   // OSD "CD-ROM Drive: Disabled"
+end
+
+wire signed [15:0] mix_l, mix_r;
+cd_mix cd_mix_inst (
+	.clk        ( clk_sys              ),
+	.ce         ( snd_ce               ),
+	.cd_mounted ( cd_mounted           ),
+	.mac_in     ( {audio[10:0], 5'b00000} ),
+	.cd_l_in    ( cd_snd_l             ),
+	.cd_r_in    ( cd_snd_r             ),
+	.cd_vol     ( status[16:15]        ),
+	.out_l      ( mix_l                ),
+	.out_r      ( mix_r                )
+);
+
+assign AUDIO_L = mix_l;
+assign AUDIO_R = mix_r;
 assign AUDIO_S = 1;
 assign AUDIO_MIX = 0;
 
