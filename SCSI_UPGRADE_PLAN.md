@@ -1747,8 +1747,8 @@ The holds RATE is the more telling number — 4x for 2x the clock. 8 MHz was
 running much closer to the frontier than a single `holds=1` suggests, which
 quantifies how little margin the old advisory-REQ design actually had.
 
-**Method note, twice bitten.** Verifying copied files by searching the .vhd for
-their content has two traps, both hit on 2026-08-27:
+**Method note, THREE times bitten.** Verifying copied files by searching the
+.vhd for their content has three traps, all hit on 2026-08-27:
 
 * **Low-entropy anchors alias.** Matching on a file's first 512 bytes found five
   phantom "corrupt" files in a volume that did not contain them at all — the
@@ -1761,9 +1761,24 @@ their content has two traps, both hit on 2026-08-27:
   FINDING corruption, since the search returns the first occurrence and the
   pre-fix ghost sits at a lower offset than the live copy.
 
+* **Head anchors find PARTIALLY OVERWRITTEN ghosts.** The worst of the three,
+  because it produces a plausible-looking corruption report. On a volume where
+  files have been deleted, an anchor on a file's HEAD matches a dead copy whose
+  START survives but whose tail has been reallocated to other data. That gave 20
+  phantom "corrupt" files. **Anchor on the file's TAIL instead** (last 512
+  bytes) and compare the whole file: dead copies fail that test and the live one
+  passes. Re-checking those 20 with a tail anchor gave 18/18 byte-exact, 0
+  differing.
+
+**The tell that distinguishes an artifact from the real defect**: ring-stale
+corruption is a BOUNDED run that RECOVERS -- DRA01E01.GRB's 404 wrong bytes at
+512..918 with correct data either side. A scan artifact diverges at some point
+and never recovers. If a report shows "wrong from offset N to the end", suspect
+the method before the data.
+
 Which is why `PHLD` is the primary evidence and the file scan is corroboration:
 the counters are zeroed at core load, so `breaches=0` covers the session
-unambiguously.
+unambiguously and nothing on disk can confuse it.
 
 #### 3C/3D HARDWARE-CONFIRMED (2026-08-27, `MacPlus_09a277b3_cdmix.rbf`)
 
