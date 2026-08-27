@@ -1595,12 +1595,124 @@ Cheapest first, per the standing practice. Steps 1-5 need no permission;
 
 Step 9 is the one most likely to be skipped and most likely to matter. **The
 startup chime does not exercise it** — the chime is buffer audio and already
-centred, so it passes through all of this untouched. The regression set is the
-titles named in bug #7.
+centred, so it passes through all of this untouched.
+
+**The regression set is LODE RUNNER** (recorded 2026-08-27; the text above said
+"the titles named in bug #7" and never named them, which left the ladder's most
+important step pointing at nothing). Bug #7 reports: *"Lode runner has missing
+sounds effects for 'laser', 'pickup money'"* — and notes the level-complete
+music worked anyway. That split is exactly what makes it the right test, in one
+game:
+
+* the **laser / pickup-money effects** are enable-pin toggle sounds. They exist
+  at all only because of PR #12's `8'h7f`, and they are the square-wave content
+  that now passes through two cascaded high-passes instead of one.
+* the **level-complete music** is buffer audio and worked before PR #12. It is
+  the control: it should be unchanged.
+
+**What the content actually is** (user, 2026-08-27, and it corrects the framing
+above): toggling the enable pin fast is a way of playing SAMPLES — amplitude as
+pulse density, 1-bit PCM. So the effects are not the ~100 Hz square waves the
+"square-wave content" phrasing implies; their content sits in the normal audio
+band, hundreds of Hz upward, where a 14.9 Hz high-pass is already irrelevant and
+a 1.87 Hz one is nothing. That is also why bug #7 splits the way it does: the
+music goes through the Sound Driver's buffer, the effects are pin-toggled
+sample playback.
+
+The residual risk is not frequency response but ASYMMETRY: density-encoded
+playback is often mostly-high with brief lows, so a blocker's settling can tilt
+a short effect across its own duration. A ~100 ms laser against our tau = 85 ms
+would droop. But MiSTer's existing stage has tau = 10.7 ms and already does that
+eight times harder today, and Lode Runner reportedly sounds right through it.
+Cascading corners of 14.9 and 1.87 Hz gives ~15.0 Hz combined — essentially
+unchanged from what is already there.
+
+| stage | K | tau | corner |
+|---|---|---|---|
+| MiSTer's, already there | 9 | 10.7 ms | 14.9 Hz |
+| ours, added | 12 | 85.3 ms | 1.87 Hz |
+| cascade | | | ~15.0 Hz |
+
+That is the argument for K=12 being safe. It is still an argument, not a
+measurement, which is why step 9 exists — listen to the laser and the
+pickup-money effect, with the level-complete music as the control.
+
+**Step 9 REQUIRES a baseline run first** (user, 2026-08-27). If Lode Runner's
+effects do not play on the CURRENT core, then hearing nothing after 3C/3D
+proves nothing about 3C/3D, and hearing something would be a mystery rather
+than a pass. Establish what the core does BEFORE the audio work, then compare.
+
+The control bitstream is **`MacPlus_4e429dad_holdoff.rbf`**: it carries all of
+the SCSI hold-off work and none of the audio work, so 3C/3D is the only
+variable. Same disk image, same session, same volume setting.
+
+The precondition holds — PR #12's `8'h7f` is present at
+`dataController_top.sv:181` in this tree — so the effects SHOULD already be
+audible on the baseline. Three outcomes:
+
+| baseline | after 3C/3D | reading |
+|---|---|---|
+| effects audible | same | **pass** |
+| effects audible | thin / gone / soft-edged | **our regression** — K=12 is wrong |
+| effects NOT audible | — | a PRE-EXISTING bug, not ours. Step 9 cannot run until it is understood, and `8'h7f` being present means something else is wrong |
+
+The third row is the one worth planning for, because it looks like a failure of
+this work and is not.
+
+**BASELINE MEASURED 2026-08-27 on `MacPlus_4e429dad_holdoff.rbf`** (the SCSI
+work, no audio work). Lode Runner **has sound**, so step 9 is a live test rather
+than a formality. Two effects observed and to be compared after 3C/3D:
+
+* picking up a bag of money
+* colliding with a character and dying
+
+Both are pin-toggle effects. Compare the SAME two, at the same points in the
+game. What a K=12 regression would sound like: thin, hollow, soft-edged where
+it was percussive, or level dropping across the effect's own duration (the
+asymmetry/settling risk, not frequency response).
+
+The buffer-audio control is the **STARTUP CHIME**, not the level-complete music
+— completing a Lode Runner level is not a reasonable thing to ask of a test
+run, and the chime is free on every boot. A system beep (any alert) does the
+same job on demand. Both are Sound Driver buffer audio through the same mix
+path, so they isolate it cleanly:
+
+* chime/beep unchanged, effects changed  -> **K=12 is the problem**
+* both changed                           -> **the mixer is the problem**, not the filter
+* neither changed                        -> pass
+
+Note this does not contradict "the startup chime does not exercise step 9"
+above: the chime cannot test the PIN-TOGGLE path, which is precisely what makes
+it a clean control for the other half.
 
 Step 10 is directly checkable: with the CD-ROM Drive OSD item set to Disabled,
 the bus is already bit-identical to a pre-CD build (§5.5), and with the §3C
 mount gate the audio path should be too.
+
+#### 3C/3D HARDWARE-CONFIRMED (2026-08-27, `MacPlus_09a277b3_cdmix.rbf`)
+
+Compile: 0 errors, 118 warnings (same count as the previous build — nothing
+new), timing closed with no negative slack anywhere. Setup on the core's
+32.5 MHz domain **+1.532 ns**, against +1.485 ns on `4e429dad` — the 16x18
+multiplier and the 40-bit filter arithmetic cost nothing measurable. 49/112 DSP
+blocks.
+
+On hardware:
+
+* **CD audio plays.** The feature works.
+* **Lode Runner's effects are unchanged from the `4e429dad` baseline** — so
+  K=12 is safe on exactly the content bug #7 is about.
+* **Lode Runner still sounds right WITH A DISC MOUNTED**, player program loaded
+  but not playing. This is the observation that matters, and it is worth being
+  precise about why: with no disc `g=0`, the Mac path is a bit-identical
+  passthrough and "sounds the same" is true by construction. Only with a disc
+  mounted is `g=1`, the correction fully engaged, and the Mac channel actually
+  running through the cascade the plan was worried about. The no-disc case
+  tests the GATE; the mounted case tests the FILTER.
+
+Not separately confirmed yet, and cheap if anyone wants them: no click on
+mount/eject (simulation says the worst single-sample step is 4 against 28,448
+unramped), stereo separation, and the four CD Volume steps.
 
 #### 3C/3D IMPLEMENTED (2026-08-27)
 
