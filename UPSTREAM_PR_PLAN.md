@@ -68,8 +68,17 @@ Cherry-pick it back if a future hardware bug needs it, rather than rebuilding it
    `bus_hold`.**
 4. Remove `USE_SCSI_ISSP` and the dropped entries from `MacPlus.qsf` /
    `files.qip`.
-5. Settle the **68020 question** (asked on the forum). Removing an OSD option
-   after merge annoys users more than never shipping it.
+5. ~~Settle the 68020 question~~ **DECIDED 2026-08-28: KEEP IT.** Not asked on
+   the forum in the end; the user's assessment is that it showed no serious
+   issues, which matches the testing — it boots, runs, and does SCSI I/O
+   (`PHLD holds=1, breaches=0` under TG68K). The case against was authenticity
+   and the silent CPU-core swap, never brokenness. Settled; do not reopen.
+
+   Optional and unrelated to that decision: the OSD does not say that picking
+   68010/68020 swaps the CPU core (`is68000 ? fx68_* : tg68_*`), moving from
+   cycle-accurate fx68k to TG68K, which is not. That is a bigger behavioural
+   change than the CPU model and is invisible from the menu. A readme line would
+   pre-empt "why does timing feel different in 68020 mode".
 6. Re-run the sim ladder against stripped RTL — expected unaffected, cheap check.
    Gates: `tb_ncr5380_seam` 81/81, `tb_scsi_target`, `tb_scsi_cdrom`,
    `tb_cd_mix` 18/18.
