@@ -1771,6 +1771,58 @@ module tb_ncr5380_seam;
 			hps_disk_delay = 0;
 		end
 
+		// --- seam21: BUSY ERROR must set when the target vanishes mid-DMA ----
+		// The 2026-08-28 CD-at-boot hang, brought to the INITIATOR seam.
+		//
+		// tb_scsi_cdrom cd38 proves the TARGET behaves correctly here: it
+		// aborts, releases BSY, and is reusable immediately afterwards. The
+		// freeze was on this side. BSR bit 2 (BUSY ERROR) is the 5380's "your
+		// target has vanished" exit ramp, and it was hardwired to zero -- so
+		// the Plus ROM polled BSR=0x90 forever and the machine sat at a frozen
+		// "?" with no volume mounted at all.
+		begin : seam21
+			reg [7:0] bsr21;
+			integer   g21, n21;
+
+			mount_cd(32'd729968);
+			select_target(8'h08);            // CD at ID 3
+			send_cmd_byte(8'h08);            // READ(6)
+			send_cmd_byte(8'h00);
+			send_cmd_byte(8'h00);
+			send_cmd_byte(8'h00);
+			send_cmd_byte(8'h00);            // length 0 == 256 blocks == 512 KB
+			send_cmd_byte(8'h00);
+			reg_write(`W_ICR,   8'h00);
+			reg_write(`W_TCR,   8'h01);      // data IN
+			reg_write(`W_MR,    8'h02);      // DMA mode
+			reg_write(`W_IDMAR, 8'h00);      // Start DMA Initiator Receive
+			wait_raw_req;
+
+			// Take a slice, then ABANDON -- exactly what the ROM does once it
+			// has had the byte count it armed for.
+			for (n21 = 0; n21 < 64; n21 = n21 + 1) dma_read_byte(bsr21);
+
+			// Never handshake again. Wait for the target to give up on us.
+			g21 = 0;
+			while (dut.scsi_bsy && g21 < 400000) begin
+				@(posedge clk); g21 = g21 + 1;
+			end
+			ok("seam21a - premise: the target really did release BSY",
+			   !dut.scsi_bsy);
+
+			reg_read(`R_BSR, bsr21);
+			$display("       seam21: BSR = %h (berr=%b)", bsr21, bsr21[2]);
+			ok("seam21 - BUSY ERROR set when the target vanished mid-DMA",
+			   bsr21[2]);
+
+			// And a driver clears it the way a real one does: read reg 7.
+			reg_read(`R_RST, bsr21);
+			reg_read(`R_BSR, bsr21);
+			ok("seam21b - a reg-7 read clears BUSY ERROR", !bsr21[2]);
+
+			reg_write(`W_MR, 8'h00);
+		end
+
 		$display("");
 		$display("SEAM: %0d of %0d failing", fails, tests);
 		if (fails == 0) $display("NCR5380 SEAM GATE: PASS - host-side register path behaves");

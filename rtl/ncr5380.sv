@@ -312,7 +312,25 @@ module ncr5380
 	         tcr[`TCR_A_CD ] == scsi_cd  &&
 	         tcr[`TCR_A_IO ] == scsi_io;
 
-	wire bsr_berr = 1'b0;	/* XXX ? Does MacOS use this ? */
+	/* BUSY ERROR (BSR bit 2). A real 5380 LATCHES this when BSY is lost while
+	 * DMA mode is armed -- it is the driver's "your target has vanished, stop
+	 * waiting" exit ramp. It was hardwired to 0 here with an open question
+	 * attached, and that question turned out to matter: it is why the 2026-08-28
+	 * CD-at-boot hang never ended. The target aborts correctly and releases BSY
+	 * (proved in sim by tb_scsi_cdrom cd38, which also shows the target is
+	 * REUSABLE straight afterwards), and the ROM was left polling a BSR in which
+	 * no bit could ever change -- BSR=0x90 forever, frozen "?" diskette, no
+	 * volume mounted. The freeze was never the target giving up; it was the
+	 * initiator having no way to learn that it had.
+	 *
+	 * Cleared exactly as irq_latch is -- a reg-7 read or a bus reset -- so a
+	 * driver that resets the chip between commands sees no residue. Implemented
+	 * ALONE, latch untouched: see the 2026-08-22 note above, where two attempts
+	 * that moved this gate AND the completion-IRQ latch together both hung the
+	 * machine earlier than the bug they were chasing.
+	 */
+	reg  berr_latch;
+	wire bsr_berr = berr_latch;
 	wire [7:0] bsr = { bsr_eodma, bsr_dmarq, bsr_perr, bsr_irq,
 	                   bsr_pmatch, bsr_berr, scsi_atn, scsi_ack };
 
@@ -447,6 +465,27 @@ module ncr5380
 				irq_latch <= 1'b0;
 				dma_armed <= 1'b0;
 			end
+		end
+	end
+
+	/* BUSY ERROR latch -- see bsr_berr above. Deliberately its OWN block with
+	 * its own reg-7 edge detector, so that nothing in the irq_latch block is
+	 * disturbed. */
+	reg berr_bsy_d;
+	reg berr_rst_rd_d;
+	always @(posedge clk or posedge reset) begin
+		if (reset) begin
+			berr_latch    <= 1'b0;
+			berr_bsy_d    <= 1'b0;
+			berr_rst_rd_d <= 1'b0;
+		end else begin
+			berr_bsy_d    <= scsi_bsy;
+			berr_rst_rd_d <= rst_rd;
+			if (~berr_rst_rd_d & rst_rd) berr_latch <= 1'b0;
+			// Unexpected loss of BSY with DMA armed. Edge-triggered on BSY so a
+			// bus that is simply idle between commands cannot re-arm it.
+			if (dma_en && berr_bsy_d && !scsi_bsy) berr_latch <= 1'b1;
+			if (scsi_rst) berr_latch <= 1'b0;
 		end
 	end
 
