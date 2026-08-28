@@ -386,7 +386,50 @@ wire [7:0] hd_inquiry_dout =
 reg [31:0] capacity = 32'd0;
 reg        mounted = 0;
 always @(posedge clk) begin
-	if (img_mounted) begin
+	// A MAC RESET EMPTIES THE CD DRIVE. `sys_rst` is the system/CPU reset
+	// (dataController_top passes `!_cpuReset`), NOT the SCSI bus reset -- a
+	// driver may issue a bus reset during error recovery and that must never
+	// eject the user's disc.
+	//
+	// WHY (2026-08-28): a Plus ROM that finds an Apple driver descriptor on a
+	// CD tries to LOAD THE DRIVER, sizing the read in 512-byte blocks against a
+	// target serving 2048. Its pseudo-DMA pump (ROM $41740A: btst #6,BSR / beq)
+	// has NO timeout, NO error test and NO phase test -- its only exit is its
+	// byte count reaching zero -- so it spins forever and the machine freezes at
+	// a "?" with no volume mounted. Nothing the target reports can rescue it;
+	// BERR was implemented and tested on hardware and the ROM does not look.
+	// Measured: the trigger is the Apple DRIVER PARTITION, not bootability --
+	// a Saturn CHD (no `ER` at block 0) boots fine, a non-bootable QuarkXpress
+	// Mac CD hangs. The MacLC core boots the same disc, so this is specific to
+	// the Plus's driverless ROM, not to this target.
+	//
+	// ON AUTHENTICITY, stated honestly because it was argued at length:
+	// we found NO evidence that a real Plus hangs when booted with a disc in
+	// the drive. It was claimed confidently by two AI sources and the user
+	// checked every link they cited -- none of them answered the question. So
+	// this is NOT us preserving a known hardware limitation.
+	//
+	// What points at our own model rather than the machine: the failure is
+	// DISC-STRUCTURE dependent. Same drive, same core, same everything, and the
+	// outcome flips on whether block 0 carries an Apple driver descriptor. A
+	// genuine Plus SCSI incompatibility (termination, spin-up, UNIT ATTENTION
+	// on reset) would be a property of the DRIVE and largely indifferent to
+	// what is on the disc.
+	//
+	// What IS well supported: the Plus cannot use a CD at all until the driver
+	// is loaded from another device, so a disc is of no use during the boot
+	// scan regardless. Emptying the drive costs the user nothing real.
+	// Mount-after-boot is confirmed working on this build.
+	//
+	// STILL OPEN, and it would settle whether this is a fix or a workaround:
+	// does a real AppleCD report 512 or 2048-byte logical blocks on a bare
+	// READ CAPACITY with no driver loaded? If 512, the ROM's arithmetic was
+	// right all along and OUR block size is the defect.
+	//
+	// CDROM only. The disks MUST survive a reset or nothing would ever boot.
+	if ((CDROM != 0) && sys_rst) begin
+		mounted <= 0;
+	end else if (img_mounted) begin
 		if (|img_blocks) begin
 			// capacity is the LAST LBA, on both personalities: READ CAPACITY is
 			// defined to return the address of the last logical block, not the

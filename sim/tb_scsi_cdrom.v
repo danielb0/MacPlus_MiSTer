@@ -1476,6 +1476,63 @@ module tb_scsi_cdrom;
       end
       report(ok, "cd38 - abandoning a data phase must not strand the target");
 
+      // --- cd39: a Mac reset must EMPTY the drive ---------------------------
+      // The fix for the 2026-08-28 boot hang. The ROM's driver-load pump has no
+      // escape, so the only workable intervention is that the disc is not there
+      // during the boot scan at all -- which is also the documented workaround
+      // for REAL hardware ("empty the drive before turning on the computer").
+      // Must key on sys_rst (the CPU/system reset), NOT the SCSI bus reset: a
+      // driver may bus-reset during error recovery and that must not eject.
+      begin : cd39
+         integer bad;
+         bad = 0;
+         mount_image(IMG_BLOCKS);
+
+         // premise: with a disc in, TEST UNIT READY is GOOD
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+         if (status_byte !== 8'h00) begin
+            $display("       cd39: premise failed, TUR=%h with a disc in", status_byte);
+            bad = bad + 1;
+         end
+
+         // a MAC reset -- not a bus reset
+         sys_rst = 1'b1;
+         repeat (4) begin @(posedge clk); #1; end
+         sys_rst = 1'b0;
+         repeat (8) begin @(posedge clk); #1; end
+
+         // the drive must now read as EMPTY, which is what stops the ROM
+         // ever finding a driver descriptor to load.
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+         if (status_byte !== 8'h02) begin
+            $display("       cd39: TUR=%h after reset, expected 02 CHECK", status_byte);
+            bad = bad + 1;
+         end
+         if (dut.mounted) begin
+            $display("       cd39: dut.mounted still set after sys_rst");
+            bad = bad + 1;
+         end
+         ok = (bad == 0);
+         mount_image(IMG_BLOCKS);   // restore for anything after this
+      end
+      report(ok, "cd39 - a Mac reset empties the CD drive");
+
+      // --- cd40: a SCSI BUS reset must NOT eject --------------------------
+      // The other half. Error recovery bus-resets are routine; if they ejected
+      // the disc, a driver hiccup would silently lose the user's CD mid-session.
+      begin : cd40
+         integer bad;
+         bad = 0;
+         mount_image(IMG_BLOCKS);
+         rst = 1'b1;
+         repeat (4) begin @(posedge clk); #1; end
+         rst = 1'b0;
+         repeat (8) begin @(posedge clk); #1; end
+         ok = dut.mounted;
+         if (!ok) $display("       cd40: a BUS reset ejected the disc -- it must not");
+      end
+      report(ok, "cd40 - a SCSI bus reset does NOT eject the disc");
+
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);
       $display("");
