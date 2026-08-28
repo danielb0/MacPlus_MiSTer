@@ -225,6 +225,15 @@ module tb_scsi_cdrom;
    reg saw_toc_busy = 1'b0;
    always @(posedge clk) if (watch_toc && !dut.ca_toc_ready) saw_toc_busy <= 1'b1;
 
+   // Count bus-watchdog aborts so a test can tell "the target gave up" from
+   // "the target completed". cd38 is the reason this exists.
+   integer wdog_fires = 0;
+   reg     wdog_d     = 1'b0;
+   always @(posedge clk) begin
+      wdog_d <= dut.wdog_abort;
+      if (dut.wdog_abort && !wdog_d) wdog_fires = wdog_fires + 1;
+   end
+
    reg       timed_out = 1'b0;
    reg [7:0] sampled   = 8'h00;
 
@@ -1402,6 +1411,70 @@ module tb_scsi_cdrom;
          ok = (bad == 0);
       end
       report(ok, "cd37 - the last valid CD block still reads in full");
+
+      // --- cd38: an initiator that stops ACKing mid-DATA must not strand it --
+      // THE 2026-08-28 BOOT HANG, brought down to the seam.
+      //
+      // The Plus ROM's DRIVERLESS boot scan issues READ(6) with a length byte
+      // of ZERO -- which SCSI defines as 256 blocks -- and the target serves
+      // those as 2048-byte logical blocks: 512 KB. The ROM takes what it armed
+      // for and stops ACKing, leaving the target mid-DATA with bytes still
+      // queued. On hardware the bus watchdog then fires TWICE and the target
+      // drops BSY having reached STATUS but never MESSAGE. The ROM is left
+      // polling BSR = 0x90 forever: frozen "?" diskette, no volume mounts.
+      //
+      // read_blind() above covers the OPPOSITE case (target ends the data
+      // phase early, host stays armed). NOTHING covered this direction, which
+      // is exactly why this shipped.
+      begin : cd38
+         integer guard, n, w0;
+         reg saw_status, saw_msg, bsy_dropped, reusable;
+         saw_status = 1'b0; saw_msg = 1'b0; bsy_dropped = 1'b0;
+         w0 = wdog_fires;
+
+         select_target;
+         // READ(6) LBA 0, length 0 == 256 logical blocks == 512 KB
+         send_cdb(8'h08,8'h00,8'h00,8'h00,8'h00,8'h00,0,0,0,0,0,0, 6);
+
+         guard = 0;
+         while (!timed_out && guard < 4000 &&
+                phase_of(msg, cd, io) != P_DATA_OUT) begin
+            @(posedge clk); #1; guard = guard + 1;
+         end
+
+         // Take a token slice of the 512 KB, then ABANDON -- never ACK again.
+         n = 0;
+         while (!timed_out && n < 1024 &&
+                phase_of(msg, cd, io) == P_DATA_OUT) begin
+            xfer_byte(8'h00);
+            if (!timed_out) n = n + 1;
+         end
+
+         // Watch WITHOUT ACKing, long enough that the watchdog must fire.
+         guard = 0;
+         while (guard < 80000) begin
+            @(posedge clk); #1;
+            if (phase_of(msg, cd, io) == P_STATUS) saw_status  = 1'b1;
+            if (phase_of(msg, cd, io) == P_MSG)    saw_msg     = 1'b1;
+            if (!bsy)                              bsy_dropped = 1'b1;
+            guard = guard + 1;
+         end
+
+         $display("       cd38: took %0d bytes, then stopped ACKing", n);
+         $display("       cd38: saw_status=%b saw_msg=%b bsy_dropped=%b wdog_fires=%0d",
+                  saw_status, saw_msg, bsy_dropped, wdog_fires - w0);
+
+         // The target must be REUSABLE afterwards. If it is not, every later
+         // device on the ROM's scan is lost too, which is the observed failure.
+         timed_out = 1'b0;
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);   // TEST UNIT READY
+         reusable = !timed_out;
+         $display("       cd38: reusable afterwards=%b (status %h)",
+                  reusable, status_byte);
+
+         ok = bsy_dropped && reusable;
+      end
+      report(ok, "cd38 - abandoning a data phase must not strand the target");
 
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);

@@ -87,6 +87,73 @@ If proper termination does not release it, fall back to:
 
 ---
 
+## FINDING 2026-08-28: fix (a) is DEAD. The target is not at fault.
+
+`cd38` (added to `sim/tb_scsi_cdrom.v`) reproduces the hardware signature
+exactly -- same two watchdog fires, STATUS reached, MESSAGE never:
+
+```
+cd38: took 1024 bytes, then stopped ACKing
+cd38: saw_status=1 saw_msg=0 bsy_dropped=1 wdog_fires=2
+cd38: reusable afterwards=1 (status 00)
+```
+
+**But the target RECOVERS.** It aborts, tries STATUS, gives up, releases BSY,
+and the very next command succeeds with GOOD status. So:
+
+* **Fix (a) is dead.** The target ALREADY reaches STATUS. It cannot deliver
+  STATUS or MESSAGE to an initiator that has stopped ACKing -- those are
+  handshake phases. "Terminate the transaction properly" was the wrong model.
+* **Fix (b) is dead** for the same reason.
+* The wedge is entirely on the **INITIATOR** side -- and the initiator's 5380
+  is also our RTL (`rtl/ncr5380.sv`).
+
+### The real root cause: BUSY ERROR is hardwired to zero
+
+`rtl/ncr5380.sv:315`:
+
+```verilog
+wire bsr_berr = 1'b0;	/* XXX ? Does MacOS use this ? */
+```
+
+BSR bit 2 is **BUSY ERROR**. On a real NCR 5380 it latches when BSY is lost
+unexpectedly while DMA mode is armed -- it is precisely the driver's "your
+target vanished, stop waiting" exit. Ours can never set it.
+
+That closes the loop on the observed `BSR = 0x90`
+(`eodma=1 drq=0 perr=0 irq=1 pmatch=0 **berr=0** atn=0 ack=0`): the target
+correctly drops BSY, and the ROM is left polling a register in which **no bit
+can ever change**. The freeze is not the target giving up; it is the initiator
+having no way to learn that it did.
+
+### Revised fix
+
+Latch `bsr_berr` when BSY is lost with DMA mode armed, cleared the same way the
+other latched BSR state is.
+
+**Do it ALONE.** `ncr5380.sv:296-305` records that two earlier attempts each
+changed this gate AND the completion-IRQ latch together, and **both hung the
+machine earlier than the bug**. The file's own conclusion is "gate alone, latch
+untouched, one variable". Honour that: change `bsr_berr` and nothing else.
+
+### Residual uncertainty, to settle on hardware
+
+We do NOT know which bit the ROM's `BTST D3,$50(A3)` tests -- D3 is a register
+and the probe deck does not expose it. Of the bits reading 0, the candidates
+are DRQ (6), PMATCH (3) and BERR (2). If it is BERR this fix ends the hang
+outright. If it is DRQ or PMATCH it may not, and the fallback becomes (c):
+refuse a CDB whose transfer size cannot be reconciled BEFORE entering DATA.
+Implementing BERR is correct regardless -- a 5380 that cannot report a lost
+target is wrong on its own terms -- so it is worth doing first either way.
+
+### Where the initiator-side test goes
+
+`tb_scsi_cdrom.v` drives the target directly and has no 5380 in it, so it
+cannot test this. **`sim/tb_ncr5380_seam.v` has both** and is where the BERR
+test belongs.
+
+---
+
 ## 2. CD boot repulse arms on MacPlus (Main_MiSTer)
 
 `mac_cdrom_poll()` re-inserts the disc ~60 s after attach unless the guest read
