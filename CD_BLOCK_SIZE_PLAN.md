@@ -329,3 +329,37 @@ its TOC, and reported exactly this throughout.
 The rest of the smoke test has not been run: a byte-exact CD -> disk copy (the
 one that proves 2048-byte data reads are unregressed), Lode Runner against the
 3C/3D audio baseline, and floppy write.
+
+## CORRECTION 2026-08-29: the CD-audio follow-up above is mostly a NON-ISSUE
+
+Measured by the user on `40f2e1c1`: **CD audio continues playing after the Mac is
+shut down, and stops on Restart.**
+
+So the case that prompted the follow-up -- MacLC keeps playing after shutdown,
+ours supposedly did not -- **already worked on ours**. The note above generalised
+from "`sys_rst` wipes `cd_audio`" to "our audio dies at shutdown" without
+checking that a shutdown does not assert `sys_rst`. It does not: the OS halts the
+CPU, neither reset fires, and the engine keeps streaming. That is the authentic
+behaviour and we already had it.
+
+The two paths, confirmed in the RTL:
+
+* `bus_rst` (`cd_audio.sv:491`) stops playback -- deliberate, and commented as
+  such: "a data READ (or eject / unmount) stops playback".
+* `rst` = `sys_rst` (`cd_audio.sv:473`) wipes the engine including `pstate`.
+
+**Shutdown** asserts neither -> audio continues. **Restart** asserts both ->
+audio stops.
+
+What remains is only: should audio survive a RESTART? A Mac restart asserts SCSI
+bus RST, and stopping playback on a bus reset is a considered choice in this
+code, not an oversight. Whether a real AppleCD kept playing through a hard reset
+is the same question flagged earlier and still unanswered -- and it is now a
+much smaller question than the note above implied.
+
+Note also that after a restart the drive is NOT READY for the ~4.1 s spin-up
+window regardless, so playback could not resume instantly in any case.
+
+**Do not spend a build on this.** It is a cosmetic difference in one case, with
+an unresolved authenticity question behind it, on a path that is otherwise
+working correctly.
