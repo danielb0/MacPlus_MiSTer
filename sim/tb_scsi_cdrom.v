@@ -1533,44 +1533,97 @@ module tb_scsi_cdrom;
       end
       report(ok, "cd40 - a SCSI bus reset does NOT eject the disc");
 
-      // --- cd41: the ROM's partition-map walk -----------------------------
-      // Inside Macintosh (SCSI Manager): the Start Manager reads block 0, takes
-      // the block size from the driver descriptor's sbBlkSize field, and reads
-      // "each block in the partition map" in THOSE units.
+      // --- cd41: a reset raises UNIT ATTENTION ------------------------------
+      // The period mechanism, and the one with direct documentation about THIS
+      // ROM. A Mac Plus asserts SCSI bus RST at boot; a real drive answers the
+      // next command with CHECK CONDITION / UNIT ATTENTION (ASC 0x29, "power on,
+      // reset, or bus device reset occurred"). The ROM's boot scan therefore
+      // never reads block 0, never walks the partition map, and never hangs --
+      // while the block size stays 2048 so ISO 9660 still mounts.
       //
-      // A Mac CD declares sbBlkSize = 512 and puts its 'PM' partition entries
-      // at byte offsets 512 and 1024 -- measured on the System 7.1 ISO that
-      // hangs the Plus. So logical block 1 MUST be HPS sector 1.
-      //
-      // Serving 2048-byte logical blocks maps block 1 to HPS sector 4 instead.
-      // On a real disc that region is zero-filled, the ROM reads zeros where a
-      // partition entry belongs, and its pseudo-DMA pump at $41740A -- which
-      // has no timeout, no error test and no phase test -- spins forever.
-      //
-      // This is the hang, encoded. See CD_BLOCK_SIZE_PLAN.md.
-      mount_image(IMG_BLOCKS);
-      io_rd_count = 0;          // after the mount, so this counts the READ only
-      select_target;
-      // READ(6) logical block 1, one block
-      send_cdb(8'h08,8'h00,8'h00,8'h01,8'h01,8'h00,0,0,0,0,0,0, 6);
-      read_data_phase(2048);
-      finish_command;
-      begin : t41
-         ok = (!timed_out) && (buf_len == 512) && (status_byte == 8'h00)
-              && (io_rd_count == 1);
-         if (ok)
-            for (i = 0; i < 512; i = i + 1) begin
-               expect_byte = 8'd1 ^ (i % 512);
-               if (buf_in[i] !== expect_byte) begin
-                  if (ok) $display("       first mismatch at %0d: got %02x want %02x",
-                                   i, buf_in[i], expect_byte);
-                  ok = 0;
-               end
-            end
-         if (!ok) $display("       (len=%0d status=%02x fetches=%0d) - block 1 must be HPS sector 1",
-                           buf_len, status_byte, io_rd_count);
+      // The "Loud Harmonicas" ROM revision we run (4D1F8172) exists BECAUSE of
+      // drives that return UNIT ATTENTION on power up or reset, so Apple
+      // explicitly accommodated this. See CD_BLOCK_SIZE_PLAN.md.
+      begin : cd41
+         integer bad;
+         bad = 0;
+         mount_image(IMG_BLOCKS);
+
+         // premise: with no reset pending, TEST UNIT READY is GOOD
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+         if (status_byte !== 8'h00) begin
+            $display("       cd41: premise failed, TUR=%h before the reset", status_byte);
+            bad = bad + 1;
+         end
+
+         // a SCSI bus reset
+         rst = 1'b1;
+         repeat (4) begin @(posedge clk); #1; end
+         rst = 1'b0;
+         repeat (8) begin @(posedge clk); #1; end
+
+         // the disc must NOT have been ejected -- that was f254ffd's workaround
+         if (!dut.mounted) begin
+            $display("       cd41: the reset ejected the disc -- it must not");
+            bad = bad + 1;
+         end
+
+         // and the first command must CHECK with UNIT ATTENTION
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+         if (status_byte !== 8'h02) begin
+            $display("       cd41: TUR=%h after reset, expected 02 CHECK", status_byte);
+            bad = bad + 1;
+         end
+         get_sense;
+         if ((buf_in[2] !== 8'h06) || (buf_in[12] !== 8'h29)) begin
+            $display("       cd41: sense key %h asc %h, expected 06/29 UNIT ATTENTION",
+                     buf_in[2], buf_in[12]);
+            bad = bad + 1;
+         end
+         ok = (bad == 0);
       end
-      report(ok, "cd41 - logical block 1 is HPS sector 1 (ROM partition-map walk)");
+      report(ok, "cd41 - a reset raises UNIT ATTENTION, and does NOT eject");
+
+      // --- cd42: UNIT ATTENTION is reported ONCE, and INQUIRY is exempt -----
+      // SCSI: the condition is cleared by the command that reports it, so the
+      // initiator can carry on. If it were sticky the drive would be unusable.
+      // INQUIRY and REQUEST SENSE must NOT be blocked by it -- that is how an
+      // initiator identifies a device it has just reset.
+      begin : cd42
+         integer bad;
+         bad = 0;
+         rst = 1'b1;
+         repeat (4) begin @(posedge clk); #1; end
+         rst = 1'b0;
+         repeat (8) begin @(posedge clk); #1; end
+
+         // INQUIRY first: it must succeed DESPITE the pending UNIT ATTENTION
+         select_target;
+         send_cdb(8'h12,8'h00,8'h00,8'h00,8'h36,8'h00,0,0,0,0,0,0, 6);
+         read_data_phase(54);
+         finish_command;
+         if (status_byte !== 8'h00) begin
+            $display("       cd42: INQUIRY=%h under a pending UA, expected 00 GOOD",
+                     status_byte);
+            bad = bad + 1;
+         end
+
+         // ...and it must NOT have consumed the condition
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+         if (status_byte !== 8'h02) begin
+            $display("       cd42: TUR=%h, INQUIRY should not clear the UA", status_byte);
+            bad = bad + 1;
+         end
+
+         // now it IS consumed: the next command succeeds
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+         if (status_byte !== 8'h00) begin
+            $display("       cd42: TUR=%h on the second try, expected 00 GOOD -- the UA is sticky and the drive is unusable", status_byte);
+            bad = bad + 1;
+         end
+         ok = (bad == 0);
+      end
+      report(ok, "cd42 - UNIT ATTENTION reports once; INQUIRY is exempt");
 
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);
