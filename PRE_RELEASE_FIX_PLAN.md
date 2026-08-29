@@ -1,6 +1,27 @@
 # Plan: bugs to fix before release
 
-Written 2026-08-28. Nothing here is started. Branch `scsi-upgrade`.
+Written 2026-08-28. Branch `scsi-upgrade`.
+
+> **STATUS 2026-08-29 -- READ THIS FIRST. The body below is superseded in part.**
+>
+> * **#1 CD-at-boot hang: root-caused and re-fixed.** `f254ffd` (empty the drive
+>   on a Mac reset) stopped the hang and is hardware-confirmed, but it is a
+>   **workaround**. The real defect is ours: we served 2048-byte logical blocks
+>   while a Mac CD declares `sbBlkSize = 512` and lays its partition map out in
+>   512-byte units, which the ROM's Start Manager walks in the units the disc
+>   declares. Branch **`cd-512-blocks`** serves 512 and drops the reset-eject.
+>   Sim green, **not yet hardware-tested**. See `CD_BLOCK_SIZE_PLAN.md`, which is
+>   the live document for this item.
+> * **#2 CD boot repulse:** downgraded 2026-08-28 to **not release-blocking**.
+>   Never observed firing.
+> * **#3 bench gap: CLOSED.** `cd38` covers the short/aborted data phase; `cd41`
+>   now covers the partition-map read that actually caused #1.
+>
+> Two things this document gets wrong and that are corrected in
+> `CD_BLOCK_SIZE_PLAN.md`: the ROM does **not** "load the driver" (the failing ISO
+> has `sbDrvrCount = 0`; it is the partition-map walk), and the "Not doing" entry
+> ruling out *"clearing `mounted` on reset"* is exactly what `f254ffd` went on to
+> do. It was the right call at the time and the wrong long-term model.
 
 The rule this exists to serve (user, 2026-08-28): **before release, correct any
 bug we identify.** Three items, one of which is in a different repository.

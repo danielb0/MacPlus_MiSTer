@@ -122,6 +122,49 @@ Hardware smoke test, in this order:
 5. Floppy write still works.
 6. `PHLD holds/breaches` unchanged.
 
+## Follow-up, deliberately NOT in this branch: CD audio survives a Mac reset
+
+Noticed by the user 2026-08-29: on the **MacLC core, CD audio keeps playing after
+the Mac is shut down.** Ours stops. MacLC is right.
+
+On real hardware the audio never went through the Mac. An AppleCD SC had its own
+DAC and its own outputs -- headphone jack at the front, line out at the back.
+Playback was a drive function: the host sent PLAY AUDIO and the drive played
+autonomously until told to stop. Shutting the Mac down did not stop the music.
+
+`cd_audio.sv` already distinguishes the two resets, and its port comments say so:
+
+```
+input rst,      // SYSTEM reset only (survives SCSI bus resets)
+input bus_rst,  // SCSI bus reset: stops playback, TOC/engine state SURVIVES
+```
+
+`bus_rst` is handled carefully (`cd_audio.sv:491` stops playback but preserves the
+TOC). It is `rst` -- wired to `sys_rst` -- that wipes everything at
+`cd_audio.sv:472` (`toc_valid`, `toc_ready`, `n_tracks`, `leadout_lba`). That is
+the same class of mistake this branch just removed from the disc side: treating a
+**Mac** reset as if it reached inside a separate box.
+
+**Caveat, not yet settled.** A Mac Plus reset *does* assert SCSI bus RST -- that
+is exactly what the "Loud Harmonicas" ROM revision was about -- so the drive is
+not fully isolated on real hardware either. "Keeps playing after shutdown" is
+solid; "keeps playing through a reset pulse" depends on how a given drive handled
+a hard reset mid-playback, and we do not know that for the AppleCD specifically.
+MacLC's behaviour is evidence, not proof.
+
+**Why it is not in this branch: one variable.** This bitstream tests exactly one
+hypothesis -- that 512-byte blocking fixes the boot hang. A second behavioural
+change in the same build confounds the result. `ncr5380.sv:296-305` records two
+earlier attempts that each changed a gate AND a latch together, and both hung the
+machine earlier than the bug they were fixing; the file's own conclusion is "one
+variable".
+
+**Interaction, for when we do it:** if `sys_rst` stops wiping the audio engine,
+`toc_ready` never clears and the brief NOT READY window `cd39` currently asserts
+disappears entirely. The disc would not merely survive a reset, it would stay
+*ready* across one with no TOC re-fetch. The two changes are compatible; they just
+want separate bitstreams. `cd39` would simplify accordingly.
+
 ## Not doing
 
 * **An OSD block-size toggle.** Rejected by the user 2026-08-29: too geeky even
