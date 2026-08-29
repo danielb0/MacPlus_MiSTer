@@ -386,50 +386,16 @@ wire [7:0] hd_inquiry_dout =
 reg [31:0] capacity = 32'd0;
 reg        mounted = 0;
 always @(posedge clk) begin
-	// A MAC RESET EMPTIES THE CD DRIVE. `sys_rst` is the system/CPU reset
-	// (dataController_top passes `!_cpuReset`), NOT the SCSI bus reset -- a
-	// driver may issue a bus reset during error recovery and that must never
-	// eject the user's disc.
+	// The CD keeps its disc across a reset, as a real AppleCD SC did. f254ffd
+	// emptied the drive here so the Plus ROM could not boot-scan a mounted CD
+	// and hang; that stopped the hang but it is not what the hardware did, and
+	// the ROM is now headed off earlier by UNIT ATTENTION instead (see
+	// cd_unit_attn below, and CD_BLOCK_SIZE_PLAN.md).
 	//
-	// WHY (2026-08-28): a Plus ROM that finds an Apple driver descriptor on a
-	// CD tries to LOAD THE DRIVER, sizing the read in 512-byte blocks against a
-	// target serving 2048. Its pseudo-DMA pump (ROM $41740A: btst #6,BSR / beq)
-	// has NO timeout, NO error test and NO phase test -- its only exit is its
-	// byte count reaching zero -- so it spins forever and the machine freezes at
-	// a "?" with no volume mounted. Nothing the target reports can rescue it;
-	// BERR was implemented and tested on hardware and the ROM does not look.
-	// Measured: the trigger is the Apple DRIVER PARTITION, not bootability --
-	// a Saturn CHD (no `ER` at block 0) boots fine, a non-bootable QuarkXpress
-	// Mac CD hangs. The MacLC core boots the same disc, so this is specific to
-	// the Plus's driverless ROM, not to this target.
-	//
-	// ON AUTHENTICITY, stated honestly because it was argued at length:
-	// we found NO evidence that a real Plus hangs when booted with a disc in
-	// the drive. It was claimed confidently by two AI sources and the user
-	// checked every link they cited -- none of them answered the question. So
-	// this is NOT us preserving a known hardware limitation.
-	//
-	// What points at our own model rather than the machine: the failure is
-	// DISC-STRUCTURE dependent. Same drive, same core, same everything, and the
-	// outcome flips on whether block 0 carries an Apple driver descriptor. A
-	// genuine Plus SCSI incompatibility (termination, spin-up, UNIT ATTENTION
-	// on reset) would be a property of the DRIVE and largely indifferent to
-	// what is on the disc.
-	//
-	// What IS well supported: the Plus cannot use a CD at all until the driver
-	// is loaded from another device, so a disc is of no use during the boot
-	// scan regardless. Emptying the drive costs the user nothing real.
-	// Mount-after-boot is confirmed working on this build.
-	//
-	// STILL OPEN, and it would settle whether this is a fix or a workaround:
-	// does a real AppleCD report 512 or 2048-byte logical blocks on a bare
-	// READ CAPACITY with no driver loaded? If 512, the ROM's arithmetic was
-	// right all along and OUR block size is the defect.
-	//
-	// CDROM only. The disks MUST survive a reset or nothing would ever boot.
-	if ((CDROM != 0) && sys_rst) begin
-		mounted <= 0;
-	end else if (img_mounted) begin
+	// A bus reset yields UNIT ATTENTION, not an eject; an external drive is not
+	// power-cycled by a Mac reset; and the Plus ROM has no CD driver to command
+	// an eject with even in principle.
+	if (img_mounted) begin
 		if (|img_blocks) begin
 			// capacity is the LAST LBA, on both personalities: READ CAPACITY is
 			// defined to return the address of the last logical block, not the
@@ -1112,6 +1078,38 @@ wire  cd_needs_media = cmd_test_unit_ready || cmd_read || cmd_read_capacity ||
 // nothing told it anything was wrong. One flag, used by both.
 wire  cd_no_media = (CDROM != 0) && (!mounted || !ca_toc_ready) && cd_needs_media;
 
+// ---- UNIT ATTENTION after a reset ---------------------------------------
+// A real drive raises UNIT ATTENTION on power-on or a bus reset and reports it
+// on the next command, so an initiator learns its state is stale. The Plus
+// asserts SCSI bus RST at boot, so the ROM's first command to the CD gets
+// CHECK CONDITION and the scan moves on WITHOUT ever reading block 0 -- which
+// is what stops it walking the partition map and hanging.
+//
+// This is why the block size can stay 2048, and it must: the 512-byte build
+// (7fc96906) fixed the hang and then broke mounting, because ISO 9660 is
+// DEFINED in 2048-byte sectors. Measured on hardware -- the driver reads 18
+// blocks from LBA 0, which reaches the Primary Volume Descriptor at sector 16
+// (byte 32768) only at 2048 bytes a block. See CD_BLOCK_SIZE_PLAN.md.
+//
+// Period-documented for THIS ROM: the "Loud Harmonicas" revision (4D1F8172,
+// the one we run) exists because of drives that return UNIT ATTENTION on power
+// up or reset in the boot sequence loop, so Apple explicitly accommodated it.
+//
+// CDROM ONLY, deliberately. A real disk raises it too, but making the boot
+// disks CHECK on the ROM's first command risks the machine not booting AT ALL
+// -- far worse than the bug being fixed, and it tests nothing we need.
+//
+// INQUIRY and REQUEST SENSE are exempt, per SCSI: they are how an initiator
+// identifies and interrogates a device it has just reset. Reporting the
+// condition CLEARS it; a sticky UNIT ATTENTION would make the drive unusable.
+reg   cd_unit_attn = 1'b0;
+wire  cd_unit_attn_rej = (CDROM != 0) && cd_unit_attn
+                         && !cmd_inquiry && !cmd_request_sense;
+always @(posedge clk) begin
+	if (any_rst)                          cd_unit_attn <= (CDROM != 0);
+	else if (new_cmd && cd_unit_attn_rej) cd_unit_attn <= 1'b0;
+end
+
 // READ HEADER in MSF form: rejected (see cd_hdr_byte).
 wire  cd_hdr_msf_rej = cmd_cd_hdr && cmd[1][1];
 
@@ -1227,7 +1225,10 @@ always @(posedge clk) begin
 		sense_key <= 4'hB;
 		sense_asc <= 8'h4b;
 	end else if (new_cmd) begin
-		if (!cmd_ok) begin
+		if (cd_unit_attn_rej) begin
+			sense_key <= 4'h6;  // UNIT ATTENTION
+			sense_asc <= 8'h29; // power on, reset, or bus device reset occurred
+		end else if (!cmd_ok) begin
 			sense_key <= 4'h5;  // ILLEGAL REQUEST
 			sense_asc <= 8'h20; // invalid command operation code
 		end else if (cd_no_media) begin
@@ -1421,7 +1422,7 @@ always @(posedge clk) begin
 				// is this a supported and valid command?
 				// (CDROM: media-dependent commands CHECK with the no-disc sense
 				// while unmounted, and a prevent-blocked EJECT CHECKs too.)
-				if(cmd_ok && !cd_no_media && !cd_audio_read_rej && !cd_hdr_msf_rej && !lba_out_of_range) begin
+				if(cmd_ok && !cd_no_media && !cd_audio_read_rej && !cd_hdr_msf_rej && !lba_out_of_range && !cd_unit_attn_rej) begin
 					// yes, continue
 					status <= (cmd_cd_eject_any && cd_prevent) ? `STATUS_CHECK_CONDITION : `STATUS_OK;
 

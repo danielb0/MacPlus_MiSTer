@@ -173,6 +173,17 @@ module tb_scsi_cdrom;
          repeat (4) @(posedge clk);
          hps_enable = 1'b1;
          @(posedge clk);
+         swallow_ua;
+      end
+   endtask
+
+   // A reset raises UNIT ATTENTION, so the FIRST command after one reports it
+   // (CHECK / 06 / 29) and clears it. Every real initiator absorbs that before
+   // getting on with its work; a bench that does not is modelling a driver that
+   // cannot exist. Issues one TEST UNIT READY and ignores the result.
+   task swallow_ua;
+      begin
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
       end
    endtask
 
@@ -1501,21 +1512,24 @@ module tb_scsi_cdrom;
          sys_rst = 1'b0;
          repeat (8) begin @(posedge clk); #1; end
 
-         // the drive must now read as EMPTY, which is what stops the ROM
-         // ever finding a driver descriptor to load.
-         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
-         if (status_byte !== 8'h02) begin
-            $display("       cd39: TUR=%h after reset, expected 02 CHECK", status_byte);
+         // The disc STAYS IN. f254ffd ejected it here to keep the ROM away from
+         // block 0; UNIT ATTENTION does that job now without pretending the
+         // hardware threw the user's disc out.
+         if (!dut.mounted) begin
+            $display("       cd39: sys_rst ejected the disc -- it must not");
             bad = bad + 1;
          end
-         if (dut.mounted) begin
-            $display("       cd39: dut.mounted still set after sys_rst");
+
+         // ...and the Mac reset raises UNIT ATTENTION just as a bus reset does,
+         // which is what heads the ROM's boot scan off.
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+         if (status_byte !== 8'h02) begin
+            $display("       cd39: TUR=%h after sys_rst, expected 02 CHECK", status_byte);
             bad = bad + 1;
          end
          ok = (bad == 0);
-         mount_image(IMG_BLOCKS);   // restore for anything after this
       end
-      report(ok, "cd39 - a Mac reset empties the CD drive");
+      report(ok, "cd39 - a Mac reset raises UNIT ATTENTION and keeps the disc");
 
       // --- cd40: a SCSI BUS reset must NOT eject --------------------------
       // The other half. Error recovery bus-resets are routine; if they ejected
@@ -1530,6 +1544,7 @@ module tb_scsi_cdrom;
          repeat (8) begin @(posedge clk); #1; end
          ok = dut.mounted;
          if (!ok) $display("       cd40: a BUS reset ejected the disc -- it must not");
+         swallow_ua;    // the reset above raised one; do not leak it into cd41
       end
       report(ok, "cd40 - a SCSI bus reset does NOT eject the disc");
 

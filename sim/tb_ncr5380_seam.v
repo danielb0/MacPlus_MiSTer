@@ -1294,6 +1294,21 @@ module tb_ncr5380_seam;
 				end
 			end
 
+			// The reset above raised UNIT ATTENTION on the CD, so the first
+			// command after it reports CHECK / 06 / 29 and clears the condition.
+			// A real initiator absorbs that; without this the first READ of the
+			// sweep is refused and the test measures nothing. Same shape as the
+			// cd_no_media wait immediately above.
+			begin : ua17
+				integer gu;
+				select_target(8'h08);
+				send_cmd_byte(8'h00); send_cmd_byte(8'h00);
+				send_cmd_byte(8'h00); send_cmd_byte(8'h00);
+				send_cmd_byte(8'h00); send_cmd_byte(8'h00);
+				gu = 0;
+				while (dut.scsi_bsy && gu < 60000) begin @(posedge clk); gu = gu + 1; end
+			end
+
 			badtot = 0; firstit = -1;
 			// SWEEP. The hardware failure was 1 file in 55, so a single pair of
 			// reads is unlikely to land in the window. Each iteration moves the

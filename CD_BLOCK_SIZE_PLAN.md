@@ -178,3 +178,95 @@ want separate bitstreams. `cd39` would simplify accordingly.
   have asked for 2048.
 * **Reverting `f254ffd` on `scsi-upgrade`.** That branch stays as the working
   fallback until this one is proven on hardware.
+
+---
+
+# HARDWARE 2026-08-29 (`7fc96906`): the hang IS fixed, and 512 is still wrong
+
+**Half a result, and it redirects the fix.**
+
+**The boot hang is gone.** With the System 7.1 ISO mounted the machine boots,
+enumerates, walks the partition map and reaches the desktop. Everything above
+about the root cause is confirmed: the ROM does walk the map in the units the
+disc declares, and serving those units gets it through.
+
+**But the disc will not mount** -- "not a Macintosh disk, initialize?" -- and the
+probe deck says exactly why:
+
+```
+PODR  last 4 data-reg writes = 00 00 12 00   <- CDB tail, newest last
+PIOS  cd fetch stuck=0  win=data  lba=0
+PIO2  cd rd=20 ack=20      PHLD holds=0 breaches=0
+      phases: IDLE CMD DATA>init(READ) STATUS MESSAGE
+```
+
+A READ of **18 blocks from LBA 0**, completing cleanly -- no wedge, nothing
+stalled, the target serving perfectly. The arithmetic settles it:
+
+| block size | 18 blocks from 0 spans | ISO 9660 PVD at byte 32768? |
+|---|---|---|
+| 2048 | 0 .. 36863 | **yes** (sector 16) |
+| 512 (this build) | 0 .. 9215 | **no**, 3.5x short |
+
+ISO 9660 puts the system area in sectors 0-15 and the Primary Volume Descriptor
+at sector 16. A read of sectors 0-17 is *precisely* system area + PVD + one more
+descriptor. **18 is the giveaway.** The driver gets correct data, finds no volume
+descriptor where the standard requires one, and calls the disc unreadable.
+
+**ISO 9660 is DEFINED in 2048-byte logical sectors.** Serving 512 breaks it
+categorically, not incidentally. Risk 2 above was understated.
+
+Not the CD extension, before that theory gets another airing: memory records that
+this rig's System 7.1 already has Foreign File Access, which is why discs of this
+class mounted here in the first place. The extension is not the variable.
+
+## Both halves are now measured, and they conflict
+
+| block size | ROM boot scan | ISO 9660 driver |
+|---|---|---|
+| 2048 | **hangs** | **mounts** |
+| 512 | **boots** | **cannot find the volume** |
+
+One fixed block size cannot serve both consumers. That is why real drives made it
+negotiable, and it means **neither 512 nor 2048 alone is a complete answer**.
+
+## The fix, redirected: UNIT ATTENTION, keeping 2048
+
+Branch `cd-unit-attention`. `4e0bfb1` reverts the block-size change; the fix
+raises UNIT ATTENTION on the CD after a reset instead.
+
+A Plus asserts SCSI bus RST at boot. A real drive answers the next command with
+CHECK CONDITION / sense 06 / ASC 0x29, so the ROM's scan **never reads block 0**,
+never walks the partition map and never hangs -- while the block size stays 2048
+and the driver, which loads later and clears the condition, sees nothing
+different from today.
+
+It is the one mechanism with period documentation about *this* ROM: the "Loud
+Harmonicas" revision (`4D1F8172`, the one we run) exists because of drives that
+return UNIT ATTENTION on power up or reset in the boot sequence loop.
+
+**CDROM only, deliberately.** A real disk raises it too, but making the boot
+disks CHECK on the ROM's first command risks the machine not booting AT ALL --
+far worse than the bug being fixed, and it tests nothing we need.
+
+`f254ffd`'s reset-eject is removed again: UNIT ATTENTION does that job without
+pretending the hardware threw the user's disc out.
+
+### The risk that decides it
+
+UNIT ATTENTION is **cleared by the command that reports it**. If the ROM's scan
+does TEST UNIT READY -> CHECK -> REQUEST SENSE -> TEST UNIT READY again, the
+second one succeeds, it proceeds to block 0, and the hang returns. Whether the
+ROM retries is unknown and is exactly what the hardware test answers.
+
+If it does retry, the remaining option is MODE SELECT negotiation -- default 512
+so the ROM's scan works, with the driver switching to 2048. Note we currently
+ACCEPT MODE SELECT (0x15) and honour no block descriptor, so it is possible a
+driver already asks and we ignore it.
+
+### Bench consequence, worth knowing
+
+Any initiator that resets the bus now gets a CHECK CONDITION on its next command.
+That is correct SCSI and every real driver handles it, but it made five CD tests
+and `seam17` fail until the benches learned to absorb it (`swallow_ua`). On
+hardware the same applies to anything that bus-resets during error recovery.
