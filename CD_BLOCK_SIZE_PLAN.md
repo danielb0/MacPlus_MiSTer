@@ -363,3 +363,46 @@ window regardless, so playback could not resume instantly in any case.
 **Do not spend a build on this.** It is a cosmetic difference in one case, with
 an unresolved authenticity question behind it, on a path that is otherwise
 working correctly.
+
+## SMOKE TEST 2026-08-29 on `40f2e1c1` -- PASSED
+
+| # | test | result |
+|---|---|---|
+| 1 | boot with the System 7.1 ISO mounted | **desktop reached** |
+| 2 | mount retained across a reset | **yes** -- the disc stays in the drive |
+| 3 | CD audio | **plays**; probe shows `win=audio lba=65578` actively served |
+| 4 | disk -> disk copy (197 files) | clean: `stuck=0`, no breaches, writes flowing |
+| 5 | CD -> disk copy (32 files) | **`PHLD holds=1 longest=33844 breaches=0`** |
+| 6 | volume integrity afterwards | **byte-exact, difference 0** |
+| 7 | floppy write (`Disk605.dsk`) | **byte-exact, difference 0** |
+| 8 | Lode Runner vs the 3C/3D baseline | still outstanding |
+
+**Test 5 is the one that matters most.** `holds=1` means the CPU hold-off
+ACTUALLY ENGAGED -- the HPS lagged, the interlock fired and held. Per the probe
+deck's own notes, `holds=0` after a CD read means the mechanism was never
+exercised and a clean copy proves nothing. This makes the back-pressure work
+**tested** rather than merely un-contradicted, and it matches the known-good
+2026-08-26 state (`holds=1, breaches=0`) exactly. `longest=33844 clk` is ~1.04 ms
+at 32.5 MHz: above the ~20k normal fill lag, far below the 65535 saturation that
+would want investigating. `breaches=0` -- the frontier was never crossed, so the
+CHECK CONDITION backstop never had to catch anything.
+
+**Test 6 settles the block-size question empirically.** After three builds of
+churn, 2048-byte CD data reads are demonstrably unregressed: `PODR` CDB tails of
+`0x54`/`0x67`/`0x2A` blocks (84/103/42, i.e. 86-211 KB per command) served
+correctly, and the resulting volume reconciles to the byte.
+
+```
+volume '80MB Hard Disk', 198 files
+  data forks  physical    4,864,512
+  rsrc forks  physical   11,761,152
+  B-trees                 1,311,744
+  accounted              17,937,408
+  MDB in use             17,937,408   difference 0
+```
+
+`scripts/hfs_integrity.py` now carries that check, so it does not have to be
+re-derived a third time. Two traps worth knowing, both hit while writing it: the
+HFS MDB has `drXTFlSize` at **0x82** and `drCTFlSize` at **0x92** (a wrong guess
+silently yields an empty catalog rather than an error), and on these images the
+`Apple_HFS` partition is the FIRST map entry, not the last.
