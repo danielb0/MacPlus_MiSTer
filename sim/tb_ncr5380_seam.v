@@ -1300,7 +1300,7 @@ module tb_ncr5380_seam;
 			// LBAs, the long transfer's length (always > 32 sectors so the ring
 			// still wraps) and, through the server's PRNG, every fill latency.
 			for (it = 0; it < 14 && firstit < 0; it = it + 1) begin
-				nblk_l = 9 + (it % 4);                  // 9..12 blocks = 36..48 sectors
+				nblk_l = 4 * (9 + (it % 4));            // 36..48 blocks = 36..48 sectors
 				lba_l  = 1000 + it * 131;
 				lba_s  = 60000 + it * 97;
 
@@ -1315,12 +1315,12 @@ module tb_ncr5380_seam;
 				reg_write(`W_ICR, 8'h00);
 				pdma_arm;
 				bad4 = 0; first4 = -1;
-				for (i4 = 0; i4 < nblk_l * 2048; i4 = i4 + 1) begin
+				for (i4 = 0; i4 < nblk_l * 512; i4 = i4 + 1) begin
 					wait_drq(drq4);
-					if (!drq4) i4 = nblk_l * 2048;
+					if (!drq4) i4 = nblk_l * 512;
 					else begin
 						dma_read_byte(got4);
-						sec4  = (lba_l * 4) + (i4 / 512);
+						sec4  = lba_l + (i4 / 512);
 						want4 = sec4[7:0] ^ (i4 % 512);
 						if (got4 !== want4) begin
 							if (first4 < 0) first4 = i4;
@@ -1347,7 +1347,7 @@ module tb_ncr5380_seam;
 				send_cmd_byte({3'd0, hs[20:16]});
 				send_cmd_byte(hs[15:8]);
 				send_cmd_byte(hs[7:0]);
-				send_cmd_byte(8'h02);
+				send_cmd_byte(8'h08);
 				send_cmd_byte(8'h00);
 				reg_write(`W_ICR, 8'h00);
 				pdma_arm;
@@ -1357,7 +1357,7 @@ module tb_ncr5380_seam;
 					if (!drq4) i4 = 4096;
 					else begin
 						dma_read_byte(got4);
-						sec4  = (lba_s * 4) + (i4 / 512);
+						sec4  = lba_s + (i4 / 512);
 						want4 = sec4[7:0] ^ (i4 % 512);
 						if (got4 !== want4) begin
 							if (first4 < 0) first4 = i4;
@@ -1422,7 +1422,7 @@ module tb_ncr5380_seam;
 			hps_data_mode = 1'b1;
 			hps_force_delay = 0; hps_force_n = 0;
 
-			lba_l5 = 2000;    // 10 blocks = 40 sectors: ring slot 1 last holds sector 33
+			lba_l5 = 2000;    // 40 blocks = 40 sectors: ring slot 1 last holds sector 33
 			lba_s5 = 70000;
 
 			// ---- seed the ring: long READ(10), pumped politely ----
@@ -1432,12 +1432,12 @@ module tb_ncr5380_seam;
 			send_cmd_byte(hl5[31:24]);       send_cmd_byte(hl5[23:16]);
 			send_cmd_byte(hl5[15:8]);        send_cmd_byte(hl5[7:0]);
 			send_cmd_byte(8'h00);            send_cmd_byte(8'h00);
-			send_cmd_byte(8'h0a);            send_cmd_byte(8'h00);
+			send_cmd_byte(8'h28);            send_cmd_byte(8'h00);
 			reg_write(`W_ICR, 8'h00);
 			pdma_arm;
-			for (i5 = 0; i5 < 10 * 2048; i5 = i5 + 1) begin
+			for (i5 = 0; i5 < 40 * 512; i5 = i5 + 1) begin
 				wait_drq(drq5);
-				if (!drq5) i5 = 10 * 2048;
+				if (!drq5) i5 = 40 * 512;
 				else dma_read_byte(got5);
 			end
 			begin : fin_l5
@@ -1467,7 +1467,7 @@ module tb_ncr5380_seam;
 			send_cmd_byte({3'd0, hs5[20:16]});
 			send_cmd_byte(hs5[15:8]);
 			send_cmd_byte(hs5[7:0]);
-			send_cmd_byte(8'h02);
+			send_cmd_byte(8'h08);
 			send_cmd_byte(8'h00);
 			reg_write(`W_ICR, 8'h00);
 			pdma_arm;
@@ -1480,12 +1480,12 @@ module tb_ncr5380_seam;
 				for (tr5 = 0; tr5 < 8 && !drq5; tr5 = tr5 + 1) wait_drq(drq5);
 			end
 			bad5 = 0; stale5 = 0; first5 = -1; last5 = -1;
-			prev_sec5 = (lba_l5 * 4) + 33;   // slot 1's previous occupant
+			prev_sec5 = lba_l5 + 33;   // slot 1's previous occupant
 			if (drq5) begin
 				for (i5 = 0; i5 < 4096; i5 = i5 + 1) begin
 					repeat (12) @(posedge clk);   // + 4 in dma_read_byte = 16 clk/byte (see SCALING)
 					dma_read_byte(got5);
-					sec5  = (lba_s5 * 4) + (i5 / 512);
+					sec5  = lba_s5 + (i5 / 512);
 					want5 = sec5[7:0] ^ (i5 % 512);
 					if (got5 !== want5) begin
 						if (first5 < 0) first5 = i5;
@@ -1526,7 +1526,7 @@ module tb_ncr5380_seam;
 			// See seam19's anti-alias guard: without distinguishable payload tags
 			// seam18 would pass whether or not the hold-off worked.
 			ok("seam18h - premise: stale and fresh payloads are distinguishable",
-			   (prev_sec5 % 256) != (((lba_s5 * 4) + 1) % 256));
+			   (prev_sec5 % 256) != ((lba_s5 + 1) % 256));
 			// And the transfer that was stalled rather than corrupted must
 			// report GOOD -- a hold-off that turned corruption into a spurious
 			// error would be no better than the corruption.
@@ -1576,12 +1576,12 @@ module tb_ncr5380_seam;
 			send_cmd_byte(hl6[31:24]);       send_cmd_byte(hl6[23:16]);
 			send_cmd_byte(hl6[15:8]);        send_cmd_byte(hl6[7:0]);
 			send_cmd_byte(8'h00);            send_cmd_byte(8'h00);
-			send_cmd_byte(8'h0a);            send_cmd_byte(8'h00);
+			send_cmd_byte(8'h28);            send_cmd_byte(8'h00);
 			reg_write(`W_ICR, 8'h00);
 			pdma_arm;
-			for (i6 = 0; i6 < 10 * 2048; i6 = i6 + 1) begin
+			for (i6 = 0; i6 < 40 * 512; i6 = i6 + 1) begin
 				wait_drq(drq6);
-				if (!drq6) i6 = 10 * 2048;
+				if (!drq6) i6 = 40 * 512;
 				else dma_read_byte(got6);
 			end
 			begin : fin_l6
@@ -1598,7 +1598,7 @@ module tb_ncr5380_seam;
 			send_cmd_byte({3'd0, hs6[20:16]});
 			send_cmd_byte(hs6[15:8]);
 			send_cmd_byte(hs6[7:0]);
-			send_cmd_byte(8'h02);
+			send_cmd_byte(8'h08);
 			send_cmd_byte(8'h00);
 			reg_write(`W_ICR, 8'h00);
 			pdma_arm;
@@ -1608,12 +1608,12 @@ module tb_ncr5380_seam;
 				for (tr6 = 0; tr6 < 8 && !drq6; tr6 = tr6 + 1) wait_drq(drq6);
 			end
 			bad6 = 0; stale6 = 0;
-			prev_sec6 = (lba_l6 * 4) + 33;
+			prev_sec6 = lba_l6 + 33;
 			if (drq6) begin
 				for (i6 = 0; i6 < 4096; i6 = i6 + 1) begin
 					repeat (12) @(posedge clk);
 					dma_read_byte_nowait(got6);       // <-- the only difference
-					sec6  = (lba_s6 * 4) + (i6 / 512);
+					sec6  = lba_s6 + (i6 / 512);
 					want6 = sec6[7:0] ^ (i6 % 512);
 					if (got6 !== want6) begin
 						bad6 = bad6 + 1;
@@ -1632,7 +1632,7 @@ module tb_ncr5380_seam;
 			// draft of seam19 picked lba 3000/80000, both tags came out as 0x01,
 			// and seam19 reported a clean read of data it had never fetched.
 			ok("seam19e - premise: stale and fresh payloads are distinguishable",
-			   (prev_sec6 % 256) != (((lba_s6 * 4) + 1) % 256));
+			   (prev_sec6 % 256) != ((lba_s6 + 1) % 256));
 			// Premise. If this fails, seam19 proves nothing about (c) -- and it
 			// also means seam18's own premise has quietly stopped holding.
 			ok("seam19 - premise: ignoring the hold-off DOES corrupt the read",

@@ -95,10 +95,17 @@ module scsi
 parameter [2:0] ID = 0;
 
 // CD-ROM personality. 0 = direct-access disk (unchanged in every respect).
-// 1 = AppleCD-compatible CD-ROM: SONY CDU-8004 identity, 2048-byte logical
-// blocks served as 4 consecutive 512-byte HPS blocks (lba/tlen <<2 at latch
-// time, so the whole ring/flush machinery below runs in 512-byte units without
-// modification), READ TOC, sub-channel, eject, and no-disc sense.
+// 1 = AppleCD-compatible CD-ROM: SONY CDU-8004 identity, 512-byte logical
+// blocks (the same units as the disk personality, so the ring/flush machinery
+// below is shared verbatim), READ TOC, sub-channel, eject, and no-disc sense.
+//
+// The block size is 512, NOT the media's physical 2048, because that is what
+// the Mac expects of a CD: an Apple-partitioned disc declares sbBlkSize = 512
+// in its driver descriptor and lays its partition map out in 512-byte units,
+// and the ROM's Start Manager walks it in those units. Serving 2048 hung the
+// Plus at boot -- see CD_BLOCK_SIZE_PLAN.md, cd41, and the note at the lba
+// latch. TOC and audio addressing are frame-based and are unaffected by this;
+// the TOC is HPS-sourced, not derived from `capacity`.
 //
 // Every cd_* wire folds to a constant when CDROM == 0, so a disk target
 // synthesizes to exactly what it did before this parameter existed.
@@ -386,55 +393,24 @@ wire [7:0] hd_inquiry_dout =
 reg [31:0] capacity = 32'd0;
 reg        mounted = 0;
 always @(posedge clk) begin
-	// A MAC RESET EMPTIES THE CD DRIVE. `sys_rst` is the system/CPU reset
-	// (dataController_top passes `!_cpuReset`), NOT the SCSI bus reset -- a
-	// driver may issue a bus reset during error recovery and that must never
-	// eject the user's disc.
+	// The CD drive keeps its disc across a Mac reset, exactly as a real
+	// AppleCD SC did. An earlier revision (f254ffd) emptied it here, to stop
+	// the Plus ROM hanging when it boot-scanned a mounted CD. That was a
+	// workaround for OUR block size, not a property of the machine: the ROM
+	// walks the partition map in the 512-byte units the disc declares, and the
+	// target now serves those. See CD_BLOCK_SIZE_PLAN.md.
 	//
-	// WHY (2026-08-28): a Plus ROM that finds an Apple driver descriptor on a
-	// CD tries to LOAD THE DRIVER, sizing the read in 512-byte blocks against a
-	// target serving 2048. Its pseudo-DMA pump (ROM $41740A: btst #6,BSR / beq)
-	// has NO timeout, NO error test and NO phase test -- its only exit is its
-	// byte count reaching zero -- so it spins forever and the machine freezes at
-	// a "?" with no volume mounted. Nothing the target reports can rescue it;
-	// BERR was implemented and tested on hardware and the ROM does not look.
-	// Measured: the trigger is the Apple DRIVER PARTITION, not bootability --
-	// a Saturn CHD (no `ER` at block 0) boots fine, a non-bootable QuarkXpress
-	// Mac CD hangs. The MacLC core boots the same disc, so this is specific to
-	// the Plus's driverless ROM, not to this target.
-	//
-	// ON AUTHENTICITY, stated honestly because it was argued at length:
-	// we found NO evidence that a real Plus hangs when booted with a disc in
-	// the drive. It was claimed confidently by two AI sources and the user
-	// checked every link they cited -- none of them answered the question. So
-	// this is NOT us preserving a known hardware limitation.
-	//
-	// What points at our own model rather than the machine: the failure is
-	// DISC-STRUCTURE dependent. Same drive, same core, same everything, and the
-	// outcome flips on whether block 0 carries an Apple driver descriptor. A
-	// genuine Plus SCSI incompatibility (termination, spin-up, UNIT ATTENTION
-	// on reset) would be a property of the DRIVE and largely indifferent to
-	// what is on the disc.
-	//
-	// What IS well supported: the Plus cannot use a CD at all until the driver
-	// is loaded from another device, so a disc is of no use during the boot
-	// scan regardless. Emptying the drive costs the user nothing real.
-	// Mount-after-boot is confirmed working on this build.
-	//
-	// STILL OPEN, and it would settle whether this is a fix or a workaround:
-	// does a real AppleCD report 512 or 2048-byte logical blocks on a bare
-	// READ CAPACITY with no driver loaded? If 512, the ROM's arithmetic was
-	// right all along and OUR block size is the defect.
-	//
-	// CDROM only. The disks MUST survive a reset or nothing would ever boot.
-	if ((CDROM != 0) && sys_rst) begin
-		mounted <= 0;
-	end else if (img_mounted) begin
+	// It was also not period behaviour, and the code should not imply it was.
+	// A bus reset yields UNIT ATTENTION, not an eject; an external drive is not
+	// power-cycled by a Mac reset; and the Plus ROM has no CD driver, so it had
+	// no way to command an eject even in principle.
+	if (img_mounted) begin
 		if (|img_blocks) begin
 			// capacity is the LAST LBA, on both personalities: READ CAPACITY is
 			// defined to return the address of the last logical block, not the
-			// block count. CDROM counts in 2048-byte logical blocks, i.e. the
-			// mounted 512-block count / 4 - 1.
+			// block count. Both personalities count in 512-byte logical blocks,
+			// so both report img_blocks - 1; the CD used to divide by 4 here
+			// when it served 2048-byte blocks. See CD_BLOCK_SIZE_PLAN.md.
 			//
 			// The disk path used to report img_blocks, advertising one block
 			// MORE than the medium has. That was a knowingly deferred Phase 1
@@ -454,8 +430,9 @@ always @(posedge clk) begin
 			// wrong. The same test passes on this build. Reads past the end
 			// were not separately characterised, so this says nothing about
 			// them. See SCSI_UPGRADE_PLAN.md 5.7 defect A.
-			capacity <= (CDROM != 0) ? ({2'b00, img_blocks[31:2]} - 1'd1)
-			                         : (img_blocks - 1'd1);
+			// Both personalities now count in 512-byte logical blocks, so the
+			// CD no longer divides by 4. See CD_BLOCK_SIZE_PLAN.md.
+			capacity <= img_blocks - 1'd1;
 			if (!mounted) $display("Image mounted on target %d, size: %d", ID, img_blocks);
 			mounted <= 1;
 		end else
@@ -474,7 +451,7 @@ wire [7:0] read_capacity_dout =
 		(data_cnt == 32'd1 )?capacity[23:16]:
 		(data_cnt == 32'd2 )?capacity[15:8]:
 		(data_cnt == 32'd3 )?capacity[7:0]:
-		(data_cnt == 32'd6 )?((CDROM != 0)?8'h08:8'd2): // block length 2048 (CD) / 512 (disk)
+		(data_cnt == 32'd6 )?8'd2:                     // block length 512, both personalities
 		8'h00;
 
 // CDROM MODE SENSE(6): header + 8-byte block descriptor (12 bytes), with
@@ -512,7 +489,7 @@ function [7:0] cd_mode_sense_byte;
 			(cnt == 32'd5 )?cap[23:16]:
 			(cnt == 32'd6 )?cap[15:8]:
 			(cnt == 32'd7 )?cap[7:0]:
-			(cnt == 32'd10)?8'h08:                      // block length 0x000800 = 2048
+			(cnt == 32'd10)?8'h02:                      // block length 0x000200 = 512
 			// ---- page 0x30: the "magic Apple page" (24 bytes, total 36)
 			(page == 6'h30)?(
 			   (cnt == 32'd12)?8'h30:
@@ -1265,18 +1242,23 @@ reg [15:0] tlen;
 always @(posedge clk) begin
 	if (old_io_ack & ~io_ack) lba <= lba + 1'd1;
 	if(cmd_cpl && (phase == PHASE_CMD_IN)) begin
-		// CDROM READs address 2048-byte logical blocks; the HPS block device is
-		// 512-byte sectors, so scale lba/tlen by 4 AT LATCH TIME and the whole
-		// downstream ring / flush / data_len machinery runs unmodified in
-		// 512-byte units. Non-READ commands keep the raw CDB values, because
-		// their lengths are byte counts, not block counts.
-		if ((CDROM != 0) && cmd_read) begin
-			lba  <= (cmd6_cpl?{11'd0, lba6}:lba10) << 2;
-			tlen <= (cmd6_cpl?{7'd0, tlen6}:tlen10) << 2;
-		end else begin
-			lba <= cmd6_cpl?{11'd0, lba6}:lba10;
-			tlen <= cmd6_cpl?{7'd0, tlen6}:tlen10;
-		end
+		// BOTH personalities address 512-byte logical blocks, so the CDB values
+		// pass through unscaled and the ring / flush / data_len machinery
+		// downstream runs in the same units it always did.
+		//
+		// This used to scale the CD path <<2, serving 2048-byte logical blocks.
+		// That is what hung the Plus at boot. A Mac CD declares sbBlkSize = 512
+		// in its driver descriptor and lays its partition map out in 512-byte
+		// blocks 1 and 2; the ROM's Start Manager reads block 0, believes that
+		// declaration, and walks the map in those units. Against a 2048-byte
+		// target every read after block 0 lands 4x wide -- block 1 resolves to
+		// byte 2048, which is zero-filled -- and the ROM's pseudo-DMA pump at
+		// $41740A has no timeout, no error test and no phase test, so it spins
+		// forever. Block 0 is the one block that reads correctly either way,
+		// which is exactly why the ROM gets far enough to trust the disc and
+		// then hang. See CD_BLOCK_SIZE_PLAN.md and cd41.
+		lba <= cmd6_cpl?{11'd0, lba6}:lba10;
+		tlen <= cmd6_cpl?{7'd0, tlen6}:tlen10;
 
 		// CD serve parameters, decoded here once (see the CD decode block).
 		c1_op_r        <= cmd[9][7:6];
