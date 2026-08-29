@@ -25,11 +25,8 @@ module tb_scsi_cdrom;
    always #5 clk = ~clk;
 
    localparam [31:0] IMG_BLOCKS = 32'd729968;
-   // The CD serves 512-byte logical blocks, the same units as the HPS device,
-   // so a logical block IS an HPS sector. This used to be IMG_BLOCKS/4 when the
-   // target served 2048-byte blocks. See CD_BLOCK_SIZE_PLAN.md.
-   localparam [31:0] CD_BLOCKS  = IMG_BLOCKS;            // 729968
-   localparam [31:0] CD_CAP     = CD_BLOCKS - 1;         // 729967
+   localparam [31:0] CD_BLOCKS  = IMG_BLOCKS / 4;        // 182492
+   localparam [31:0] CD_CAP     = CD_BLOCKS - 1;         // 182491
 
    // ---- target bus ------------------------------------------------------
    reg        rst       = 1'b1;
@@ -546,30 +543,31 @@ module tb_scsi_cdrom;
          reg [31:0] got;
          got = {buf_in[0], buf_in[1], buf_in[2], buf_in[3]};
          ok = (!timed_out) && (buf_len == 8) && (status_byte == 8'h00)
-              && (got == CD_CAP) && (buf_in[6] === 8'h02);  // 0x0200 = 512
+              && (got == CD_CAP) && (buf_in[6] === 8'h08);  // 0x0800 = 2048
          if (!ok) $display("       (len=%0d cap=%0d want=%0d blk_hi=%02x)",
                            buf_len, got, CD_CAP, buf_in[6]);
       end
-      report(ok, "cd5 - READ CAPACITY: last LBA in 512-byte blocks, block len 512");
+      report(ok, "cd5 - READ CAPACITY: last LBA in 2048-byte blocks, block len 2048");
 
       // ==================================================================
-      // Test 6: a READ of ONE 512-byte logical block is ONE HPS sector and
-      // hands back 512 bytes. The CD addresses the same units as the disk, so
-      // there is no scaling here any more -- that <<2 is what hung the Plus.
+      // Test 6: a READ of ONE 2048-byte logical block must pull FOUR
+      // consecutive 512-byte HPS sectors and hand back 2048 bytes. This is
+      // the lba/tlen <<2 scaling -- the single most load-bearing line in the
+      // CD data path.
       // ==================================================================
       io_rd_count = 0;
       select_target;
-      // READ(6) logical block 100 -> HPS sector 100
+      // READ(6) logical block 100 -> HPS sectors 400..403
       send_cdb(8'h08,8'h00,8'h00,8'd100,8'h01,8'h00,0,0,0,0,0,0, 6);
       read_data_phase(2048);
       finish_command;
       begin : t6
          integer sec;
-         ok = (!timed_out) && (buf_len == 512) && (status_byte == 8'h00)
-              && (io_rd_count == 1);
+         ok = (!timed_out) && (buf_len == 2048) && (status_byte == 8'h00)
+              && (io_rd_count == 4);
          if (ok)
-            for (i = 0; i < 512; i = i + 1) begin
-               sec = 100 + (i / 512);
+            for (i = 0; i < 2048; i = i + 1) begin
+               sec = 400 + (i / 512);
                expect_byte = sec[7:0] ^ (i % 512);
                if (buf_in[i] !== expect_byte) begin
                   if (ok) $display("       first mismatch at %0d: got %02x want %02x",
@@ -580,24 +578,24 @@ module tb_scsi_cdrom;
          if (!ok) $display("       (len=%0d status=%02x fetches=%0d)",
                            buf_len, status_byte, io_rd_count);
       end
-      report(ok, "cd6 - READ(6) of one 512-block = 1 HPS sector, byte-exact");
+      report(ok, "cd6 - READ(6) of one 2048-block = 4 HPS sectors, byte-exact");
 
       // ==================================================================
       // Test 7: multi-block READ(10), the form a real driver uses.
       // ==================================================================
       io_rd_count = 0;
       select_target;
-      // READ(10) logical block 50, length 3 -> HPS sectors 50..52, 1536 bytes
+      // READ(10) logical block 50, length 3 -> HPS sectors 200..211, 6144 bytes
       send_cdb(8'h28,8'h00,8'h00,8'h00,8'h00,8'd50,8'h00,8'h00,8'd3,8'h00,0,0, 10);
       read_data_phase(6144);
       finish_command;
       begin : t7
          integer sec;
-         ok = (!timed_out) && (buf_len == 1536) && (status_byte == 8'h00)
-              && (io_rd_count == 3);
+         ok = (!timed_out) && (buf_len == 6144) && (status_byte == 8'h00)
+              && (io_rd_count == 12);
          if (ok)
-            for (i = 0; i < 1536; i = i + 1) begin
-               sec = 50 + (i / 512);
+            for (i = 0; i < 6144; i = i + 1) begin
+               sec = 200 + (i / 512);
                expect_byte = sec[7:0] ^ (i % 512);
                if (buf_in[i] !== expect_byte) begin
                   if (ok) $display("       first mismatch at %0d: got %02x want %02x",
@@ -608,7 +606,7 @@ module tb_scsi_cdrom;
          if (!ok) $display("       (len=%0d fetches=%0d timeout=%b)",
                            buf_len, io_rd_count, timed_out);
       end
-      report(ok, "cd7 - READ(10) multi-block, byte-exact and unscaled");
+      report(ok, "cd7 - READ(10) multi-block scales lba and length by 4");
 
       // ==================================================================
       // Test 8: Apple READ TOC (0xC1) operation 00 -> first/last track.
@@ -713,12 +711,12 @@ module tb_scsi_cdrom;
               && (buf_in[0] === 8'd35)    // mode data length
               && (buf_in[2] === 8'h80)    // write protected
               && (buf_in[3] === 8'd8)     // block descriptor length
-              && (buf_in[10] === 8'h02)   // block length 512
+              && (buf_in[10] === 8'h08)   // block length 2048
               && (buf_in[12] === 8'h30);  // page code
          for (i = 0; i < 13; i = i + 1)
             if (buf_in[14+i] !== magic[i]) ok = 0;
       end
-      report(ok, "cd13 - MODE SENSE page 30: WP, 512 blocks, Apple magic page");
+      report(ok, "cd13 - MODE SENSE page 30: WP, 2048 blocks, Apple magic page");
       if (!ok) $display("       (len=%0d b0=%02x b2=%02x b10=%02x b12=%02x)",
                         buf_len, buf_in[0], buf_in[2], buf_in[10], buf_in[12]);
 
@@ -853,14 +851,12 @@ module tb_scsi_cdrom;
       //
       // rd_cur_unfilled is the guard that should make this impossible. This
       // case exists to find out why it does not. Reproducing it needs a
-      // transfer longer than RING_BLOCKS -- 48 CD blocks = 48 sectors wraps
-      // the 32-sector ring once, like the real 188-sector read did. (It was
-      // 12 blocks when a block was 2048 bytes; the SECTOR count is what has
-      // to exceed the ring, so the block count scales with the block size.)
+      // transfer longer than RING_BLOCKS -- 12 CD blocks = 48 sectors wraps
+      // the 32-sector ring once, like the real 188-sector read did.
       // ==================================================================
       select_target;
-      // READ(10), lba 1000, 48 blocks = 24576 bytes = 48 HPS sectors
-      send_cdb(8'h28,8'h00,8'h00,8'h00,8'h03,8'he8,8'h00,8'h00,8'h30,8'h00,0,0, 10);
+      // READ(10), lba 1000, 12 blocks = 24576 bytes = 48 HPS sectors
+      send_cdb(8'h28,8'h00,8'h00,8'h00,8'h03,8'he8,8'h00,8'h00,8'h0c,8'h00,0,0, 10);
       read_data_phase(24576);
       finish_command;
       begin : t38a
@@ -868,7 +864,7 @@ module tb_scsi_cdrom;
          ok = (!timed_out) && (buf_len == 24576) && (status_byte == 8'h00);
          if (ok)
             for (i2 = 0; i2 < 24576; i2 = i2 + 1) begin
-               sec2 = 1000 + (i2 / 512);
+               sec2 = 4000 + (i2 / 512);
                expect_byte = sec2[7:0] ^ (i2 % 512);
                if (buf_in[i2] !== expect_byte) begin
                   if (ok) $display("       long read first mismatch at %0d: got %02x want %02x",
@@ -884,16 +880,16 @@ module tb_scsi_cdrom;
       // sector 33 of the transfer above; if the new command is let into it
       // early, these bytes are that leftover.
       select_target;
-      // READ(6), lba 2000, 2 blocks = 1024 bytes
+      // READ(6), lba 2000, 2 blocks = 4096 bytes
       send_cdb(8'h08,8'h00,8'h07,8'hd0,8'h02,8'h00,0,0,0,0,0,0, 6);
       read_data_phase(4096);
       finish_command;
       begin : t38b
          integer i3, sec3;
-         ok = (!timed_out) && (buf_len == 1024) && (status_byte == 8'h00);
+         ok = (!timed_out) && (buf_len == 4096) && (status_byte == 8'h00);
          if (ok)
-            for (i3 = 0; i3 < 1024; i3 = i3 + 1) begin
-               sec3 = 2000 + (i3 / 512);
+            for (i3 = 0; i3 < 4096; i3 = i3 + 1) begin
+               sec3 = 8000 + (i3 / 512);
                expect_byte = sec3[7:0] ^ (i3 % 512);
                if (buf_in[i3] !== expect_byte) begin
                   if (ok) $display("       STALE at %0d: got %02x want %02x (slot %0d)",
@@ -1381,10 +1377,10 @@ module tb_scsi_cdrom;
       begin : cd36
          integer bad;
          bad = 0;
-         // READ(10) at CD_BLOCKS (729968 = 0x000B2370) -- one past the last
+         // READ(10) at CD_BLOCKS (182492 = 0x0002C8DC) -- one past the last
          // valid logical block -- for 1 block.
          select_target;
-         send_cdb(8'h28,8'h00,8'h00,8'h0b,8'h23,8'h70,8'h00,8'h00,8'h01,8'h00,0,0, 10);
+         send_cdb(8'h28,8'h00,8'h00,8'h02,8'hc8,8'hdc,8'h00,8'h00,8'h01,8'h00,0,0, 10);
          finish_command;
          if (timed_out || (status_byte !== 8'h02)) begin
             $display("       status %h timeout %b, expected CHECK CONDITION",
@@ -1398,19 +1394,19 @@ module tb_scsi_cdrom;
       report(ok, "cd36 - an out-of-range CD read is refused with 05/21");
 
       // --- cd37: and the LAST valid CD block still reads ---------------------
-      // The guard in the other direction. A bounds check that is itself off by
-      // one here would truncate every disc by one logical block -- 512 bytes
-      // off the end of the last file on the volume.
+      // The guard in the other direction, in 2048-byte units. A bounds check
+      // that is itself off by one here would truncate every disc by one logical
+      // block -- 2 KB off the end of the last file on the volume.
       begin : cd37
          integer bad;
          bad = 0;
-         // READ(10) at CD_CAP (729967 = 0x000B236F), 1 block
+         // READ(10) at CD_CAP (182491 = 0x0002C8DB), 1 block
          select_target;
-         send_cdb(8'h28,8'h00,8'h00,8'h0b,8'h23,8'h6f,8'h00,8'h00,8'h01,8'h00,0,0, 10);
+         send_cdb(8'h28,8'h00,8'h00,8'h02,8'hc8,8'hdb,8'h00,8'h00,8'h01,8'h00,0,0, 10);
          read_data_phase(2048);
          finish_command;
-         if (timed_out || (status_byte !== 8'h00) || (buf_len != 512)) begin
-            $display("       status %h len %0d timeout %b, expected GOOD / 512",
+         if (timed_out || (status_byte !== 8'h00) || (buf_len != 2048)) begin
+            $display("       status %h len %0d timeout %b, expected GOOD / 2048",
                      status_byte, buf_len, timed_out); bad = bad + 1; end
          ok = (bad == 0);
       end
@@ -1480,17 +1476,13 @@ module tb_scsi_cdrom;
       end
       report(ok, "cd38 - abandoning a data phase must not strand the target");
 
-      // --- cd39: a Mac reset must NOT empty the drive -----------------------
-      // The INVERSE of what this test asserted between f254ffd and the block
-      // size fix. That revision emptied the drive on sys_rst so the Plus ROM
-      // could not boot-scan a mounted CD and hang. The hang was ours -- the ROM
-      // walks the partition map in the 512-byte units the disc declares, and we
-      // were serving 2048 -- so the workaround is gone and the disc stays in.
-      //
-      // A real AppleCD SC kept its caddy across a Mac reset: a bus reset yields
-      // UNIT ATTENTION, not an eject; an external drive is not power-cycled by
-      // a Mac reset; and the Plus ROM has no CD driver to command one with.
-      // See CD_BLOCK_SIZE_PLAN.md and cd41.
+      // --- cd39: a Mac reset must EMPTY the drive ---------------------------
+      // The fix for the 2026-08-28 boot hang. The ROM's driver-load pump has no
+      // escape, so the only workable intervention is that the disc is not there
+      // during the boot scan at all -- which is also the documented workaround
+      // for REAL hardware ("empty the drive before turning on the computer").
+      // Must key on sys_rst (the CPU/system reset), NOT the SCSI bus reset: a
+      // driver may bus-reset during error recovery and that must not eject.
       begin : cd39
          integer bad;
          bad = 0;
@@ -1509,41 +1501,21 @@ module tb_scsi_cdrom;
          sys_rst = 1'b0;
          repeat (8) begin @(posedge clk); #1; end
 
-         if (!dut.mounted) begin
-            $display("       cd39: sys_rst ejected the disc -- it must not");
+         // the drive must now read as EMPTY, which is what stops the ROM
+         // ever finding a driver descriptor to load.
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+         if (status_byte !== 8'h02) begin
+            $display("       cd39: TUR=%h after reset, expected 02 CHECK", status_byte);
             bad = bad + 1;
          end
-
-         // sys_rst also resets the CD audio engine, which clears toc_ready.
-         // The engine re-fetches the TOC on its own while the disc stays
-         // mounted (cd_audio.sv: `mounted && !toc_ready`), but that is an HPS
-         // round-trip, so the drive reports NOT READY for a while first. What
-         // matters is that it comes back WITHOUT a re-mount -- otherwise the
-         // disc is still effectively gone after a reset and the boot scan is no
-         // better off than it was under f254ffd.
-         begin : cd39_wait
-            integer guard;
-            guard = 0;
-            while (!dut.ca_toc_ready && guard < 20000) begin
-               @(posedge clk); #1;
-               guard = guard + 1;
-            end
-            if (!dut.ca_toc_ready) begin
-               $display("       cd39: TOC never re-armed after sys_rst (%0d cycles)", guard);
-               bad = bad + 1;
-            end else
-               $display("       cd39: TOC re-armed by itself %0d cycles after reset", guard);
-         end
-
-         // and now the disc reads as present again, with no re-mount
-         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
-         if (status_byte !== 8'h00) begin
-            $display("       cd39: TUR=%h once ready, expected 00 GOOD", status_byte);
+         if (dut.mounted) begin
+            $display("       cd39: dut.mounted still set after sys_rst");
             bad = bad + 1;
          end
          ok = (bad == 0);
+         mount_image(IMG_BLOCKS);   // restore for anything after this
       end
-      report(ok, "cd39 - a Mac reset does NOT eject the disc");
+      report(ok, "cd39 - a Mac reset empties the CD drive");
 
       // --- cd40: a SCSI BUS reset must NOT eject --------------------------
       // The other half. Error recovery bus-resets are routine; if they ejected
