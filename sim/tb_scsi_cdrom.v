@@ -1533,6 +1533,45 @@ module tb_scsi_cdrom;
       end
       report(ok, "cd40 - a SCSI bus reset does NOT eject the disc");
 
+      // --- cd41: the ROM's partition-map walk -----------------------------
+      // Inside Macintosh (SCSI Manager): the Start Manager reads block 0, takes
+      // the block size from the driver descriptor's sbBlkSize field, and reads
+      // "each block in the partition map" in THOSE units.
+      //
+      // A Mac CD declares sbBlkSize = 512 and puts its 'PM' partition entries
+      // at byte offsets 512 and 1024 -- measured on the System 7.1 ISO that
+      // hangs the Plus. So logical block 1 MUST be HPS sector 1.
+      //
+      // Serving 2048-byte logical blocks maps block 1 to HPS sector 4 instead.
+      // On a real disc that region is zero-filled, the ROM reads zeros where a
+      // partition entry belongs, and its pseudo-DMA pump at $41740A -- which
+      // has no timeout, no error test and no phase test -- spins forever.
+      //
+      // This is the hang, encoded. See CD_BLOCK_SIZE_PLAN.md.
+      mount_image(IMG_BLOCKS);
+      io_rd_count = 0;          // after the mount, so this counts the READ only
+      select_target;
+      // READ(6) logical block 1, one block
+      send_cdb(8'h08,8'h00,8'h00,8'h01,8'h01,8'h00,0,0,0,0,0,0, 6);
+      read_data_phase(2048);
+      finish_command;
+      begin : t41
+         ok = (!timed_out) && (buf_len == 512) && (status_byte == 8'h00)
+              && (io_rd_count == 1);
+         if (ok)
+            for (i = 0; i < 512; i = i + 1) begin
+               expect_byte = 8'd1 ^ (i % 512);
+               if (buf_in[i] !== expect_byte) begin
+                  if (ok) $display("       first mismatch at %0d: got %02x want %02x",
+                                   i, buf_in[i], expect_byte);
+                  ok = 0;
+               end
+            end
+         if (!ok) $display("       (len=%0d status=%02x fetches=%0d) - block 1 must be HPS sector 1",
+                           buf_len, status_byte, io_rd_count);
+      end
+      report(ok, "cd41 - logical block 1 is HPS sector 1 (ROM partition-map walk)");
+
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);
       $display("");
