@@ -270,3 +270,62 @@ Any initiator that resets the bus now gets a CHECK CONDITION on its next command
 That is correct SCSI and every real driver handles it, but it made five CD tests
 and `seam17` fail until the benches learned to absorb it (`swallow_ua`). On
 hardware the same applies to anything that bus-resets during error recovery.
+
+---
+
+# RESOLVED 2026-08-29 (`40f2e1c1`): spin-up NOT READY works
+
+**Hardware-confirmed by the user.** The Mac boots with a CD mounted, **retains the
+mount across a reset**, and CD audio still plays.
+
+Healthy probe capture on `40F2E1C1`, the baseline this path never had:
+
+```
+PIFA  PC=00E6EA                 <- in RAM running the OS, not the ROM pump loop
+PIOS  cd fetch stuck=0  win=audio  lba=65578   <- CD-DA actively served
+PIO2  cd rd=45 ack=45   disk0 rd=49
+PHLD  holds=0  longest=0  breaches=0 (good)
+PDMA  watchdog bus=0 io-stall=0
+      phases: IDLE CMD DATA>init(READ) STATUS MESSAGE
+PDM2  phase ring: IDLE MESSAGE STATUS DATA>init(READ) CMD IDLE MESSAGE STATUS
+```
+
+Every marker of the old wedge is absent: no watchdog fires, transactions reach
+MESSAGE and return to IDLE, and the CPU is in RAM rather than looping at
+`$41740A`. `win=audio` independently confirms the CD-DA path is live.
+
+## What actually fixed it, and why the first two attempts did not
+
+| attempt | build | result |
+|---|---|---|
+| 512-byte logical blocks | `7fc96906` | boot **fixed**, mounting **broken** -- ISO 9660 is defined in 2048-byte sectors |
+| UNIT ATTENTION | `eea855d6` | **no change** -- cleared by the command that reports it, so the ROM retried straight through |
+| **spin-up NOT READY** | **`40f2e1c1`** | **works** |
+
+The property that mattered is **persistence**. UNIT ATTENTION is consumed by
+being reported, so a single retry defeats it. NOT READY is not, so the ROM's scan
+sees it on every attempt and moves to the next ID.
+
+And the mechanism was never speculative: `f254ffd` already proved on hardware
+that NOT READY makes the ROM skip the CD and boot. This changed only the
+*duration* -- a ~4.1 s spin-up window rather than until the user re-mounts -- and
+the sense code, `02/04` becoming-ready instead of `02/B0` no-medium. The block
+size stays 2048, so ISO 9660 mounting is untouched.
+
+It is also what the hardware did: a caddy drive took seconds to spin up and read
+its TOC, and reported exactly this throughout.
+
+## What this supersedes
+
+* **`f254ffd` (empty the drive on reset) is no longer needed.** The disc now
+  stays in the drive, which is what a real AppleCD SC did.
+* The 512-byte branch `cd-512-blocks` is a dead end, kept for its record.
+* Every "the ROM's arithmetic is right and our block size is wrong" conclusion in
+  the first half of this document is **correct about the mechanism** but was the
+  wrong thing to change: the ROM should never have got as far as reading block 0.
+
+## Still outstanding
+
+The rest of the smoke test has not been run: a byte-exact CD -> disk copy (the
+one that proves 2048-byte data reads are unregressed), Lode Runner against the
+3C/3D audio baseline, and floppy write.

@@ -4,7 +4,14 @@ Written 2026-08-28. Branch `scsi-upgrade`.
 
 > **STATUS 2026-08-29 -- READ THIS FIRST. The body below is superseded in part.**
 >
-> * **#1 CD-at-boot hang: root-caused and re-fixed.** `f254ffd` (empty the drive
+> * **#1 CD-at-boot hang: FIXED PROPERLY, hardware-confirmed 2026-08-29
+>   (`40f2e1c1`).** The CD now reports NOT READY for a ~4.1 s spin-up window
+>   after a reset, exactly as a real caddy drive did, so the ROM's boot scan
+>   moves on without ever reading block 0. The disc STAYS IN the drive and the
+>   block size stays 2048, so mounting and CD audio are unaffected. `f254ffd`'s
+>   reset-eject is no longer needed. Details in `CD_BLOCK_SIZE_PLAN.md`.
+>
+> * *(superseded)* **#1 root-caused and re-fixed.** `f254ffd` (empty the drive
 >   on a Mac reset) stopped the hang and is hardware-confirmed, but it is a
 >   **workaround**. The real defect is ours: we served 2048-byte logical blocks
 >   while a Mac CD declares `sbBlkSize = 512` and lays its partition map out in
