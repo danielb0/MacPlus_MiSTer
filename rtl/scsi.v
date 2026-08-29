@@ -1110,6 +1110,39 @@ always @(posedge clk) begin
 	else if (new_cmd && cd_unit_attn_rej) cd_unit_attn <= 1'b0;
 end
 
+// ---- Spin-up: NOT READY for a while after a reset -----------------------
+// UNIT ATTENTION above is correct SCSI but it did NOT stop the ROM. Measured
+// on hardware (eea855d6): the same wedge as before, same `PIOS lba=1024`, same
+// phase list stopping at STATUS. It is cleared by the command that reports it,
+// so the ROM retried, read block 0, walked the partition map and hung.
+//
+// A real caddy drive takes SECONDS after power-on or a reset to spin the disc
+// up and read its TOC, reporting NOT READY / ASC 0x04 ("logical unit is in
+// process of becoming ready") throughout. That condition is PERSISTENT -- not
+// consumed by being reported -- which is exactly the property UNIT ATTENTION
+// lacked. The Plus boot scan runs a second or two after reset, so a real drive
+// was not ready for any of it and the ROM moved on to the next ID.
+//
+// The block size stays 2048, so ISO 9660 mounting is untouched. The 512-byte
+// build (7fc96906) fixed the hang and broke mounting instead: the driver reads
+// 18 blocks from LBA 0 for the Primary Volume Descriptor at sector 16, which
+// is only reachable at 2048 bytes a block. See CD_BLOCK_SIZE_PLAN.md.
+//
+// Deliberately NOT armed by img_mounted. A real drive spins up on insertion
+// too, but that path is already gated by ca_toc_ready, and a multi-second
+// stall on mount-after-boot would be a user-visible regression for no benefit.
+// The reset is what the boot scan sees, and it is all we need.
+//
+// INQUIRY is not gated (it is not in cd_needs_media): a real drive identifies
+// itself while the disc is still coming up.
+reg  [SPINUP_LOG:0] cd_spinup = 0;
+wire cd_spinning_up = (CDROM != 0) && !cd_spinup[SPINUP_LOG];
+wire cd_spinup_rej  = cd_spinning_up && cd_needs_media;
+always @(posedge clk) begin
+	if (any_rst)                     cd_spinup <= 0;
+	else if (!cd_spinup[SPINUP_LOG]) cd_spinup <= cd_spinup + 1'd1;
+end
+
 // READ HEADER in MSF form: rejected (see cd_hdr_byte).
 wire  cd_hdr_msf_rej = cmd_cd_hdr && cmd[1][1];
 
@@ -1228,6 +1261,9 @@ always @(posedge clk) begin
 		if (cd_unit_attn_rej) begin
 			sense_key <= 4'h6;  // UNIT ATTENTION
 			sense_asc <= 8'h29; // power on, reset, or bus device reset occurred
+		end else if (cd_spinup_rej) begin
+			sense_key <= 4'h2;  // NOT READY
+			sense_asc <= 8'h04; // logical unit is in process of becoming ready
 		end else if (!cmd_ok) begin
 			sense_key <= 4'h5;  // ILLEGAL REQUEST
 			sense_asc <= 8'h20; // invalid command operation code
@@ -1321,6 +1357,7 @@ wire [15:0] tlen10 = { cmd[7], cmd[8] };
 // WDOG_LOG is overridden down to a few thousand cycles by the testbenches so the
 // recovery can be exercised in reasonable sim time. The timeout VALUE is not the
 // thing under test -- the recovery behaviour is.
+parameter SPINUP_LOG = 27;              // 2^27 clks @32.5MHz = ~4.1 s spin-up
 parameter WDOG_LOG = 22;               // 2^22 clks @32.5MHz = ~129 ms
 
 // ---- IO-stall watchdog ----------------------------------------------------
@@ -1422,7 +1459,7 @@ always @(posedge clk) begin
 				// is this a supported and valid command?
 				// (CDROM: media-dependent commands CHECK with the no-disc sense
 				// while unmounted, and a prevent-blocked EJECT CHECKs too.)
-				if(cmd_ok && !cd_no_media && !cd_audio_read_rej && !cd_hdr_msf_rej && !lba_out_of_range && !cd_unit_attn_rej) begin
+				if(cmd_ok && !cd_no_media && !cd_audio_read_rej && !cd_hdr_msf_rej && !lba_out_of_range && !cd_unit_attn_rej && !cd_spinup_rej) begin
 					// yes, continue
 					status <= (cmd_cd_eject_any && cd_prevent) ? `STATUS_CHECK_CONDITION : `STATUS_OK;
 

@@ -57,7 +57,7 @@ module tb_scsi_cdrom;
 
    localparam [2:0] TARGET_ID = 3'd3;   // AppleCD SC factory default
 
-   scsi #(.ID(TARGET_ID), .CDROM(1), .WDOG_LOG(11)) dut   // ~20us watchdog for sim (bench guards are 4000 clks)
+   scsi #(.ID(TARGET_ID), .CDROM(1), .WDOG_LOG(11), .SPINUP_LOG(11)) dut   // ~20us watchdog for sim (bench guards are 4000 clks)
    (
       .clk(clk),
 
@@ -173,7 +173,7 @@ module tb_scsi_cdrom;
          repeat (4) @(posedge clk);
          hps_enable = 1'b1;
          @(posedge clk);
-         swallow_ua;
+         wait_ready;   // absorbs the UA and waits out the spin-up
       end
    endtask
 
@@ -184,6 +184,25 @@ module tb_scsi_cdrom;
    task swallow_ua;
       begin
          simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+      end
+   endtask
+
+   // A reset also spins the drive up, and that condition is PERSISTENT -- it is
+   // not cleared by being reported, which is the whole point of it. Poll TEST
+   // UNIT READY until the drive answers GOOD, bounded, the way a real driver
+   // waits for a disc to come up.
+   task wait_ready;
+      begin : wr
+         integer k;
+         k = 0;
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+         while ((status_byte !== 8'h00) && (k < 400)) begin
+            repeat (64) begin @(posedge clk); #1; end
+            simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+            k = k + 1;
+         end
+         if (status_byte !== 8'h00)
+            $display("       WARNING: wait_ready gave up, TUR=%h", status_byte);
       end
    endtask
 
@@ -1527,6 +1546,7 @@ module tb_scsi_cdrom;
             $display("       cd39: TUR=%h after sys_rst, expected 02 CHECK", status_byte);
             bad = bad + 1;
          end
+         wait_ready;
          ok = (bad == 0);
       end
       report(ok, "cd39 - a Mac reset raises UNIT ATTENTION and keeps the disc");
@@ -1544,7 +1564,7 @@ module tb_scsi_cdrom;
          repeat (8) begin @(posedge clk); #1; end
          ok = dut.mounted;
          if (!ok) $display("       cd40: a BUS reset ejected the disc -- it must not");
-         swallow_ua;    // the reset above raised one; do not leak it into cd41
+         wait_ready;    // the reset above raised a UA and a spin-up; absorb both
       end
       report(ok, "cd40 - a SCSI bus reset does NOT eject the disc");
 
@@ -1595,6 +1615,7 @@ module tb_scsi_cdrom;
                      buf_in[2], buf_in[12]);
             bad = bad + 1;
          end
+         wait_ready;
          ok = (bad == 0);
       end
       report(ok, "cd41 - a reset raises UNIT ATTENTION, and does NOT eject");
@@ -1630,15 +1651,90 @@ module tb_scsi_cdrom;
             bad = bad + 1;
          end
 
-         // now it IS consumed: the next command succeeds
+         // The UA is consumed -- but the reset ALSO spun the drive up, so the
+         // next command reports NOT READY / 04 instead. Seeing the sense change
+         // from 06/29 to 02/04 is what proves the UA cleared rather than stuck.
+         // The TUR here is what LATCHES that new sense: REQUEST SENSE reports
+         // the previous command's condition, so without it we would read back
+         // the UA we just consumed and conclude it was sticky.
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+         get_sense;
+         if ((buf_in[2] !== 8'h02) || (buf_in[12] !== 8'h04)) begin
+            $display("       cd42: sense %h/%h after the UA, expected 02/04 -- the UA is sticky and the drive is unusable",
+                     buf_in[2], buf_in[12]);
+            bad = bad + 1;
+         end
+
+         // and once spun up it works normally
+         wait_ready;
          simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
          if (status_byte !== 8'h00) begin
-            $display("       cd42: TUR=%h on the second try, expected 00 GOOD -- the UA is sticky and the drive is unusable", status_byte);
+            $display("       cd42: TUR=%h once ready, expected 00 GOOD", status_byte);
             bad = bad + 1;
          end
          ok = (bad == 0);
       end
       report(ok, "cd42 - UNIT ATTENTION reports once; INQUIRY is exempt");
+
+      // --- cd43: after a reset the drive is SPINNING UP --------------------
+      // UNIT ATTENTION did not stop the ROM (hardware, eea855d6: same wedge,
+      // same PIOS lba=1024, same phases stopping at STATUS) because it is
+      // cleared by the command that reports it and the ROM simply retried.
+      //
+      // A real caddy drive takes SECONDS after power-on or reset to spin the
+      // disc up and read its TOC, reporting NOT READY / 04 throughout. That
+      // condition is PERSISTENT -- retrying does not clear it -- which is the
+      // property UNIT ATTENTION lacked. The boot scan runs a second or two
+      // after reset, so a real drive was not ready for the whole of it.
+      //
+      // The block size stays 2048, so ISO 9660 mounting is untouched.
+      begin : cd43
+         integer bad, k;
+         bad = 0;
+         mount_image(IMG_BLOCKS);
+         rst = 1'b1;
+         repeat (4) begin @(posedge clk); #1; end
+         rst = 1'b0;
+         repeat (8) begin @(posedge clk); #1; end
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);  // the UA reports first, and clears
+
+         // NOT READY, and it must SURVIVE retries -- this is the whole point
+         for (k = 0; k < 3; k = k + 1) begin
+            simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+            if (status_byte !== 8'h02) begin
+               $display("       cd43: retry %0d TUR=%h, expected 02 CHECK -- a retry cleared it, which is what killed UNIT ATTENTION", k, status_byte);
+               bad = bad + 1;
+            end
+         end
+         get_sense;
+         if ((buf_in[2] !== 8'h02) || (buf_in[12] !== 8'h04)) begin
+            $display("       cd43: sense %h/%h, expected 02/04 becoming-ready",
+                     buf_in[2], buf_in[12]);
+            bad = bad + 1;
+         end
+
+         // INQUIRY is NOT gated by spin-up: a real drive identifies itself
+         // while the disc is still coming up.
+         select_target;
+         send_cdb(8'h12,8'h00,8'h00,8'h00,8'h36,8'h00,0,0,0,0,0,0, 6);
+         read_data_phase(54);
+         finish_command;
+         if (status_byte !== 8'h00) begin
+            $display("       cd43: INQUIRY=%h while spinning up, expected 00 GOOD",
+                     status_byte);
+            bad = bad + 1;
+         end
+
+         // ...and once it has spun up, the drive works normally
+         wait_ready;
+         simple_cmd6(8'h00,8'h00,8'h00,8'h00,8'h00,8'h00);
+         if (status_byte !== 8'h00) begin
+            $display("       cd43: TUR=%h after spin-up, expected 00 GOOD -- the drive never became ready", status_byte);
+            bad = bad + 1;
+         end
+         ok = (bad == 0);
+      end
+      report(ok, "cd43 - a reset spins the drive up: NOT READY 02/04, and it persists");
 
       $display("");
       $display("PHASE 2 CD-ROM: %0d of %0d failing", cd_fail, cd_total);

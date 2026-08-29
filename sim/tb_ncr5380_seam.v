@@ -72,7 +72,8 @@ module tb_ncr5380_seam;
 
 	// WDOG_LOG(11) ~= 20us and IOWDOG_LOG(14) ~= 0.5ms, so both timeouts are
 	// reachable in simulation. Synthesis keeps the real 129ms / 516ms periods.
-	ncr5380 #(.DEVS(DEVS), .CD_DEV(CD_DEV), .WDOG_LOG(11), .IOWDOG_LOG(14)) dut (
+	ncr5380 #(.DEVS(DEVS), .CD_DEV(CD_DEV), .WDOG_LOG(11), .IOWDOG_LOG(14),
+	          .SPINUP_LOG(11)) dut (
 		.clk(clk), .reset(reset),
 		.bus_cs(bus_cs), .bus_rs(bus_rs), .ior(ior), .iow(iow),
 		.dack(dack), .dreq(dreq), .wdata(wdata), .rdata(rdata),
@@ -1301,6 +1302,12 @@ module tb_ncr5380_seam;
 			// cd_no_media wait immediately above.
 			begin : ua17
 				integer gu;
+				// the reset also spun the drive up; wait it out (persistent,
+				// unlike the UA below, so retrying would not help)
+				gu = 0;
+				while (dut.target[CD_DEV].target.cd_spinning_up && gu < 200000) begin
+					@(posedge clk); gu = gu + 1;
+				end
 				select_target(8'h08);
 				send_cmd_byte(8'h00); send_cmd_byte(8'h00);
 				send_cmd_byte(8'h00); send_cmd_byte(8'h00);

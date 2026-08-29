@@ -128,6 +128,8 @@ module ncr5380
 	parameter WDOG_LOG = 22;
 	// Stall timeout for an HPS fetch that never completes; see scsi.v.
 	parameter IOWDOG_LOG = 24;
+	// CD spin-up window; see the spin-up block in scsi.v.
+	parameter SPINUP_LOG = 27;
 
 	// The one definition of "the target is offering bytes for a data phase".
 	// Declared here because dreq, dma_ack, bsr_dmarq and bsr_eodma all key off
@@ -533,7 +535,8 @@ module ncr5380
 			// found before the CD, while a bootable CD still works when no disk
 			// is bootable. ID 3 is also the AppleCD SC factory default.
 			scsi #(.ID((i == CD_DEV) ? 3'd3 : (3'd6 - i[2:0])),
-			       .CDROM((i == CD_DEV) ? 1 : 0), .WDOG_LOG(WDOG_LOG), .IOWDOG_LOG(IOWDOG_LOG)) target
+			       .CDROM((i == CD_DEV) ? 1 : 0), .WDOG_LOG(WDOG_LOG), .IOWDOG_LOG(IOWDOG_LOG),
+			       .SPINUP_LOG(SPINUP_LOG)) target
 			(
 				.clk    ( clk ),
 				.rst    ( scsi_rst ),
