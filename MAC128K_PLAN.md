@@ -223,7 +223,7 @@ clue to how detection works.
 | 2 | Model selector 1 bit -> 2 bits, and `configROMSize` driven from it | `MacPlus.sv:89,134,620` | small |
 | 3 | `configRAMSize` reachable for 128K/512K | `MacPlus.sv:338` | trivial |
 | 4 | Couple RAM options to model (a 128K cannot have 4MB) | `MacPlus.sv:89,338` | small, mostly OSD |
-| 5 | Gate SCSI off for non-Plus models | `MacPlus.sv:632,694,1098` | small, but **likely required for the 64K models to boot at all** - see below |
+| 5 | Gate SCSI off for non-Plus models | `MacPlus.sv:632,694,1098` | small; accuracy only - the 64K ROM never looks, so it is not needed for booting |
 | 6 | Delete the dead `configROMSize` localparam | `MacPlus.sv:336` | trivial |
 | 7 | **Synthetic bus error for the unmapped SCSI window** | `MacPlus.sv:489,548,600` | **real work** - blocks an authentic 512Ke |
 | 8 | Refuse 800K images in 128K/512K mode | `MacPlus.sv:965-1013` | small - a 400K-only drive cannot take one |
@@ -251,12 +251,27 @@ software crash or spin -- authentic. Frozen means the CPU is stalled mid-access,
 so a bus wedge -- ours. The visible symptom sorts it too: a bomb box or Sad Mac
 is software; a silent hang with no disk activity is a wedge.
 
-**Why it matters to this plan.** If authentic, gating SCSI off for the 64K
-models is not cosmetic -- it is what makes them **usable**, since a 128K or 512K
-running System 1.x with our SCSI present would hit this on every boot. That is
-also self-consistent: a real 128K had no SCSI, so System 1.1 never met this
-problem on the machine it shipped with. Item 5 is promoted accordingly, and is
-scheduled in Phase 3 where it belongs rather than deferred to Phase 4.
+**Why it does NOT matter to the 64K models** -- correcting a claim made in this
+plan and withdrawn the same day. It was argued that this makes gating SCSI off
+**usable** rather than merely accurate, on the grounds that a 128K running
+System 1.x would hit it on every boot. That contradicts this plan's own stated
+assumption. If the 64K ROM has no SCSI Manager, it never scans the bus, never
+loads a driver from the disk's driver descriptor map, and never mounts the
+volume -- so the Finder is never handed anything to choke on. The mount is the
+ROM's doing, not the System's. A 128K should boot System 1.x cleanly with our
+SCSI hardware still present.
+
+Item 5 therefore stands on **accuracy** grounds only. It stays in Phase 3
+regardless, because it is small and belongs with the models it applies to.
+
+The self-consistency argument survives in a stronger form: a real 128K was safe
+from this not merely because it lacked SCSI hardware, but because its ROM would
+not have touched a SCSI disk even if one had been attached.
+
+This also gives the Phase 2 falsification test a second job. Booting the 64K ROM
+with SCSI still enabled now tests the no-SCSI-Manager assumption *and* predicts
+a clean boot with an HFS disk mounted. One test, both confirmations -- and if it
+fails, both claims fall together.
 
 ## Open questions
 
