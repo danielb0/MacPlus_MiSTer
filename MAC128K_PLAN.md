@@ -122,9 +122,11 @@ Two candidate approaches, to be decided in Phase 2 rather than now:
   overlap and could share one slot, loaded from one combined file. Costs no
   SDRAM but couples two unrelated images into one download.
 
-Which to choose depends partly on whether the family needs one 64K image or two
-(see "The ROM images exist" below). Widening is the safer default: it costs only
-reserved SDRAM and does not care about the answer.
+Widening is the recommendation. The diff evidence below says one extra slot
+(`boot2.rom`) is very likely enough, since the two 64K images differ only by a
+floppy-driver revision and an interrupt-mask fix -- so let the user choose which
+image goes in that slot. Widening also does not care if that inference turns out
+wrong: a second extra slot is then just one more index value.
 
 Note also that `MacPlus.sv:336` declares `localparam configROMSize = 1'b1;` and
 **never references it** - line 620 passes a literal concat instead. Dead code;
@@ -143,12 +145,38 @@ delete it while in the area, before it misleads someone.
 `4D1F8172` (Plus v3) is the image already in `releases/boot0.rom`, per
 `CD_BLOCK_SIZE_PLAN.md`.
 
-**Open, and it sizes the ROM-slot work:** are those two 64K images
-machine-specific, or simply successive revisions that both run on both machines?
-Their dates (1984-01, 1984-10) match the 128K and 512K launches, and each is
-what shipped with its machine -- but the 64K ROM is not RAM-size-dependent, so
-either may well run on either. If one image suffices, one extra slot does too.
-Confirm before choosing a delivery scheme.
+**Are the two 64K images machine-specific? Almost certainly not -- diffed
+2026-09-03.** They differ by **57 bytes of 65536 (0.087%)** in five clusters:
+
+| offset | change | reading |
+|---|---|---|
+| 0x00002 | `61CE` -> `4E50` | the stored ROM checksum, expected |
+| 0x01CA6 | `66 4E` -> `60 36` | `BNE.S +$4E` -> `BRA.S +$36`, a conditional test removed |
+| 0x01D8B | `72 1F` -> `72 3F` | `MOVEQ #$1F,D1` -> `MOVEQ #$3F,D1` |
+| 0x01D9D-0x01DD5 | 2-byte insertion + shift | `MOVEQ #$1F,D1` inserted, a `MOVE.W` retargeted D1->D2, `#$52`->`#$50`, and `MOVEQ #0,D0 / BRA.S` replaced by `NOP`. Every downstream displacement moves by exactly 2, consistent with the insertion |
+| 0x05040 | `ORI #$0100,SR` -> `ORI #$0300,SR` | immediately after `MOVEA.L #$00EFE1FE,A1` (the VIA): raising the interrupt mask from level 1 to 3, so the SCC (level 2) can no longer interrupt a VIA access |
+
+The main cluster is inside the **`.Sony` floppy driver** -- the `.Sony` name
+string is at 0x016A3 and the IWM base constant `$00DFE1FF` at 0x01F2C, so
+0x01CA6-0x01DD5 lies between them.
+
+**The decisive part is what is absent.** Those 57 bytes are the *entire*
+difference, so this is a definitive claim and not a sample: **no memory-map
+constant differs anywhere in the ROM.** No changed screen base, no changed RAM
+top, no changed sizing table. A ROM hardcoding 512K rather than 128K would have
+to show one. So these are a floppy-driver revision plus an interrupt-masking
+race fix -- neither machine-specific -- and either image very likely runs on
+either machine.
+
+Unexplained: `#$1F` -> `#$3F`. That is the shape a size mask could take, but it
+is a doubling where 128K->512K is a factor of four, and it sits inside the
+floppy driver. Both argue against a memory reading. Inference from the diff, not
+a boot test; confirm in Phase 2.
+
+**Consequence for the design: one extra 64K slot is very likely sufficient**,
+with the user choosing which image goes in it rather than the core hardcoding a
+model->ROM pairing. The pairing is not clean-cut anyway -- a 128K sold in late
+1984 may well have shipped with the October ROM.
 
 The 512Ke needs no new image: it shipped the **same 128K ROM as the Plus**,
 which is consistent with every 128K image in the folder being Plus-labelled.
