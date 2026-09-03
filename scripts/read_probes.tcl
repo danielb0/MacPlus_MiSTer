@@ -147,6 +147,31 @@ for {set n 0} {$n < $samples} {incr n} {
 		puts [format "sample %d   bitstream=UNKNOWN -- this build has NO PBLD probe, so it predates ac38fc9" $n]
 	}
 	puts [format "  PIFA  fetch#%3d  PC=%06X      <- where the CPU is" $if_cnt $if_addr]
+	# PFLP = {maxTrack[6:0], curTrack[6:0], pwmMin[7:0], pwmMax[7:0], switched, motor}
+	# Packing mirrors rtl/floppy.v's dbg_floppy assign; keep the two in step.
+	# maxTrack is the HIGH-WATER mark since reset, not the live head position: by
+	# the time this is read the ROM has usually recalibrated back to track 0.
+	# Track 15/16 is the CLV zone-0/zone-1 boundary, which is the whole question
+	# for the 128K happy-Mac-then-"?" failure.
+	if {[have PFLP]} {
+		set pflp [b2i [rd PFLP]]
+		set f_max  [expr ($pflp >> 25) & 0x7F]
+		set f_cur  [expr ($pflp >> 18) & 0x7F]
+		set f_pmin [expr ($pflp >> 10) & 0xFF]
+		set f_pmax [expr ($pflp >>  2) & 0xFF]
+		set f_sw   [expr ($pflp >>  1) & 0x1]
+		set f_mot  [expr  $pflp        & 0x1]
+		set zone   [expr {$f_max / 16}]
+		puts [format "  PFLP  maxTrack=%2d (CLV zone %d)  curTrack=%2d  motor=%d  switched=%d" $f_max $zone $f_cur $f_mot $f_sw]
+		if {$f_pmin > $f_pmax} {
+			puts "  PFLP  spindle PWM: NEVER WRITTEN -- the Mac never drove the sound-buffer low byte"
+		} else {
+			puts [format "  PFLP  spindle PWM range %d..%d  (our map needs 50..219 to cover the CLV table)" $f_pmin $f_pmax]
+		}
+	} else {
+		set absent(PFLP) 1
+		puts "  PFLP  ABSENT from this bitstream -- predates the floppy telemetry probe."
+	}
 	puts [format "  PACT  bus cycles %d" $pact]
 	puts [format "  PSCS  last READ  reg=%-12s val=%02X  (reads:%d)" \
 	             [selstr $rd_sel r] $rd_val $rd_cnt]

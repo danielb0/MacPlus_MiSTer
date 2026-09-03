@@ -358,6 +358,7 @@ wire [1:0] configRAMSize;
 wire       machineType;
 wire [1:0] romSlot;
 wire       drive800k;
+wire [31:0] dbg_floppy;   // JTAG telemetry, see rtl/floppy.v
 
 mac_model mac_model
 (
@@ -768,6 +769,7 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	// mac_model's drive800k, straight through: the MEDIA gate above uses it
 	// too (MAC128K_PLAN.md item 8), but the ROM asks the DRIVE.
 	.drive800k(drive800k),
+	.dbg_floppy(dbg_floppy),
 	.diskEject(diskEject),
 	.dskReadAddrInt(dskReadAddrInt),
 	.dskReadAckInt(dskReadAckInt),
@@ -1177,7 +1179,8 @@ dbg_probes dbg_probes_inst
 	.d1_io_wr   ( scsi_sd_wr[1]           ),
 	.scsi_dbg   ( scsi_dbg                ),
 	.scsi_hold  ( scsi_bus_hold           ),
-	.scsi_breach( scsi_frontier_evt       )
+	.scsi_breach( scsi_frontier_evt       ),
+	.dbg_floppy ( dbg_floppy              )
 );
 `endif
 

@@ -88,6 +88,7 @@ module dataController_top(
 	input [1:0] insertDisk,
 	input [1:0] diskSides,
 	input drive800k, // drive MECHANISM: see floppy.v's port comment
+	output [31:0] dbg_floppy, // JTAG telemetry: see floppy.v
 	output [1:0] diskEject,
 	output [1:0] diskMotor,
 	output [1:0] diskAct,
@@ -514,6 +515,7 @@ module dataController_top(
 		.diskSides(diskSides),
 		.drive800k(drive800k),
 		.disk_pwm(disk_pwm),
+		.dbg_floppy(dbg_floppy),
 		.diskEject(diskEject),
 		.diskMotor(diskMotor),
 		.diskAct(diskAct),

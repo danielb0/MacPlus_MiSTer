@@ -725,6 +725,60 @@ into "it fails at the first track-16 read", which named the bug. `sim/`-side
 Python can read these images directly; MFS signature is `$D2D7` at offset 1024,
 boot block `$4C4B` at 0.
 
+### Instrumenting it: the PFLP probe (`dbg_floppy`)
+
+**The PWM-absolute map did not fix it either, and a 400K GAME disk fails the
+same way** -- so the fault is in the floppy read path, not the System disk, and
+not RAM capacity. Model under test is the **128K**.
+
+Between the working Plus and the failing 128K the floppy path now differs in
+exactly two things: `SIDES`, and the tach map. The tach must respond to the PWM
+or 0F0004 returns, and the fact that 0F0004 STAYED away proves the PWM byte is
+genuinely arriving. That leaves the map's **absolute calibration** as the live
+suspect -- ours needs pwm 50..219 to cover the CLV table, and if the ROM's real
+operating range is elsewhere it converges somewhere it will not accept.
+
+That is a number, not a theory, so stop guessing and measure it. Added a 20th
+probe, `PFLP`, carrying `rtl/floppy.v`'s new `dbg_floppy` bundle up through
+`iwm.v` and `dataController_top.sv`:
+
+```
+{maxTrack[6:0], curTrack[6:0], pwmMin[7:0], pwmMax[7:0], switched, motor}
+```
+
+- **maxTrack** is a HIGH-WATER mark, not the live head position -- by the time
+  a probe is read the ROM has recalibrated back to track 0. Track 15/16 is the
+  CLV zone-0/zone-1 boundary, so this single number confirms or kills the zone
+  theory outright.
+- **pwmMin/pwmMax** bracket the range the Mac's loop actually drove, which is
+  exactly what an invented PWM->period map has to be calibrated against. If
+  they read `NEVER WRITTEN`, the sound-buffer low byte is not reaching us at
+  all and everything above is moot.
+
+Decoded by `scripts/read_probes.tcl`, which degrades gracefully on older
+bitstreams (verified against the live board on `01A1AF72`: prints `PFLP ABSENT`
+and reads every other probe normally).
+
+**19 -> 20 instances, which is the documented ceiling.** Anything further needs
+a SCSI probe pruned first; `PDM3`/`PIO4`/`PIO3` are the least load-bearing.
+
+**Free finding from that live read.** `PIFA` had the CPU at `$400530` with
+`PACT` advancing, and disassembly shows exactly where that is:
+
+```
+$4004CE  movea.l #$10000, a1     ; boot blocks are read to $10000
+$4004D8  move.l  #$400, $24(a0)  ; 1024 bytes = logical blocks 0-1
+$400530  subq.l  #$1, d0         ; <- CPU here: 262144-iteration delay
+$400532  bne.b   $400530         ;    the "?" blink timer
+$400546  cmpi.w  #$4c4b, (a1)+   ; boot-block 'LK' signature
+$40054A  bne.b   $400500         ; not bootable -> animate and retry
+```
+
+So the machine is in the ROM's "read boot blocks, no 'LK', blink, retry" loop --
+alive and looping, not wedged, which matches the flashing icon and rules out a
+bus hang. Worth keeping: **the probe deck plus a local disassembly turns a PC
+into a named routine**, which is far stronger evidence than a symptom.
+
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
 model whose ROM probes -- then extend the gate to `configROMSize == 2'b00` so

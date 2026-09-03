@@ -108,6 +108,13 @@ module floppy
 	// SD persistence tap (Phase 4 of FLOPPY_WRITE_PLAN.md): mirrors the
 	// SDRAM commit above so a floppy_sd_writer instance outside this
 	// module can build a byte-exact shadow of the committed sector.
+	// Debug bundle for the JTAG deck (rtl/dbg_probes.sv). Costs a handful of
+	// LEs and is optimised away when nothing reads it. Exists because the
+	// 128K's floppy failure could not be narrowed further by inference: it
+	// reports HOW FAR the head got and WHAT PWM RANGE the Mac actually used,
+	// which together say whether the trouble is the CLV zone boundary or the
+	// absolute calibration of the PWM->speed map.
+	output [31:0] dbg_floppy,
 	output        dskCommitDone,   // one clk pulse: sector fully committed to SDRAM
 	output [21:0] dskCommitAddr,   // image byte offset of sector byte 0, valid at dskCommitDone
 	output        dskCommitBufWr,
@@ -503,6 +510,31 @@ module floppy
 			diskSwitched <= 1'b0;
 		end
 	end
+
+	// ---- debug telemetry (see the dbg_floppy port comment) ---------------
+	// maxTrack is a high-water mark, not the live track: by the time a probe
+	// is read the ROM has usually recalibrated back to track 0, so the live
+	// value says nothing about where it gave up. pwm min/max bracket the
+	// range the Mac's speed loop actually drove, which is what an invented
+	// PWM->period map has to be calibrated against.
+	reg [6:0] dbgMaxTrack;
+	reg [7:0] dbgPwmMin, dbgPwmMax;
+	reg       dbgSwitchedSeen;
+	always @(posedge clk or negedge _reset) begin
+		if (_reset == 1'b0) begin
+			dbgMaxTrack     <= 7'd0;
+			dbgPwmMin       <= 8'hFF;
+			dbgPwmMax       <= 8'h00;
+			dbgSwitchedSeen <= 1'b0;
+		end else if (cep) begin
+			if (driveTrack > dbgMaxTrack) dbgMaxTrack <= driveTrack;
+			if (disk_pwm  < dbgPwmMin)    dbgPwmMin   <= disk_pwm;
+			if (disk_pwm  > dbgPwmMax)    dbgPwmMax   <= disk_pwm;
+			if (diskSwitched)             dbgSwitchedSeen <= 1'b1;
+		end
+	end
+	assign dbg_floppy = {dbgMaxTrack, driveTrack, dbgPwmMin, dbgPwmMax,
+	                     dbgSwitchedSeen, motor};
 
 	//`define DRIVE_REG_STEP		2  /* R: drive head stepping (1 = complete) */
 												/* W: 0 = step drive head */

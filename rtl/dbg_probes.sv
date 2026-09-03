@@ -72,7 +72,13 @@ module dbg_probes (
 	// happened not to lag this time" -- a clean copy proves the second, not the
 	// first, and the two look identical from the guest.
 	input  wire        scsi_hold,
-	input  wire        scsi_breach
+	input  wire        scsi_breach,
+	// Floppy telemetry from the internal drive (rtl/floppy.v). Added for the
+	// 128K's happy-Mac-then-'?' failure, which stopped yielding to inference:
+	// maxTrack says whether it dies at the CLV zone boundary (track 16), and
+	// the PWM min/max bracket the range the ROM's speed loop actually drove,
+	// which is what an invented PWM->period map must be calibrated against.
+	input  wire [31:0] dbg_floppy
 );
 
 	wire dbg_bsy    = scsi_dbg[0];
@@ -626,6 +632,13 @@ module dbg_probes (
 		.instance_id ("PDM3"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
 	) cp_pdm3 (.probe(pdm3_r), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	// 20th instance, which is the ceiling noted above -- nothing further can
+	// be added without pruning one of the SCSI probes first.
+	altsource_probe #(
+		.instance_id ("PFLP"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_pflp (.probe(dbg_floppy), .source(), .source_clk(clk), .source_ena(1'b1));
 
 	altsource_probe #(
 		.instance_id ("PBLD"), .probe_width (32), .source_width (1),

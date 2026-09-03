@@ -55,6 +55,7 @@ module iwm
 	input [1:0] diskSides,
 	input drive800k, // drive MECHANISM: see floppy.v's port comment
 	input [7:0] disk_pwm, // spindle-speed PWM: see floppy.v's tachometer
+	output [31:0] dbg_floppy, // internal drive only -- see floppy.v
 	
 	output [1:0] diskMotor,
 	output [1:0] diskAct,
@@ -153,6 +154,7 @@ module iwm
 		.diskSides(diskSides[0]),
 		.drive800k(drive800k),
 		.disk_pwm(disk_pwm),
+		.dbg_floppy(dbg_floppy),
 		.diskEject(diskEject[0]),
 
 		.motor(diskMotor[0]),
