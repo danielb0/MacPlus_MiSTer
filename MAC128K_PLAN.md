@@ -990,6 +990,38 @@ the model, that Plus/SE are unregressed (the ROM region moved under them and
 deliberately left enabled throughout, so a clean boot with a SCSI disk mounted
 confirms the assumption this plan's phase order rests on.
 
+### Phase 3 pass criteria: all met, 2026-09-03
+
+| criterion | result |
+|---|---|
+| boots System 1/2/3 from a 400K MFS image | **YES** -- Finder desktop on the 128K |
+| reports the right RAM | **YES** -- System 3 reports 128K. Earlier Systems report no RAM figure at all, which is period-correct: the "About the Finder" memory display came later |
+| floppy WRITE works | **YES** -- a file created in MacWrite under System 3 survived a reboot |
+| **SCSI-Manager falsification test** | **PASSED** -- the 64K models ignore mounted SCSI disks entirely |
+| Plus/SE unregressed | still to confirm |
+
+**The floppy write result is stronger than it looks.** Surviving a reboot means
+the commit reached the SD card, not merely the SDRAM copy -- the whole chain
+(IWM write path -> `floppy_write_committer` -> SDRAM -> `floppy_sd_writer` ->
+card -> remount -> read back) round-trips on a 64K model. The write path
+carries no model-specific logic and paces on the same `clk8` cadence as reads,
+which is why it worked first time; it was still worth testing rather than
+assuming, since "shares no code with the broken thing" was true of several
+things that broke during this phase.
+
+**The SCSI result closes the assumption this plan's phase order rests on.**
+Phase 3 deliberately left SCSI ENABLED so the no-SCSI-Manager claim would be
+observable rather than asserted -- gating it here would have destroyed the
+test. The 64K ROM never scans the bus, never loads a driver, and never mounts
+the volume, so a mounted SCSI disk is simply invisible. Two consequences:
+
+- Phase 4 keeps its planned shape: build the gate for the 512Ke, then extend it
+  to `configROMSize == 2'b00`. For the 64K models it is **accuracy only, not
+  correctness** -- they already behave correctly with SCSI present.
+- It confirms the earlier reasoning that the System-1.x-vs-SCSI failure seen on
+  the Plus would NOT reproduce here, because the HFS mount is the ROM's doing
+  and not the System's.
+
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
 model whose ROM probes -- then extend the gate to `configROMSize == 2'b00` so
