@@ -885,6 +885,67 @@ the adjustment-range check computed `m_lo - m_hi`, which silently encoded a
 direction and failed for the wrong reason once the map inverted. It now takes
 an absolute difference, so **direction is asserted in exactly one place**.
 
+### The documentation had the whole algorithm, including a conversion TABLE
+
+Daniel's steer, for the third time and decisively. The 400KB drive
+specification gives the complete method, and this core was implementing a
+guess at it:
+
+```
+index = sum/(count/10) - 11,  clamped 0..399,  duty% = index/4.19
+```
+where each of the 100 summed values is the low 6 bits of a sound-buffer word
+**converted through a fixed 64-entry table**:
+```
+ 0,  1, 59,  2, 60, 40, 54,  3,   61, 32, 49, 41, 55, 19, 35,  4,
+62, 52, 30, 33, 50, 12, 14, 42,   56, 16, 27, 20, 36, 23, 44,  5,
+63, 58, 39, 53, 31, 48, 18, 34,   51, 29, 11, 13, 15, 26, 22, 43,
+57, 38, 47, 17, 28, 10, 25, 21,   37, 46,  9, 24, 45,  8,  7,  6
+```
+
+**That table is a PERMUTATION, and missing it is why nothing converged.**
+Summing raw 6-bit values gives a number with essentially no monotonic
+relationship to the commanded duty, so the ROM's loop had nothing coherent to
+close on: PFLP caught it oscillating 252, 5, 118, 5 on successive samples,
+reaching dsFinderErr on one attempt and failing at once on the next.
+
+**It also explains why inverting the polarity "helped".** It did not -- the
+input was scrambled, so neither direction was right, and the apparent
+improvement was chance. The documented curve is 9.4% duty -> 305-380 rpm and
+91% -> 625-780 rpm: **higher duty is FASTER**, the original direction. Two
+builds were spent on that.
+
+**And a comment in `floppy.v` was actively misleading.** Its CLV table is
+labelled 500/550/600/675/750 rpm; the real speeds are **402/438/482/536/603**.
+The PERIODS are correct -- `RPM = clk8/(2*period)` since TACH is 60 pulses (120
+edges) per revolution, giving 406/445/490/544/612, all within ~1.5% -- only the
+labels were wrong. Corrected in place, because that error cost real time when
+fitting the duty map.
+
+**Implementation.** `rtl/disk_pwm_duty.v` does the documented computation and
+is a **separate module on purpose**: `dataController_top.sv` instantiates VHDL
+and cannot be elaborated by iverilog, so anything buried in it is untestable --
+and every bug in this project has been in exactly that kind of unowned seam.
+`floppy.v` maps the index straight to a period, fitted to the two documented
+operating points (index 101 ~ 402 rpm ~ period 9996; index 302 ~ 603 rpm ~
+period 6634), giving `period = 11686 - 17*index` over 0..399. Absolute accuracy
+is not required -- the ROM calibrates against whatever curve the drive presents
+-- but the operating range now sits mid-scale instead of against a rail, which
+is what a converging loop needs.
+
+**Gates: `sim/tb_disk_pwm_duty.v` 12/12 and `sim/tb_drive_tach.v` 11/11.** The
+duty bench is written around the distinction that actually broke: several cases
+are chosen so the raw and table answers are BOTH plausible in-range indices
+(sample 21 -> 109 via the table, 199 raw; sample 9 -> 309 vs 79), so a bench
+that only checked plausibility would have passed the broken code. It also pins
+the dither average (3/7 alternating -> 14, which no single-sample implementation
+can produce) and that the window is exactly 100 samples.
+
+**Also confirmed correct against the spec, so stop re-checking them:** `SIDES`
+0 = single-sided 400K drive; and the whole drive-command decode --
+TRACKUP/TRACKDN via CA2, TRACKSTEP, MOTORON/MOTOROFF, TACH at
+{CA2,CA1,CA0,HEADSEL} = 0111, SIDES at 1100 -- all match.
+
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
 model whose ROM probes -- then extend the gate to `configROMSize == 2'b00` so

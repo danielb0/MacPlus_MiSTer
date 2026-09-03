@@ -82,10 +82,10 @@ module floppy
 	// mechanism, 0 = 400K single-sided. Constant per model (rtl/mac_model.v),
 	// unlike diskSides above, which describes whichever image is mounted.
 	input drive800k,
-	// Spindle duty: the sum of the LOW 6 BITS of 128 consecutive sound-buffer
-	// words (dataController_top.sv). Range 0..8064. Only a 400K mechanism
-	// obeys it; see the tachometer below.
-	input [12:0] disk_pwm,
+	// Spindle duty INDEX, 0..399, computed by dataController_top.sv exactly as
+	// the hardware does: low 6 bits -> 64-entry table -> sum of 100 -> /10 - 11.
+	// duty%% = index/4.19. Only a 400K mechanism obeys it; see the tachometer.
+	input [8:0] disk_pwm,
 	output diskEject,
 
 	output motor,
@@ -598,6 +598,13 @@ module floppy
 	   32-47:   600   timing value $???? (acceptable range {14A7-157F})
 	   48-63:   675   timing value $???? (acceptable range {16F2-17E2})
 	   64-79:   750   timing value $???? (acceptable range {19D0-1ADE})
+
+	   CAUTION: those RPM labels are WRONG and cost time. The real CLV speeds
+	   (Guide to the Macintosh Family Hardware) are 402/438/482/536/603 rpm.
+	   The PERIODS below are right -- RPM = clk8 / (2*period), since TACH is
+	   60 pulses (120 edges) per revolution: 9996 -> 406 rpm, 9122 -> 445,
+	   8292 -> 490, 7463 -> 544, 6634 -> 612, all within ~1.5%% of the real
+	   table. Only the labels in this comment were wrong.
 		
 		Experimentally determined toggle rates for Plus Too with 8.125 MHz CPU clock:
 		TACH Half Period Clocks		Resulting Timing Value
@@ -679,29 +686,33 @@ module floppy
 	// Plus/SE/512Ke keep the track-indexed table: an 800K mechanism
 	// self-regulates, which is both authentic and already proven on
 	// hardware.
-	// POLARITY: a HIGHER duty commands a LONGER period, i.e. a SLOWER
-	// spindle. That is the opposite of the obvious reading (more drive =
-	// faster) and it is not a guess -- it is what the hardware said.
+	// The duty index sets the speed outright, as it does on real hardware.
 	//
-	// With the map the other way up, PFLP measured the duty RAILED at
-	// 238/252 and stable there, while the head sat on track 0 where the ROM
-	// wants the SLOWEST CLV zone (500 RPM, period 9996). A loop asking for
-	// slow while pushing toward fast is positive feedback: it diverges to a
-	// rail instead of settling, which is exactly what was measured, and the
-	// ROM then never accepted a speed and never issued a single step
-	// request (PFLP stepWrites = 0, so we were not rejecting them -- it
-	// never asked). Negative feedback settles mid-range; positive feedback
-	// rails. The measurement distinguishes them, and it rails.
+	// Earlier attempts here trimmed the per-track table instead, because the
+	// duty->speed calibration was unknown. It is not unknown any more: the
+	// documented curve is 9.4%% duty -> ~305-380 rpm and 91%% -> ~625-780 rpm,
+	// i.e. HIGHER DUTY IS FASTER, monotonic, and the drive has no idea which
+	// track the head is on. With the conversion table finally applied in
+	// dataController_top.sv, disk_pwm is a real duty index and this can be a
+	// straight map again.
 	//
-	// The documented low-6-bit field also goes through a conversion TABLE
-	// this core does not have, so the raw field was never a linear duty in
-	// the first place; an inverted, monotonic line is a better model of it
-	// than a non-inverted one, and the ROM calibrates out the rest.
-	localparam [13:0] PWM_PERIOD_AT_ZERO = 14'd5900;
-	// duty * 81 >> 7  ==  duty * 0.633; 81 = 64+16+1, so this is three adds.
-	wire [19:0] pwm_scaled = ({7'b0, disk_pwm} << 6) + ({7'b0, disk_pwm} << 4) + {7'b0, disk_pwm};
-	wire [13:0] pwm_span   = pwm_scaled[19:7];        // 0..5103
-	wire [13:0] pwm_period = PWM_PERIOD_AT_ZERO + pwm_span;  // 5900..11003
+	// Fitted to the two documented operating points rather than guessed:
+	// index 101 is ~402 rpm (period 9996, tracks 0-15) and index 302 is
+	// ~603 rpm (period 6634, tracks 64-79), giving period = 11686 - 17*index
+	// over 0..399 = 11686..4903. That brackets the whole CLV table with the
+	// ROM's own operating range sitting comfortably mid-scale, which is what
+	// a converging loop needs -- the previous maps put it near a rail.
+	//
+	// Exact absolute accuracy is not required: the ROM CALIBRATES against
+	// whatever curve the drive presents, measuring at two duties before
+	// choosing one. Monotonic, correctly signed, and covering the range is
+	// what matters -- and all three failed before only because the table was
+	// missing upstream.
+	//
+	// Plus/SE/512Ke keep the track-indexed table: an 800K mechanism
+	// self-regulates, which is authentic and hardware-proven.
+	wire [13:0] pwm_span   = {disk_pwm, 4'b0} + {5'b0, disk_pwm}; // index*17
+	wire [13:0] pwm_period = 14'd11686 - pwm_span;                // 11686..4903
 	wire [13:0] driveTachPeriod = drive800k ? driveTachBase : pwm_period;
 	
 	always @(posedge clk or negedge _reset) begin

@@ -32,7 +32,7 @@ module tb_drive_tach;
 	// and every measurement below would spin forever rather than fail.
 	reg rst_n = 1'b0;
 
-	reg [12:0] pwm;   // AVERAGED duty (sum of low 6 bits x128), 0..8064
+	reg  [8:0] pwm;   // duty INDEX 0..399 (table -> sum of 100 -> /10 - 11)
 	wire [7:0] rd400, rd800;
 
 	floppy dut400 (
@@ -114,7 +114,7 @@ module tb_drive_tach;
 
 	initial begin
 		$display("");
-		rst_n = 1'b0; pwm = 13'd4045;
+		rst_n = 1'b0; pwm = 9'd200;
 		repeat (4) @(posedge clk);
 		rst_n = 1'b1;
 		@(posedge clk); #1;
@@ -123,8 +123,8 @@ module tb_drive_tach;
 		$display("");
 
 		// ---- THE BUG: two PWMs must give two different measurements --------
-		pwm = 13'd3034;  measure400(m_lo);
-		pwm = 13'd5057; measure400(m_hi);
+		pwm = 9'd150;  measure400(m_lo);
+		pwm = 9'd250; measure400(m_hi);
 		$display("  400K drive: pwm=96 -> %0d clks, pwm=160 -> %0d clks", m_lo, m_hi);
 		ok("400K: two PWM values give DIFFERENT tach periods (divisor != 0)",
 		   m_lo != m_hi);
@@ -132,16 +132,20 @@ module tb_drive_tach;
 		// round is POSITIVE feedback: it diverges to a rail rather than
 		// settling, which is what PFLP caught on hardware (duty railed at
 		// 238/252 while the head sat on track 0 asking for the SLOWEST zone).
-		ok("400K: higher duty commands a SLOWER spindle (longer period)",
-		   m_hi > m_lo);
+		// Documented: 9.4% duty -> ~305-380 rpm, 91% -> ~625-780 rpm. HIGHER
+		// DUTY IS FASTER. An earlier build inverted this and appeared to help,
+		// but only because the conversion table was missing upstream and the
+		// "duty" was scrambled -- neither direction was right then.
+		ok("400K: higher duty commands a FASTER spindle (shorter period)",
+		   m_hi < m_lo);
 
 		// ---- the 800K drive must keep ignoring it -------------------------
 		// Not symmetry for its own sake: self-regulation is what a real 800K
 		// mechanism does, and it is the behaviour already proven on hardware
 		// for the Plus and SE. A fix that made them obey the PWM would be a
 		// regression dressed up as a feature.
-		pwm = 13'd3034;  measure800(m8_lo);
-		pwm = 13'd5057; measure800(m8_hi);
+		pwm = 9'd150;  measure800(m8_lo);
+		pwm = 9'd250; measure800(m8_hi);
 		$display("  800K drive: pwm=96 -> %0d clks, pwm=160 -> %0d clks", m8_lo, m8_hi);
 		ok("800K: self-regulating, PWM has NO effect (Plus/SE unregressed)",
 		   m8_lo == m8_hi);
@@ -153,52 +157,40 @@ module tb_drive_tach;
 		ok("400K: adjustment range is meaningful, not a rounding artefact",
 		   (m_hi > m_lo ? m_hi - m_lo : m_lo - m_hi) > 100);
 
-		// ---- THE SECOND BUG: speed must NOT depend on the track -----------
-		// A real 400K drive has no idea where the head is; the Mac gets each
-		// zone's speed by writing a different PWM. Making the period depend on
-		// BOTH applied every zone change twice, so the ROM measured a speed
-		// its own calibration did not predict. That read fine through zone 0
-		// (tracks 0-15: boot blocks, MFS directory, the first of the System
-		// file) and failed at the first step into track 16 -- a happy Mac,
-		// then the flashing '?'.
-		pwm = 13'd4045;
+		// ---- speed must NOT depend on the track ---------------------------
+		// A real 400K drive has no idea where the head is; the Mac obtains
+		// each zone's speed by commanding a different duty.
+		pwm = 9'd200;
 		force dut400.driveTrack = 7'd0;  measure400(m_trk0);
 		force dut400.driveTrack = 7'd40; measure400(m_trk40);
 		release dut400.driveTrack;
-		$display("  400K drive: track 0 -> %0d clks, track 40 -> %0d clks", m_trk0, m_trk40);
-		ok("400K: period is INDEPENDENT of track (PWM alone owns the speed)",
+		ok("400K: period is INDEPENDENT of track (duty alone owns the speed)",
 		   m_trk0 == m_trk40);
-
-		// The 800K drive is the opposite and must stay that way: it regulates
-		// itself to the correct CLV zone speed with no help from the Mac.
 		force dut800.driveTrack = 7'd0;  measure800(m8_trk0);
 		force dut800.driveTrack = 7'd40; measure800(m8_trk40);
 		release dut800.driveTrack;
-		$display("  800K drive: track 0 -> %0d clks, track 40 -> %0d clks", m8_trk0, m8_trk40);
 		ok("800K: still self-regulates PER ZONE (Plus/SE unregressed)",
 		   m8_trk0 != m8_trk40);
 
-		// ---- the map must cover every zone the ROM will ask for -----------
-		// If a zone's target period were unreachable at any PWM, the ROM's
-		// loop could not converge there and the read would fail on exactly
-		// those tracks. Half-periods 9996 (500 RPM) and 6634 (750 RPM) are
-		// the extremes of floppy.v's own CLV table; measured full periods are
-		// twice those.
-		// Probe the extremes, not a guessed midpoint: the question is whether
-		// the map SPANS the table, and only pwm 0 and 255 answer that.
-		pwm = 13'd8064; measure400(m_slow);   // max duty = slowest
-		pwm = 13'd0;    measure400(m_fast);   // min duty = fastest
-		$display("  400K reachable span: %0d .. %0d clks (must span %0d .. %0d)",
-		         m_fast, m_slow, 2*6634, 2*9996);
-		ok("400K: slowest CLV zone (500 RPM) is reachable", m_slow >= 2*9996);
-		ok("400K: fastest CLV zone (750 RPM) is reachable", m_fast <= 2*6634);
+		// ---- the documented operating points must land mid-scale ----------
+		// index 101 is ~402 rpm (period 9996, tracks 0-15) and index 302 is
+		// ~603 rpm (period 6634, tracks 64-79). Both must be REACHABLE and,
+		// just as important, must sit away from the rails: every previous map
+		// put the ROM's operating range hard against one end, and a loop with
+		// no headroom on one side cannot converge.
+		pwm = 9'd101; measure400(m_slow);
+		pwm = 9'd302; measure400(m_fast);
+		$display("  documented points: idx101 -> %0d (want ~%0d), idx302 -> %0d (want ~%0d)",
+		         m_slow, 2*9996, m_fast, 2*6634);
+		ok("400K: index 101 gives ~the tracks 0-15 CLV period (within 3%)",
+		   (m_slow > 2*9996 ? m_slow - 2*9996 : 2*9996 - m_slow) < (2*9996/32));
+		ok("400K: index 302 gives ~the tracks 64-79 CLV period (within 3%)",
+		   (m_fast > 2*6634 ? m_fast - 2*6634 : 2*6634 - m_fast) < (2*6634/32));
 
-		// Headroom, not just coverage: if a zone's target sat hard against a
-		// rail the ROM's loop could reach it only by saturating, with nothing
-		// left to correct with. Both ends must land inside the PWM range with
-		// room to spare.
-		ok("400K: slow end has PWM headroom below it",  m_slow  >= 2*9996 + 400);
-		ok("400K: fast end has PWM headroom above it",  m_fast  <= 2*6634 - 400);
+		pwm = 9'd0;   measure400(m_dith_a);
+		pwm = 9'd399; measure400(m_dith_b);
+		ok("400K: the CLV table sits INSIDE the duty range, not on a rail",
+		   m_dith_a > 2*9996 && m_dith_b < 2*6634);
 
 		// ---- THE THIRD BUG: a DITHERED command must give a STABLE speed ----
 		// The Mac does not write one constant PWM byte. It writes a dithered
@@ -214,8 +206,8 @@ module tb_drive_tach;
 		// this module it is already smooth. What this checks is the property
 		// that failed on hardware: two duties that AVERAGE the same must give
 		// the same period, however they were dithered to get there.
-		pwm = 13'd4045; measure400(m_dith_a);
-		pwm = 13'd4045; measure400(m_dith_b);
+		pwm = 9'd200; measure400(m_dith_a);
+		pwm = 9'd200; measure400(m_dith_b);
 		ok("400K: the same duty measures the same period twice (no jitter)",
 		   m_dith_a == m_dith_b);
 
@@ -223,7 +215,7 @@ module tb_drive_tach;
 		// a single low-6-bit tick out of 128 words is 1/8064 of full scale,
 		// so it must move the period by less than one CLV zone (~800 counts),
 		// or the ROM's loop is chasing quantisation noise again.
-		pwm = 13'd4046; measure400(m_dith_c);
+		pwm = 9'd201; measure400(m_dith_c);
 		$display("  400K: duty 4045 -> %0d clks, 4045 -> %0d, 4046 -> %0d",
 		         m_dith_a, m_dith_b, m_dith_c);
 		ok("400K: one dither tick moves the period far less than a CLV zone",

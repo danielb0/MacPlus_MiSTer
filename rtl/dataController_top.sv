@@ -165,27 +165,22 @@ module dataController_top(
 	// The one-sample latency (audio_prebuf contains sample[N-1] when addr advances
 	// to N) is a constant delay, inaudible, and matches real hardware where the
 	// sample is read and used within the same line period.
-	// Spindle-speed PWM the Mac writes into the sound buffer's low bytes.
-	// Starts mid-scale so the drive idles at its nominal per-track speed
-	// before the Mac has written the buffer at all.
-	// Spindle-speed duty, AVERAGED -- not a single sample.
-	//
-	// The Mac does not write one constant PWM byte into the sound buffer. It
-	// writes a DITHERED SEQUENCE, and the duty cycle is the average of the
-	// LOW 6 BITS over ~100 consecutive words (Guide to the Macintosh Family
-	// Hardware). Sampling one word therefore reads an arbitrary point on that
-	// dither -- noise -- which is what the first attempt here did, with all 8
-	// bits instead of 6. The tachometer was then frequency-modulated at
-	// random, the ROM's speed measurement returned a different answer every
-	// time, and the 64K models never accepted a speed: PFLP measured
-	// maxTrack=0 on both of them against 52 on a working Plus.
-	//
-	// 128 samples, not 100: a power of two makes the boxcar a shift, and the
-	// ROM closes its own loop by measurement, so the exact window length is
-	// not critical -- the noise rejection is.
-	reg [12:0] disk_pwm = 13'd4096; // mid-scale (64 * 128/2) until the Mac writes
-	reg [12:0] pwm_acc  = 13'd0;
-	reg  [6:0] pwm_cnt  = 7'd0;
+	// Spindle duty for a 400K drive, computed in rtl/disk_pwm_duty.v exactly
+	// as the hardware does it: low 6 bits -> 64-entry conversion table ->
+	// sum of 100 -> /10 - 11, clamped 0..399. It is a separate module
+	// because this file instantiates VHDL and so cannot be elaborated by
+	// iverilog; anything buried here is untestable, and unowned seams are
+	// where every bug in this project has been. Gated by
+	// sim/tb_disk_pwm_duty.v.
+	wire [8:0] disk_pwm;
+	disk_pwm_duty disk_pwm_duty_inst
+	(
+		.clk        ( clk32 ),
+		.sample_en  ( clk8_en_p && loadSoundD ),
+		.sample     ( memoryDataIn[5:0] ),
+		.duty_index ( disk_pwm )
+	);
+
 	reg [7:0] audio_prebuf;
 	reg [7:0] audio_sample;
 
@@ -193,23 +188,6 @@ module dataController_top(
 		// Pre-buffer: continuously capture SDRAM data at sndReadAck rate
 		if(clk8_en_p && loadSoundD)
 			audio_prebuf <= memoryDataIn[15:8] - 8'd128;
-
-		// The LOW byte of every sound-buffer word is the floppy spindle-speed
-		// PWM, not audio: on a 128K/512K the Mac controls a 400K drive's motor
-		// speed in software by writing this byte, and reads the drive's TACH
-		// back to close the loop. It was discarded here because every model the
-		// core exposed had an 800K drive, which self-regulates and ignores it.
-		// See floppy.v's tachometer for why throwing it away is what produced
-		// Sad Mac 0F0004.
-		if(clk8_en_p && loadSoundD) begin
-			pwm_cnt <= pwm_cnt + 1'd1;
-			if (&pwm_cnt) begin
-				disk_pwm <= pwm_acc + {7'b0, memoryDataIn[5:0]};
-				pwm_acc  <= 13'd0;
-			end else begin
-				pwm_acc  <= pwm_acc + {7'b0, memoryDataIn[5:0]};
-			end
-		end
 
 		// Commit: transfer pre-buffer to output at Bresenham trigger time
 		if(clk8_en_p && snd_advance)
