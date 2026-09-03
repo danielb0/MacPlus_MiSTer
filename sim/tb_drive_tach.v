@@ -128,8 +128,12 @@ module tb_drive_tach;
 		$display("  400K drive: pwm=96 -> %0d clks, pwm=160 -> %0d clks", m_lo, m_hi);
 		ok("400K: two PWM values give DIFFERENT tach periods (divisor != 0)",
 		   m_lo != m_hi);
-		ok("400K: higher PWM spins faster, i.e. shorter period (monotonic)",
-		   m_hi < m_lo);
+		// Direction matters as much as response. A loop wired the wrong way
+		// round is POSITIVE feedback: it diverges to a rail rather than
+		// settling, which is what PFLP caught on hardware (duty railed at
+		// 238/252 while the head sat on track 0 asking for the SLOWEST zone).
+		ok("400K: higher duty commands a SLOWER spindle (longer period)",
+		   m_hi > m_lo);
 
 		// ---- the 800K drive must keep ignoring it -------------------------
 		// Not symmetry for its own sake: self-regulation is what a real 800K
@@ -143,8 +147,11 @@ module tb_drive_tach;
 		   m8_lo == m8_hi);
 
 		// ---- range: the ROM needs room either side to converge ------------
+		// Absolute difference: this check must not encode a direction, or it
+		// silently turns into a polarity assertion and fails for the wrong
+		// reason when the map is inverted. Direction is asserted above, once.
 		ok("400K: adjustment range is meaningful, not a rounding artefact",
-		   (m_lo - m_hi) > 100);
+		   (m_hi > m_lo ? m_hi - m_lo : m_lo - m_hi) > 100);
 
 		// ---- THE SECOND BUG: speed must NOT depend on the track -----------
 		// A real 400K drive has no idea where the head is; the Mac gets each
@@ -179,8 +186,8 @@ module tb_drive_tach;
 		// twice those.
 		// Probe the extremes, not a guessed midpoint: the question is whether
 		// the map SPANS the table, and only pwm 0 and 255 answer that.
-		pwm = 13'd0;   measure400(m_slow);
-		pwm = 13'd8064; measure400(m_fast);
+		pwm = 13'd8064; measure400(m_slow);   // max duty = slowest
+		pwm = 13'd0;    measure400(m_fast);   // min duty = fastest
 		$display("  400K reachable span: %0d .. %0d clks (must span %0d .. %0d)",
 		         m_fast, m_slow, 2*6634, 2*9996);
 		ok("400K: slowest CLV zone (500 RPM) is reachable", m_slow >= 2*9996);

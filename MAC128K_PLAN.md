@@ -841,6 +841,50 @@ tach. Both times the earlier search result had already contained the answer in a
 subordinate clause. **When a 40-year-old hardware behaviour is in question, read
 the spec before theorising.**
 
+### The averaging worked, and it exposed inverted polarity
+
+**PFLP on `c975617a`:**
+
+```
+maxTrack= 0   motor=0 (everSpun=1)
+step requests: NONE -- the ROM never asked to seek
+spindle duty = 238/252, STABLE across samples (238, 239, 238)
+```
+
+**Two results, both useful.**
+
+**1. The averaging fixed the noise.** The duty now holds steady between samples
+instead of swinging 0..255. It is a control value at last, which is what the
+low-6-bits-averaged-over-128-words change was for.
+
+**2. `step requests: NONE` settles the fork inference could not.** We are NOT
+rejecting steps -- the ROM never issues one. So everything downstream of the
+step decode is exonerated, and the failure is upstream: the ROM will not seek
+because it never accepts a speed.
+
+**3. The duty is RAILED at 238/252 (~94%), and that is the diagnosis.** The head
+is on track 0, where the ROM wants the SLOWEST CLV zone (500 RPM, period 9996).
+The map made a higher duty mean a FASTER spindle, so the loop was asking for
+slow while pushing toward fast -- **positive feedback, which diverges to a rail
+instead of settling.** Negative feedback settles mid-range; positive feedback
+rails. The measurement distinguishes them, and it railed.
+
+**Fix: invert the polarity.** `period = 5900 + (duty*81 >> 7)`, spanning
+5900..11003 against a CLV table needing 6634..9996. A higher commanded duty now
+means a longer period, i.e. a slower spindle.
+
+This is also more defensible than the original direction rather than less: the
+documented low-6-bit field goes through a **conversion table** this core does
+not have, so the raw field was never a linear duty to begin with. An inverted
+monotonic line is simply a better model of it, and the ROM calibrates out the
+remainder by measuring.
+
+**Gate: `tb_drive_tach` 12/12**, with the direction now asserted explicitly
+("higher duty commands a SLOWER spindle"). One bench bug fixed while doing it:
+the adjustment-range check computed `m_lo - m_hi`, which silently encoded a
+direction and failed for the wrong reason once the map inverted. It now takes
+an absolute difference, so **direction is asserted in exactly one place**.
+
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
 model whose ROM probes -- then extend the gate to `configROMSize == 2'b00` so

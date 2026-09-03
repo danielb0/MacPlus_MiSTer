@@ -679,11 +679,29 @@ module floppy
 	// Plus/SE/512Ke keep the track-indexed table: an 800K mechanism
 	// self-regulates, which is both authentic and already proven on
 	// hardware.
-	localparam [13:0] PWM_PERIOD_AT_ZERO = 14'd11000;
+	// POLARITY: a HIGHER duty commands a LONGER period, i.e. a SLOWER
+	// spindle. That is the opposite of the obvious reading (more drive =
+	// faster) and it is not a guess -- it is what the hardware said.
+	//
+	// With the map the other way up, PFLP measured the duty RAILED at
+	// 238/252 and stable there, while the head sat on track 0 where the ROM
+	// wants the SLOWEST CLV zone (500 RPM, period 9996). A loop asking for
+	// slow while pushing toward fast is positive feedback: it diverges to a
+	// rail instead of settling, which is exactly what was measured, and the
+	// ROM then never accepted a speed and never issued a single step
+	// request (PFLP stepWrites = 0, so we were not rejecting them -- it
+	// never asked). Negative feedback settles mid-range; positive feedback
+	// rails. The measurement distinguishes them, and it rails.
+	//
+	// The documented low-6-bit field also goes through a conversion TABLE
+	// this core does not have, so the raw field was never a linear duty in
+	// the first place; an inverted, monotonic line is a better model of it
+	// than a non-inverted one, and the ROM calibrates out the rest.
+	localparam [13:0] PWM_PERIOD_AT_ZERO = 14'd5900;
 	// duty * 81 >> 7  ==  duty * 0.633; 81 = 64+16+1, so this is three adds.
 	wire [19:0] pwm_scaled = ({7'b0, disk_pwm} << 6) + ({7'b0, disk_pwm} << 4) + {7'b0, disk_pwm};
 	wire [13:0] pwm_span   = pwm_scaled[19:7];        // 0..5103
-	wire [13:0] pwm_period = PWM_PERIOD_AT_ZERO - pwm_span;
+	wire [13:0] pwm_period = PWM_PERIOD_AT_ZERO + pwm_span;  // 5900..11003
 	wire [13:0] driveTachPeriod = drive800k ? driveTachBase : pwm_period;
 	
 	always @(posedge clk or negedge _reset) begin
