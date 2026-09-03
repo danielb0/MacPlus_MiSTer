@@ -122,9 +122,9 @@ Two candidate approaches, to be decided in Phase 2 rather than now:
   overlap and could share one slot, loaded from one combined file. Costs no
   SDRAM but couples two unrelated images into one download.
 
-The second approach has a wrinkle the first does not: the 128K and the 512K
-shipped **different** 64K ROMs (see below), so a full family wants two 64K
-images, not one. That pushes toward widening.
+Which to choose depends partly on whether the family needs one 64K image or two
+(see "The ROM images exist" below). Widening is the safer default: it costs only
+reserved SDRAM and does not care about the answer.
 
 Note also that `MacPlus.sv:336` declares `localparam configROMSize = 1'b1;` and
 **never references it** - line 620 passes a literal concat instead. Dead code;
@@ -143,9 +143,77 @@ delete it while in the area, before it misleads someone.
 `4D1F8172` (Plus v3) is the image already in `releases/boot0.rom`, per
 `CD_BLOCK_SIZE_PLAN.md`.
 
-The two 64K images being **distinct** is the point that matters for design: a
-128K and a 512K are not the same machine with a different RAM strap. If both are
-wanted, that is two ROM slots or a reload between model changes.
+**Open, and it sizes the ROM-slot work:** are those two 64K images
+machine-specific, or simply successive revisions that both run on both machines?
+Their dates (1984-01, 1984-10) match the 128K and 512K launches, and each is
+what shipped with its machine -- but the 64K ROM is not RAM-size-dependent, so
+either may well run on either. If one image suffices, one extra slot does too.
+Confirm before choosing a delivery scheme.
+
+The 512Ke needs no new image: it shipped the **same 128K ROM as the Plus**,
+which is consistent with every 128K image in the folder being Plus-labelled.
+
+## Historical accuracy is the point, so: what actually differed
+
+Stated as a requirement, not a nicety. "Functional but inauthentic" is not an
+acceptable end state for these models; if a difference is modellable, model it.
+
+**512Ke vs Plus.** The 512Ke is a 512K raised to Plus-era storage, not a Plus cut
+down -- the "e" is exactly the 800K drive plus the 128K (HFS) ROM.
+
+| | 512Ke | Plus | modellable? |
+|---|---|---|---|
+| CPU | 68000 @ 7.8336 MHz | same | n/a |
+| ROM | 128K | same 128K | n/a |
+| Drive | 800K double-sided | same | n/a |
+| RAM | 512K, soldered, not expandable | 1MB SIMMs, to 4MB | **yes** - size only |
+| SCSI | **none** | yes | **yes, but see below** |
+| Serial | DE-9 | mini-DIN-8 | no - same SCC behind it, connector shape only |
+| Keyboard | pre-ADB jack, no keypad | same jack, keypad keyboard | no consequence in RTL |
+
+**128K / 512K vs Plus.** Additionally: the 64K ROM (MFS, no HFS), a physically
+single-sided 400K drive, and no SCSI -- but see the next section for why that
+last one is free here and not on the 512Ke.
+
+Differences that are physical rather than logical -- connector shape, socketed
+vs soldered RAM -- have no RTL consequence and are out of scope by nature, not
+by choice.
+
+## The core has no bus error, and that is what "no SCSI" needs
+
+Found while checking this plan's assumptions, and it moves item 5 off the
+"small" list. `MacPlus.sv:489`:
+
+```verilog
+assign _cpuDTACK = ~(!_cpuAS && cpuAddr[23:21] != 3'b111) | (status_turbo & !turbo_dtack_en) | scsi_bus_hold;
+```
+
+with `BERRn` tied to `1'b1` (`MacPlus.sv:548`) and `berr` to `1'b0`
+(`MacPlus.sv:600`). **The core DTACKs every address below `$E00000`**, mapped or
+not, and never asserts a bus error.
+
+On real hardware, "this machine has no SCSI" is discovered *by* the bus error a
+probe of the absent chip produces. Deasserting `selectSCSI` does not reproduce
+that: the access still completes and returns stale bus data. So gating the
+decoder is **not sufficient** to make a machine look SCSI-less, and may hang the
+ROM rather than satisfy it. An authentic SCSI-less model needs a synthetic bus
+error for the unmapped window.
+
+**Which models this actually blocks:**
+
+- **512Ke -- blocked.** It runs the Plus's 128K ROM, which contains the SCSI
+  Manager and does probe. That the very same ROM shipped in both a SCSI and a
+  SCSI-less machine is itself good evidence that a bus error is the detection
+  mechanism, and that the ROM handles its absence gracefully once it gets one.
+- **128K / 512K -- free.** The 64K ROM has no SCSI Manager at all; no Mac had
+  SCSI in 1984, so these machines never look. Decoder gating alone is authentic
+  for them, and the bus error is wanted only for third-party software that
+  probes.
+
+This is also the one place the unexplained `addrDecoder.v:119` comment
+(`// <- this detects SCSI (on Plus)!!!`) may finally have to be understood --
+not because the new models trip over it, but because it is the only recorded
+clue to how detection works.
 
 ## What is missing, in full
 
@@ -157,6 +225,8 @@ wanted, that is two ROM slots or a reload between model changes.
 | 4 | Couple RAM options to model (a 128K cannot have 4MB) | `MacPlus.sv:89,338` | small, mostly OSD |
 | 5 | Gate SCSI off for non-Plus models | `MacPlus.sv:632,694,1098` | small |
 | 6 | Delete the dead `configROMSize` localparam | `MacPlus.sv:336` | trivial |
+| 7 | **Synthetic bus error for the unmapped SCSI window** | `MacPlus.sv:489,548,600` | **real work** - blocks an authentic 512Ke |
+| 8 | Refuse 800K images in 128K/512K mode | `MacPlus.sv:965-1013` | small - a 400K-only drive cannot take one |
 
 ## Open questions
 
@@ -182,21 +252,29 @@ independently testable.
 (s0=mac_80mb, s1=HD20 boots, s4=the ISO) so any regression in later phases is
 attributable. No RTL change.
 
-**Phase 1 - Mac 512Ke.** Configuration only: a Plus with 512K of RAM and SCSI
-still present. Touches items 2, 3, 4, 6. Needs no new ROM - the 512Ke shipped
-the same 128K ROM. This is the phase that proves the model-selector widening
-without depending on the unresolved ROM-delivery design.
+**Phase 1 - model selector and RAM sizing.** Items 2, 3, 4, 6. Needs no new ROM.
+This proves the selector widening without depending on the ROM-delivery design.
 
-**Phase 2 - 64K ROM delivery.** Decide and implement the multi-slot scheme
-(item 1). Verifiable in simulation before hardware: a bench that asserts ROM
-reads at $400000 land on the right SDRAM words for each model.
+It produces a 512Ke-shaped machine that **still has SCSI**, which is not an
+authentic 512Ke and is explicitly *not* the deliverable -- it is a stepping
+stone, and should not be presented as the model until Phase 2 lands.
 
-**Phase 3 - Mac 128K and 512K.** Wire `configROMSize == 2'b00` to the selector
-and expose the 128K RAM size. Depends on Phases 1 and 2. Needs an MFS boot
-image on the rig.
+**Phase 2 - bus error, and with it the real 512Ke.** Items 5 and 7. This is the
+phase that makes an authentic SCSI-less machine possible at all, and it is where
+`addrDecoder.v:119` may have to be understood. Hardware pass criterion: a 512Ke
+boots System 6 from the HD20 image at s1, reports 512K in "About the Finder",
+finds no SCSI devices, and does not hang looking; Plus and SE unregressed on the
+same rig.
 
-**Phase 4 - SCSI gating and polish.** Item 5, plus whatever the open questions
-above turn into.
+**Phase 3 - 64K ROM delivery.** Item 1. Verifiable in simulation before
+hardware: a bench asserting that ROM reads at $400000 land on the right SDRAM
+words for each model. Settle the one-image-or-two question first, since it sizes
+the scheme.
+
+**Phase 4 - Mac 128K and 512K.** Wire `configROMSize == 2'b00` to the selector,
+expose the 128K RAM size, and add item 8. Depends on Phases 1 and 3; the SCSI
+work in Phase 2 is *not* a dependency here, because the 64K ROM never probes.
+Needs an MFS 400K boot image on the rig.
 
 ## Verification
 
@@ -207,6 +285,6 @@ then hardware. Watch for the `@(posedge clk); #1;` foot-gun in any new bench.
 The standing gate holds: **no merge to master and no full Quartus compile
 without asking first.**
 
-Phase 1 has a clear hardware pass criterion - a 512Ke boots System 6 from the
-HD20 image at s1 with 512K of RAM reported in "About the Finder", and the Plus
-and SE models are unregressed on the same rig.
+Phase 2 carries the 512Ke pass criterion, stated with that phase above. Phase 1
+on its own is verified negatively: Plus and SE unregressed, and 512K RAM
+correctly reported, with SCSI still present and knowingly inauthentic.
