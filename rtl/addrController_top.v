@@ -1,3 +1,5 @@
+`include "sdram_map.vh"   // floppy-image byte offsets; see MacPlus.sv
+
 module addrController_top(
 	// clocks:
 	input clk,
@@ -199,9 +201,29 @@ module addrController_top(
 	// simulate smaller RAM/ROM sizes
 	assign macAddr[16] = rom_access && configROMSize == 2'b00 ? 1'b0 :     // force A16 to 0 for 64K ROM access
 									addrMux[16]; 
+	// The 64K branch below used to force A17 to 1, with the comment "64K ROM
+	// image is at $20000". That was true of plus_too's single-blob ROM
+	// region, where a 64K image would have sat just above the Plus's 128K
+	// ROM. It has been dead code ever since: configROMSize came from
+	// {status_mod, ~status_mod}, so 2'b00 was UNREACHABLE until
+	// MAC128K_PLAN.md Phase 3 exposed the 128K and 512K -- which is how an
+	// upstream line untouched since c996f47 could still be wrong.
+	//
+	// Phase 2 gave every boot ROM its own 512KB slot and writes each image
+	// at its slot's offset 0 (rtl/rom_word_addr.v, fed by dio_addr, which
+	// starts at 0). So boot2.rom lands at slot 2 + $00000 while this forcing
+	// read it back from slot 2 + $20000 -- SDRAM nobody ever wrote. The
+	// 68000 fetched its reset SP/PC from that hole and halted: the same
+	// symptom as the region collision rtl/sdram_map.vh fixes, and
+	// independently sufficient to cause it.
+	//
+	// Forcing A17 to 0 puts the 64K ROM where every other ROM size already
+	// reads from: offset 0 of its own slot. With A16 also forced to 0 above,
+	// the image occupies bytes $00000-$0FFFF and aliases every 64KB across
+	// the Mac's ROM window, which is what a real 64K ROM does.
 	assign macAddr[17] = ram_access && configRAMSize == 2'b00 ? 1'b0 :   // force A17 to 0 for 128K RAM access
 									rom_access && configROMSize == 2'b01 ? 1'b0 :  // force A17 to 0 for 128K ROM access
-									rom_access && configROMSize == 2'b00 ? 1'b1 :  // force A17 to 1 for 64K ROM access (64K ROM image is at $20000)
+									rom_access && configROMSize == 2'b00 ? 1'b0 :  // force A17 to 0 for 64K ROM access (image sits at its slot's offset 0)
 									addrMux[17]; 
 	assign macAddr[18] = ram_access && configRAMSize == 2'b00 ? 1'b0 :   // force A18 to 0 for 128K RAM access
 	                     rom_access && configROMSize != 2'b11 ? 1'b0 : // force A18 to 0 for 64K/128K/256K ROM access
@@ -254,10 +276,15 @@ module addrController_top(
 	assign dskLoadAckExt = dskLoadAck &  dskLoadSelExt;
 	assign dskLoadWrEn   = dskLoadGrant;
 
+	// Byte offsets of each floppy image within the disk region. Named in
+	// rtl/sdram_map.vh so that sim/tb_sdram_map.v can check them against the
+	// boot-ROM slots, which is precisely what nobody was doing when Phase 2
+	// widened ROM delivery over the top of the internal image. Unchanged in
+	// value -- the Phase 3 fix moved ROM, not the disks.
 	assign memoryAddr =
-		dskReadAckInt ? dskReadAddrInt + 22'h100000:   // first dsk image at 1MB
-		dskReadAckExt ? dskReadAddrExt + 22'h200000:   // second dsk image at 2MB
-		dskLoadGrant  ? (dskLoadSelExt ? dskLoadAddrExt + 22'h200000 : dskLoadAddrInt + 22'h100000) :
+		dskReadAckInt ? dskReadAddrInt + `DSK_INT_BYTE_OFF:   // first dsk image at 1MB
+		dskReadAckExt ? dskReadAddrExt + `DSK_EXT_BYTE_OFF:   // second dsk image at 2MB
+		dskLoadGrant  ? (dskLoadSelExt ? dskLoadAddrExt + `DSK_EXT_BYTE_OFF : dskLoadAddrInt + `DSK_INT_BYTE_OFF) :
 		macAddr;
 
 	// address decoding

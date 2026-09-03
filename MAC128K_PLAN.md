@@ -447,8 +447,10 @@ falsification test cannot run here after all**, on reflection while writing
 this up: it needs a booting 64K model, which does not exist until Phase 3. Moved
 below, where it belongs.
 
-**Phase 3 - Mac 512K, then Mac 128K. RTL/sim DONE, `83cd840`; hardware
-verification NOT YET RUN.** The first authentic deliverable. Wired
+**Phase 3 - Mac 512K, then Mac 128K. RTL/sim DONE, `83cd840`; hardware test
+2026-09-03 HUNG, and the two causes are fixed in RTL/sim -- see "Phase 3's boot
+hang" below. Hardware RE-TEST still outstanding.** The first authentic
+deliverable. Wired
 `configROMSize == 2'b00` to the selector, exposed the 128K/512K RAM sizes, and
 added item 8. `sim/tb_mac_model.v` extended to 22/22, mutation-tested.
 
@@ -479,6 +481,87 @@ on, and predicts the outcome of Daniel's Finder-1.1g observation for these
 models: since the 64K ROM never scans the bus, the System-1.x-vs-SCSI failure
 seen on the Plus should not reproduce here. If it does reproduce, both claims
 fall together and Phase 4's scope grows to cover the 64K models sooner.
+
+### Phase 3's boot hang: two bugs, both 64K-only, both fixed
+
+**Hardware test 2026-09-03: the 128K and 512K compiled clean and hung.** Plus
+and SE unregressed. JTAG (`scripts/read_probes.tcl`) showed `PACT` and `PIFA`
+bit-for-bit identical across three samples 1.5s apart -- a genuine 68000 HALT,
+not a software loop, which on this CPU means a double fault from a garbage
+reset SP/PC. Both known 64K ROM images failed identically, so ROM *content* was
+never the variable.
+
+**Diagnosed and fixed 2026-09-03. There were two independent causes, either one
+sufficient on its own, and both reachable only by a 64K model** -- which is
+exactly why Plus and SE kept working and why the fault looked like "the new
+models are broken" rather than "the address map is full".
+
+**Bug 1: ROM slot 2 and the internal floppy image were the same SDRAM words.**
+The old map packed the two ROM slots into the first megabyte of the disk region
+(words `0x200000`-`0x27FFFF`) and started the internal floppy image at exactly
+one megabyte into it (`0x280000`). Two 512KB slots is exactly one megabyte, so
+the map was **precisely full**. Phase 2 widened ROM to four slots without
+anything recording what sat above slot 1, and slot 2's base came out
+bit-identical to the floppy image's base -- an exact alias, not a partial
+overlap. Mounting any internal floppy overwrote `boot2.rom`, so the 68000 read
+its reset vector out of the first bytes of a disk image.
+
+Fixed by giving ROM its own region at word `0x400000`. `sdram.v` decodes
+`addr[22:0]` (4 banks x 4096 rows x 512 columns = 8M words = 16MB) and
+everything previously in use had `addr[22] = 0`, so that entire upper half was
+free. The disk windows keep their addresses, so `floppy_loader.v`, the write
+committer and the arbiter are untouched.
+
+**Bug 2: the 64K ROM was read from the wrong offset inside its slot.**
+`addrController_top.v` forced A17 to **1** for `configROMSize == 2'b00`,
+commented "64K ROM image is at $20000" -- true of plus_too's single-blob ROM
+region, where a 64K image would have sat above the Plus's 128K ROM. Phase 2
+gives every image its slot's offset 0, so `boot2.rom` was written at slot 2 +
+`$00000` and read back from slot 2 + `$20000`: SDRAM nobody ever wrote. Fixed
+by forcing A17 to 0, which is where every other ROM size already reads from.
+
+**Both lines were older than this project and neither had ever executed.**
+`configROMSize` came from `{status_mod, ~status_mod}` and `configRAMSize` from
+`status_mem ? 2'b11 : 2'b10`, so `2'b00` was **unreachable on both** until
+Phase 3 exposed these models. The A17 line dates to `c996f47`. Treat every
+`configROMSize == 2'b00` / `configRAMSize == 2'b00` branch as untested legacy
+by default -- the RAM sizing was audited at the same time and is correct (128K
+forces A17-A21, 512K forces A19-A21), but that was luck, not coverage.
+
+**The `"O13"` OSD suspect was wrong, and is now settled from source.**
+`Main_MiSTer/user_io.cpp:506` (`user_io_status_bits`) parses `"O13"` as
+`start = '1'-'0' = 1`, `end = '3'-'0' = 3`, `size = 1 + end - start = 3`. It is
+a genuine inclusive span, so `status[3:1]` was right all along and
+non-adjacent hex digits are fine. Do not re-open this.
+
+**Gate: `sim/tb_sdram_map.v`, 27/27.** The whole SDRAM region map now lives in
+`rtl/sdram_map.vh`, named, and is consumed from both `MacPlus.sv` (the
+`sdram_addr` mux) and `addrController_top.v` (the per-image byte offsets), so
+the bench checks the *real* constants rather than re-deriving them. It asserts
+every pair of windows is disjoint and that each fits `addr[22:0]`. It carries
+its own mutation checks: run against the historical ROM base it must still
+report that slot 2 aliased the internal floppy and that slots 0/1 did not. It
+FAILS 2/27 against the pre-fix map -- slots 2 and 3 versus the internal floppy,
+with 0 and 1 clear, reproducing the hardware symptom exactly.
+
+**Why the existing gates could not have caught this.** `sim/tb_mac_model.v`
+(22/22) proved the straps and `sim/tb_rom_word_addr.v` (19/19) proved that a
+byte written for slot N reads back from slot N. Both were green throughout.
+Neither knows where its region *sits* in SDRAM, because until now the region
+map existed nowhere but inside one concatenation in `MacPlus.sv`. Textbook
+seam: every module correct, the joins between them unowned and untested.
+
+**Still needed: a Quartus compile and a hardware re-test** -- not run without
+asking, per standing rule. Re-run `scripts/read_probes.tcl` afterwards; `PACT`
+and `PIFA` advancing between two samples is the pass signal, a boot to the
+Finder is the real one.
+
+**One prediction worth testing on the OLD archived rbf, no compile needed:**
+selecting 128K with **no floppy mounted at all** should not halt, because
+nothing then overwrites slot 2. Bug 2 alone still breaks it, so this is a check
+on the diagnosis rather than a workaround -- but note it discriminates: if the
+128K halts identically with no disk mounted, bug 2 is doing the work; if it
+gets further, bug 1 was contributing too.
 
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only

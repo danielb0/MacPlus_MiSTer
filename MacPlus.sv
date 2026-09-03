@@ -19,6 +19,11 @@
 //  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 //============================================================================
 
+// The SDRAM region map (RAM / boot ROMs / floppy image staging), declared in
+// one place and gated by sim/tb_sdram_map.v. Consumed below by sdram_addr,
+// and by rtl/addrController_top.v for the per-image byte offsets.
+`include "rtl/sdram_map.vh"
+
 module emu
 (
 	`include "sys/emu_ports.vh"
@@ -1055,9 +1060,13 @@ always @(posedge clk_sys) begin
 	end
 end
 
-// ROM is being stored at word offset 0x00000/0x40000/0x80000/0xC0000, one per
-// boot-ROM slot (rom_word_addr above; MAC128K_PLAN.md Phase 2 widened this
-// from two slots to four). Floppy images no longer come through here as of
+// ROM is being stored at word offset 0x00000/0x40000/0x80000/0xC0000 within
+// the ROM region, one per boot-ROM slot (rom_word_addr above; MAC128K_PLAN.md
+// Phase 2 widened this from two slots to four, and the Phase 3 fix gave the
+// region its own base once four slots no longer fit where two did - see
+// rtl/sdram_map.vh). Each image starts at its slot's offset 0, for every ROM
+// size: addrController_top.v's A17 forcing for the 64K case used to assume
+// otherwise. Floppy images no longer come through here as of
 // SCSI_UPGRADE_PLAN.md Phase 1 - see the floppy_loader instances above.
 reg [20:0] dio_a;
 reg [15:0] dio_data;
@@ -1083,9 +1092,22 @@ wire download_cycle = dio_download && dioBusControl;
 
 ////////////////////////// SDRAM /////////////////////////////////
 
-wire [24:0] sdram_addr = download_cycle ? {4'b0001, dio_a[20:0] } :
-                         ~_romOE        ? {4'b0001, rom_read_addr} :
-                                          {3'b000, (dskReadAckInt || dskReadAckExt || dskLoadWrEn), memoryAddr[21:1]};
+// Region bases come from rtl/sdram_map.vh, which is also what
+// sim/tb_sdram_map.v gates for disjointness. They are ADDED to their
+// payloads rather than concatenated: exact here because every base's low
+// bits are zero below the payload's width, so no add can carry, and Quartus
+// folds them straight back to wiring. See that file before moving one.
+//
+// ROM has its own region as of the Phase 3 fix. It previously shared the
+// disk region's first megabyte, which is exactly two 512KB slots -- so
+// Phase 2's four slots put slot 2 on top of the internal floppy image and
+// hung every 64K model. rtl/sdram_map.vh has the full account.
+wire dsk_cycle = dskReadAckInt || dskReadAckExt || dskLoadWrEn;
+
+wire [24:0] sdram_addr = download_cycle ? (`SDRAM_ROM_BASE  + dio_a[20:0])       :
+                         ~_romOE        ? (`SDRAM_ROM_BASE  + rom_read_addr)     :
+                         dsk_cycle      ? (`SDRAM_DISK_BASE + memoryAddr[21:1])  :
+                                          (`SDRAM_RAM_BASE  + memoryAddr[21:1]);
 
 wire [15:0] sdram_din  = download_cycle ? dio_data  : dskLoadWrEn ? slot3_wr_data : memoryDataOut;
 wire  [1:0] sdram_ds   = download_cycle ? 2'b11     : dskLoadWrEn ? 2'b11          : { !_memoryUDS, !_memoryLDS };
@@ -1119,7 +1141,7 @@ sdram sdram
 	.sd_cas         ( SDRAM_nCAS               ),
 
 	// cpu/chipset interface
-	// map rom to sdram word address $200000 - $20ffff
+	// Region layout is rtl/sdram_map.vh; boot ROMs now live at word $400000.
 	.din            ( sdram_din                ),
 	.addr           ( sdram_addr               ),
 	.ds             ( sdram_ds                 ),

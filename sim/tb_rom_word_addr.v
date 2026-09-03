@@ -46,7 +46,11 @@ module tb_rom_word_addr;
 		$display("");
 
 		offsets[0] = 18'h00000; // bottom of the image
-		offsets[1] = 18'h1FFFF; // where addrController_top forces A17=1 for a 64K ROM
+		// 18'h1FFFF was chosen as "where addrController_top forces A17=1 for a
+		// 64K ROM". That forcing was itself a bug and is gone -- see the Phase 3
+		// fix in addrController_top.v. The offset is kept only because a
+		// mid-window value with every low bit set is a useful third probe.
+		offsets[1] = 18'h1FFFF; // mid-window, all low bits set
 		offsets[2] = 18'h3FFFF; // top of the 512KB window
 
 		// ---- 1. download and read agree, for every slot and every offset --
