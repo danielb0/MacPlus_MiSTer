@@ -261,8 +261,16 @@ volume -- so the Finder is never handed anything to choke on. The mount is the
 ROM's doing, not the System's. A 128K should boot System 1.x cleanly with our
 SCSI hardware still present.
 
-Item 5 therefore stands on **accuracy** grounds only. It stays in Phase 3
-regardless, because it is small and belongs with the models it applies to.
+Item 5 therefore stands on **accuracy** grounds only, and moves to Phase 4 -- it
+is built once, with the mechanism, and then extended to `configROMSize == 2'b00`
+as one more term in the condition (Daniel, 2026-09-03).
+
+That is not merely tidier sequencing. **Gating SCSI off in Phase 3 would destroy
+the falsification test.** Leaving it enabled on the 64K models is exactly what
+proves the no-SCSI-Manager assumption: if a 128K boots System 1.x with an HFS
+SCSI disk mounted, the assumption is confirmed by observation. Gate it early and
+there is nothing left to observe -- the behaviour would be asserted rather than
+tested.
 
 The self-consistency argument survives in a stronger form: a real 128K was safe
 from this not merely because it lacked SCSI hardware, but because its ROM would
@@ -369,20 +377,34 @@ words for each model. Settle the one-image-or-two question first, since it sizes
 the scheme. Ends with the SCSI-Manager falsification test above.
 
 **Phase 3 - Mac 512K, then Mac 128K.** The first authentic deliverable. Wire
-`configROMSize == 2'b00` to the selector, expose the 128K RAM size, and add
-items 5 and 8. 512K first, because it changes one thing less than the 128K does.
+`configROMSize == 2'b00` to the selector, expose the 128K RAM size, and add item
+8. 512K first, because it changes one thing less than the 128K does.
+
+**SCSI stays enabled through this phase, deliberately.** It is not needed for
+these models to boot, and leaving it on is what makes the no-SCSI-Manager
+assumption observable rather than asserted. Gating it here would also add a
+variable to the phase that delivers the first authentic machine.
+
 Hardware pass criterion: boots System 1 or 2 from **the same 400K MFS image the
 Plus core already boots**, reports the right RAM, and Plus/SE/512Ke-shaped
 models are unregressed. Using that specific image is the point -- it is a
 control, so a failure cannot be blamed on the disk.
 
-**Phase 4 - bus error, and with it the real 512Ke.** Items 5 (for the Plus ROM
-case) and 7. This is where `addrDecoder.v:119` may finally have to be
-understood. Note that item 7 is not merely a 512Ke enabler: bus-erroring on
-unmapped accesses is authentic 68000 behaviour and a general accuracy win, so it
-stands on its own as a capstone. Hardware pass criterion: a 512Ke boots System 6
-from the HD20 image at s1, reports 512K in "About the Finder", finds no SCSI
-devices and does not hang looking; every other model unregressed.
+**Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
+the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
+model whose ROM probes -- then extend the gate to `configROMSize == 2'b00` so
+the 64K machines are accurate too. By this point the falsification test has
+already been run with SCSI enabled, so nothing is lost by turning it off.
+
+This is where `addrDecoder.v:119` may finally have to be understood. Note that
+item 7 is not merely a 512Ke enabler: bus-erroring on unmapped accesses is
+authentic 68000 behaviour and a general accuracy win, so it stands on its own as
+a capstone.
+
+Hardware pass criteria: a 512Ke boots System 6 from the HD20 image at s1,
+reports 512K in "About the Finder", finds no SCSI devices and does not hang
+looking; a 128K still boots System 1/2 from the 400K control image with SCSI now
+gated; every other model unregressed.
 
 ## Verification
 
