@@ -547,8 +547,8 @@ module floppy
 			dbgPwmPrev     <= 8'd0;
 			dbgMotorSeen   <= 1'b0;
 		end else begin
-			dbgPwmPrev <= disk_pwm[12:5];
-			if (disk_pwm[12:5] != dbgPwmPrev && ~&dbgPwmChanges)
+			dbgPwmPrev <= {disk_pwm[8:1]};
+			if (disk_pwm[8:1] != dbgPwmPrev && ~&dbgPwmChanges)
 				dbgPwmChanges <= dbgPwmChanges + 1'd1;
 			if (dbgStepStrobe && ~&dbgStepWrites)
 				dbgStepWrites <= dbgStepWrites + 1'd1;
@@ -558,10 +558,12 @@ module floppy
 			end
 		end
 	end
-	// disk_pwm is 13 bits now (a 128-sample sum); the top 8 keep the field at
-	// 8 bits so the bundle still packs to exactly 32. Reported value is
-	// therefore duty/32, i.e. 0..252 for a full-scale 0..8064.
-	assign dbg_floppy = {disk_pwm[12:5], dbgPwmChanges, dbgStepWrites,
+	// disk_pwm is the 9-bit duty INDEX (0..399); [8:1] keeps the field at 8
+	// bits so the bundle still packs to exactly 32. Reported value is
+	// therefore index/2, i.e. 0..199. Quartus caught the stale [12:5] slice
+	// here that iverilog had accepted -- widths are worth re-checking on
+	// BOTH tools whenever a port changes.
+	assign dbg_floppy = {disk_pwm[8:1], dbgPwmChanges, dbgStepWrites,
 	                     dbgMaxTrack, dbgMotorSeen, motor};
 
 	//`define DRIVE_REG_STEP		2  /* R: drive head stepping (1 = complete) */

@@ -176,9 +176,9 @@ for {set n 0} {$n < $samples} {incr n} {
 			puts [format "  PFLP  step requests: %d   (maxTrack %d -- these should agree unless we reject steps)" $f_step $f_max]
 		}
 		if {$f_pchg >= 255} {
-			puts [format "  PFLP  spindle duty = %d/252, changes SATURATED -- still moving a lot; expected while the ROM hunts, NOT if it never settles" $f_pwm]
+			puts [format "  PFLP  duty index = %d/199, changes SATURATED -- expected while the ROM hunts; a value that SETTLES mid-range is the pass signal" $f_pwm]
 		} else {
-			puts [format "  PFLP  spindle duty = %d/252 (avg of low 6 bits x128, scaled), changed %d times" $f_pwm $f_pchg]
+			puts [format "  PFLP  duty index = %d/199 (half of the 0..399 index; ~402rpm at 50, ~603rpm at 151), changed %d times" $f_pwm $f_pchg]
 		}
 	} else {
 		set absent(PFLP) 1
