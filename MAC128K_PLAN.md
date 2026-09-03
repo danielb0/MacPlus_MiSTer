@@ -245,36 +245,68 @@ These are genuinely open. None is a blocker for Phase 1.
 
 ## Phases
 
-Ordered so that the cheapest authentic model lands first and each phase is
-independently testable.
+Ordered so that the **first complete, authentic machine lands without touching
+the one open-ended item**, and each phase is independently testable.
 
-**Phase 0 - baseline.** Record what Plus and SE do today on the test rig
-(s0=mac_80mb, s1=HD20 boots, s4=the ISO) so any regression in later phases is
-attributable. No RTL change.
+The 128K and 512K go first, and the 512Ke last. That is the opposite of this
+plan's first draft, and Daniel's call (2026-09-03). The reasoning: the 512Ke is
+the only model that needs the synthetic bus error (item 7), because it is the
+only one whose ROM probes for SCSI. Leading with it puts the hardest,
+least-understood work on the critical path and delivers nothing authentic until
+it is solved. Leading with the 64K models defers item 7 entirely.
+
+| | 128K / 512K | 512Ke |
+|---|---|---|
+| selector + RAM sizing | yes | yes |
+| ROM delivery (item 1) | yes - tractable, sim-verifiable | no |
+| decoder SCSI gating (item 5) | yes - small | yes |
+| **bus error (item 7)** | **no** | **yes - open-ended** |
+| new test asset | MFS 400K image | none, HD20 at s1 boots |
+
+**The cost of this ordering, stated honestly.** The 512Ke would have changed RAM
+only and booted a known-good disk, so a failure had one plausible cause. The
+128K lands ROM delivery, the 64K decode path, a new RAM size and an untried disk
+format at once, so a failure has four. Both mitigations are cheap and are built
+into the phases below: prove ROM delivery in simulation before hardware, and
+validate the ROM image and MFS boot disk in Mini vMac (which emulates a 128K
+natively) before the FPGA is involved. That separates "is my test asset good"
+from "is my RTL right".
+
+**The assumption this ordering rests on.** That the 64K ROM contains no SCSI
+Manager -- true as far as we know, since SCSI arrived with the Plus's 128K ROM.
+If it is wrong, the 64K models need the bus error too and the reordering buys
+nothing. Falsify it cheaply at the end of Phase 2: boot the 64K ROM with SCSI
+still enabled and see whether it cares.
+
+**Phase 0 - baseline and assets.** Record what Plus and SE do today on the test
+rig (s0=mac_80mb, s1=HD20 boots, s4=the ISO) so any later regression is
+attributable. Separately, confirm the 64K ROM image and an MFS 400K boot disk
+work together in Mini vMac. No RTL change, and it retires the test-asset risk
+before any of it can be confused with an RTL fault.
 
 **Phase 1 - model selector and RAM sizing.** Items 2, 3, 4, 6. Needs no new ROM.
-This proves the selector widening without depending on the ROM-delivery design.
+Proves the selector widening without depending on the ROM-delivery design.
+Delivers no model on its own; verified negatively (Plus and SE unregressed, 512K
+correctly reported).
 
-It produces a 512Ke-shaped machine that **still has SCSI**, which is not an
-authentic 512Ke and is explicitly *not* the deliverable -- it is a stepping
-stone, and should not be presented as the model until Phase 2 lands.
-
-**Phase 2 - bus error, and with it the real 512Ke.** Items 5 and 7. This is the
-phase that makes an authentic SCSI-less machine possible at all, and it is where
-`addrDecoder.v:119` may have to be understood. Hardware pass criterion: a 512Ke
-boots System 6 from the HD20 image at s1, reports 512K in "About the Finder",
-finds no SCSI devices, and does not hang looking; Plus and SE unregressed on the
-same rig.
-
-**Phase 3 - 64K ROM delivery.** Item 1. Verifiable in simulation before
+**Phase 2 - 64K ROM delivery.** Item 1. Verifiable in simulation before
 hardware: a bench asserting that ROM reads at $400000 land on the right SDRAM
 words for each model. Settle the one-image-or-two question first, since it sizes
-the scheme.
+the scheme. Ends with the SCSI-Manager falsification test above.
 
-**Phase 4 - Mac 128K and 512K.** Wire `configROMSize == 2'b00` to the selector,
-expose the 128K RAM size, and add item 8. Depends on Phases 1 and 3; the SCSI
-work in Phase 2 is *not* a dependency here, because the 64K ROM never probes.
-Needs an MFS 400K boot image on the rig.
+**Phase 3 - Mac 512K, then Mac 128K.** The first authentic deliverable. Wire
+`configROMSize == 2'b00` to the selector, expose the 128K RAM size, and add
+items 5 and 8. 512K first, because it changes one thing less than the 128K does.
+Hardware pass criterion: boots System 1.x/2.x from the MFS image validated in
+Phase 0, reports the right RAM, and Plus/SE/512Ke-shaped models are unregressed.
+
+**Phase 4 - bus error, and with it the real 512Ke.** Items 5 (for the Plus ROM
+case) and 7. This is where `addrDecoder.v:119` may finally have to be
+understood. Note that item 7 is not merely a 512Ke enabler: bus-erroring on
+unmapped accesses is authentic 68000 behaviour and a general accuracy win, so it
+stands on its own as a capstone. Hardware pass criterion: a 512Ke boots System 6
+from the HD20 image at s1, reports 512K in "About the Finder", finds no SCSI
+devices and does not hang looking; every other model unregressed.
 
 ## Verification
 
@@ -285,6 +317,5 @@ then hardware. Watch for the `@(posedge clk); #1;` foot-gun in any new bench.
 The standing gate holds: **no merge to master and no full Quartus compile
 without asking first.**
 
-Phase 2 carries the 512Ke pass criterion, stated with that phase above. Phase 1
-on its own is verified negatively: Plus and SE unregressed, and 512K RAM
-correctly reported, with SCSI still present and knowingly inauthentic.
+Each phase carries its own pass criterion, stated with the phase above. Phase 1
+is the only one verified purely negatively, because it delivers no model.
