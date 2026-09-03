@@ -164,6 +164,10 @@ module dataController_top(
 	// The one-sample latency (audio_prebuf contains sample[N-1] when addr advances
 	// to N) is a constant delay, inaudible, and matches real hardware where the
 	// sample is read and used within the same line period.
+	// Spindle-speed PWM the Mac writes into the sound buffer's low bytes.
+	// Starts mid-scale so the drive idles at its nominal per-track speed
+	// before the Mac has written the buffer at all.
+	reg [7:0] disk_pwm = 8'd128;
 	reg [7:0] audio_prebuf;
 	reg [7:0] audio_sample;
 
@@ -171,6 +175,16 @@ module dataController_top(
 		// Pre-buffer: continuously capture SDRAM data at sndReadAck rate
 		if(clk8_en_p && loadSoundD)
 			audio_prebuf <= memoryDataIn[15:8] - 8'd128;
+
+		// The LOW byte of every sound-buffer word is the floppy spindle-speed
+		// PWM, not audio: on a 128K/512K the Mac controls a 400K drive's motor
+		// speed in software by writing this byte, and reads the drive's TACH
+		// back to close the loop. It was discarded here because every model the
+		// core exposed had an 800K drive, which self-regulates and ignores it.
+		// See floppy.v's tachometer for why throwing it away is what produced
+		// Sad Mac 0F0004.
+		if(clk8_en_p && loadSoundD)
+			disk_pwm <= memoryDataIn[7:0];
 
 		// Commit: transfer pre-buffer to output at Bresenham trigger time
 		if(clk8_en_p && snd_advance)
@@ -499,6 +513,7 @@ module dataController_top(
 		.insertDisk(insertDisk),
 		.diskSides(diskSides),
 		.drive800k(drive800k),
+		.disk_pwm(disk_pwm),
 		.diskEject(diskEject),
 		.diskMotor(diskMotor),
 		.diskAct(diskAct),

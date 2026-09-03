@@ -82,6 +82,9 @@ module floppy
 	// mechanism, 0 = 400K single-sided. Constant per model (rtl/mac_model.v),
 	// unlike diskSides above, which describes whichever image is mounted.
 	input drive800k,
+	// Spindle-speed PWM, from the low byte of the sound buffer. Only a 400K
+	// mechanism obeys it; see the tachometer below.
+	input [7:0] disk_pwm,
 	output diskEject,
 
 	output motor,
@@ -546,22 +549,58 @@ module floppy
 	*/
 	
 	reg [13:0] driveTachTimer; 
-	reg [13:0] driveTachPeriod;
+	reg [13:0] driveTachBase;
 	
 	always @(*) begin
 		case (driveTrack[6:4])
 			0: // tracks 0-15
-				driveTachPeriod <= 9996;
+				driveTachBase <= 9996;
 			1: // tracks 16-31
-				driveTachPeriod <= 9122;
+				driveTachBase <= 9122;
 			2: // tracks 32-47
-				driveTachPeriod <= 8292;
+				driveTachBase <= 8292;
 			3: // tracks 48-63
-				driveTachPeriod <= 7463;
+				driveTachBase <= 7463;
 			default: // tracks 64-79
-				driveTachPeriod <= 6634;	
+				driveTachBase <= 6634;	
 		endcase
 	end
+
+	// ---- spindle speed: who controls it, the Mac or the drive? ---------
+	//
+	// This is the whole of Sad Mac 0F0004, and the table above is only half
+	// the story. On a 400K mechanism the Mac controls motor speed IN
+	// SOFTWARE: it writes a PWM byte into the low byte of every word of the
+	// sound buffer (captured in dataController_top.sv and passed in here as
+	// disk_pwm) and closes the loop by reading TACH back. An 800K mechanism
+	// self-regulates and ignores the PWM entirely.
+	//
+	// The 64K ROM calibrates by measuring the tach, CHANGING the PWM, and
+	// measuring again -- then dividing by the difference between the two
+	// measurements. Against a drive that ignores the PWM both measurements
+	// come out identical, the divisor is zero, and the ROM takes a divide-
+	// by-zero exception: class 0F, subclass 0004. That is the documented
+	// reason a 64K-ROM Mac cannot boot from an 800K drive, and until now
+	// this core WAS such a drive -- the period depended only on the track,
+	// so no PWM write could ever move it.
+	//
+	// Reporting SIDES=0 did not help precisely because the ROM never asks:
+	// it discovers the drive type by whether the speed responds.
+	//
+	// The PWM TRIMS the per-track period rather than setting it outright.
+	// That keeps the known-good table as the natural operating point, so the
+	// ROM's loop converges on the speed this core already reads disks at,
+	// instead of settling somewhere derived from a curve nobody has
+	// measured. All the ROM needs is a response that is monotonic and has
+	// room either side of the target; +/-8 counts per PWM step gives about
+	// +/-10%, comfortably outside the acceptance windows in the table above
+	// and well inside 14 bits at both extremes (5618 .. 11020).
+	//
+	// Plus/SE/512Ke keep the old fixed behaviour, which is both authentic
+	// for their 800K drive and already proven on hardware.
+	wire signed [15:0] pwm_dev = $signed({8'b0, disk_pwm}) - 16'sd128;
+	wire signed [15:0] pwm_trimmed = $signed({2'b00, driveTachBase}) - (pwm_dev <<< 3);
+	wire [13:0] driveTachPeriod = drive800k ? driveTachBase : pwm_trimmed[13:0];
 	
 	always @(posedge clk or negedge _reset) begin
 		if (_reset == 1'b0) begin		

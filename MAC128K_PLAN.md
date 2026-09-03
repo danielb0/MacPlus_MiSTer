@@ -585,9 +585,13 @@ interrogates**, and only the second one is on this path.
 Fixed by plumbing `drive800k` from `rtl/mac_model.v` down the existing chain
 (`MacPlus.sv` -> `dataController_top.sv` -> `iwm.v` -> both `floppy.v`
 instances) and reporting it as `SIDES`. Plus/SE/512Ke keep `1'b1` and are
-bit-identical to before. The tachometer needs no change: it is already a
-track-indexed CLV table (500/550/600/675/750 RPM), which is correct for the
-400K and 800K drives alike.
+bit-identical to before.
+
+**This did NOT fix it, and the reasoning that dismissed the tachometer was
+wrong.** The claim made here was "the tachometer needs no change: it is already
+a track-indexed CLV table (500/550/600/675/750 RPM), correct for the 400K and
+800K drives alike." The RPM *values* are indeed right for both. That was never
+the question. See the next section.
 
 **Gate: `sim/tb_drive_sides.v`, 9/9, mutation-tested** (3/9 fail against the
 hardcoded value, and only the 400K rows). The property it holds is **media vs
@@ -601,6 +605,75 @@ registers confirm the `{ca2,ca1,ca0,SEL} = 1100` decode is really `SIDES`.
 400K image.** The media gate refuses 819200 bytes outright, so an 800K image on
 a 128K/512K produces no inserted disk at all -- a blinking "?" disk, a
 different failure from this one. Use the 400K MFS control image.
+
+### 0F0004, actually understood: the spindle has to answer the Mac
+
+**`SIDES` was not it. Hardware still gave 0F0004.** The reason is worth stating
+plainly, because it invalidates the reasoning above and not just its
+conclusion: **the ROM never asks the drive what it is. It discovers the drive
+type by whether the speed responds.**
+
+The documented mechanism:
+
+- On a **400K** mechanism the Mac controls spindle speed **in software**. It
+  writes a PWM byte into the **low byte of every 16-bit word of the sound
+  buffer** and closes the loop by reading `TACH` back.
+- An **800K** mechanism self-regulates and ignores the PWM entirely.
+- The 64K ROM calibrates by measuring the tach, **changing the PWM**, and
+  measuring again -- then **dividing by the difference**. Against a drive that
+  ignores the PWM, both measurements are identical, the divisor is zero, and it
+  takes a divide-by-zero exception. Class `0F`, subclass `0004`.
+
+**This core WAS such a drive.** `floppy.v`'s tach period depended only on the
+track, so no PWM write could ever move it -- functionally identical to a
+self-regulating 800K mechanism. And `dataController_top.sv` was *discarding*
+the PWM: `audio_prebuf <= memoryDataIn[15:8]` takes the audio byte and the low
+byte, which is the spindle PWM, went nowhere. The signal the ROM needed was
+already in the design and being thrown away.
+
+Confirmed independently from the ROM itself rather than from the error code
+alone. Disassembling the 64K image (capstone, `CS_ARCH_M68K`) gives the Sad Mac
+routine at `$4000F4` and the generic exception handler at `$4009D0`:
+
+```
+$4009D0  move.w  d0, d1      ; subclass <- d0
+$4009D2  movea.w #$f, a4     ; class = $0F
+$4009D8  bra.w   $4000f4     ; -> Sad Mac
+```
+
+and the display routine takes the low byte of `a4` then the word of `d1`, which
+is where the six digits come from. So `0F0004` is structurally `a4 = $0F`,
+`d1 = 4` -- an exception, not a memory-test failure. Useful technique to keep:
+**the ROM can be disassembled locally to settle what a code means**, instead of
+trusting a forum table.
+
+**Fix: the PWM now trims the per-track period, for 400K mechanisms only.**
+`dataController_top.sv` captures `memoryDataIn[7:0]` alongside the audio byte
+and passes it down the same chain as `drive800k`. Trimming rather than
+replacing the table keeps the known-good per-track speed as the natural
+operating point, so the ROM's loop converges on the speed this core already
+reads disks at, rather than on some point of a curve nobody has measured. All
+the loop needs is a monotonic response with room either side of the target;
+8 counts per PWM step gives about +/-10%, well outside the acceptance windows
+in `floppy.v`'s own table and inside 14 bits at both extremes (5618..11020).
+Plus/SE/512Ke keep the fixed table -- authentic for an 800K drive, and already
+proven on hardware.
+
+**Gate: `sim/tb_drive_tach.v`, 5/5, mutation-tested** (3/5 fail when the PWM is
+ignored again -- including, by name, "two PWM values give DIFFERENT tach
+periods (divisor != 0)", which IS the divide-by-zero condition). The bench
+measures real toggle periods by counting clocks between `TACH` edges **through
+the drive-register read port**, not by inspecting internals, so a PWM that is
+accepted at the port but never reaches the counter still fails. It also asserts
+the 800K drive does **not** respond, because self-regulation there is the
+hardware-proven behaviour and making Plus/SE obey the PWM would be a regression
+dressed as a feature.
+
+**Lesson, and it is the same one twice now.** `SIDES` was a plausible,
+authentic, well-motivated change that fixed nothing, because it was chosen from
+a symptom's *usual* cause rather than from the mechanism. The search result
+that named it said "does not get valid RPM readings" in the same sentence, and
+that clause was the actual answer. Read the mechanism, not the headline.
 
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
