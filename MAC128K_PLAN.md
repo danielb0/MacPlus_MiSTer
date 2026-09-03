@@ -998,7 +998,8 @@ confirms the assumption this plan's phase order rests on.
 | reports the right RAM | **YES** -- System 3 reports 128K. Earlier Systems report no RAM figure at all, which is period-correct: the "About the Finder" memory display came later |
 | floppy WRITE works | **YES** -- a file created in MacWrite under System 3 survived a reboot |
 | **SCSI-Manager falsification test** | **PASSED** -- the 64K models ignore mounted SCSI disks entirely |
-| Plus/SE unregressed | still to confirm |
+| Plus unregressed | **YES** -- boots from the SCSI hard disk and mounts both 400K and 800K diskettes on `46aec82a` |
+| SE unregressed | not separately tested; low risk (see below) |
 
 **The floppy write result is stronger than it looks.** Surviving a reboot means
 the commit reached the SD card, not merely the SDRAM copy -- the whole chain
@@ -1021,6 +1022,21 @@ the volume, so a mounted SCSI disk is simply invisible. Two consequences:
 - It confirms the earlier reasoning that the System-1.x-vs-SCSI failure seen on
   the Plus would NOT reproduce here, because the HFS mount is the ROM's doing
   and not the System's.
+
+**PHASE 3 IS COMPLETE.** The Plus check is the one that mattered, because
+this phase moved the ROM region underneath every model and turned `SIDES`
+and the tachometer from constants into signals. It boots from the SCSI hard
+disk and mounts **both 400K and 800K** diskettes, which covers all three:
+the relocated ROM region (slot 0 reads correctly), the media gate still
+admitting 819200 bytes when `drive800k = 1`, and the 800K drive path
+(`SIDES` = 1, track-indexed tach, PWM ignored) behaving exactly as before.
+
+The SE was not booted separately. Risk is low rather than zero: it takes
+`drive800k = 1`, so its `SIDES` and tachometer behaviour is bit-identical to
+the Plus's, and the ROM-region move is proven by the Plus reading slot 0 --
+the SE's slot 1 is the same mechanism one slot along. Worth a boot when
+convenient, but nothing in this phase treats the SE differently from the
+Plus except `machineType`, which was not touched.
 
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
