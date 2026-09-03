@@ -78,6 +78,10 @@ module floppy
 	output reg newByteReady,
 	input insertDisk,
 	input diskSides,
+	// The DRIVE's capability, not the media's: 1 = 800K double-sided
+	// mechanism, 0 = 400K single-sided. Constant per model (rtl/mac_model.v),
+	// unlike diskSides above, which describes whichever image is mounted.
+	input drive800k,
 	output diskEject,
 
 	output motor,
@@ -121,7 +125,16 @@ module floppy
 		1'b0, // DRVIN = yes
 		1'b0, // INSTALLED = yes
 		1'b0, // READY = yes
-		1'b1, // SIDES = double-sided drive
+		// SIDES: the 128K and 512K shipped a mechanically single-sided 400K
+		// drive, and their 64K ROM behaves badly when it finds a
+		// double-sided mechanism -- that is Sad Mac 0F0004, divide by zero,
+		// the documented failure for a 64K-ROM Mac wired to an 800K drive.
+		// Reporting the real mechanism is also simply accurate; it was
+		// hardcoded because until MAC128K_PLAN.md Phase 3 every model the
+		// core exposed genuinely had an 800K drive. MAC128K_PLAN.md item 8
+		// gated the MEDIA on this same signal; this gates the MECHANISM,
+		// which is the half that the ROM interrogates.
+		drive800k, // SIDES: 1 = double-sided drive, 0 = single-sided
 		1'b0, // UNUSED
 		1'b0, // SUPERDR
 		1'b0, // RDDATA1

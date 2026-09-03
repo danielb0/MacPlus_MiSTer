@@ -563,6 +563,45 @@ on the diagnosis rather than a workaround -- but note it discriminates: if the
 128K halts identically with no disk mounted, bug 2 is doing the work; if it
 gets further, bug 1 was contributing too.
 
+### Phase 3, second hardware round: Sad Mac 0F0004
+
+**Hardware 2026-09-03, after `1345aa9`: the machine BOOTS.** The 64K ROM runs,
+passes its ROM and RAM self-tests, initialises video and draws -- both
+address-map bugs above are genuinely closed. It then fails to load the System
+with **Sad Mac `0F0004`**.
+
+Class `0F` is the exception class and subclass `0004` is **divide by zero**, so
+this is the ROM catching a 68000 exception, not failing a memory test. The
+documented cause is specific and matches this configuration exactly: a 64K-ROM
+Mac talking to an **800K drive mechanism**, where the ROM does not get RPM/tach
+readings it considers valid and divides by zero.
+
+**Item 8 was only half done.** Phase 3 gated the **media** on `drive800k` (an
+800K image is refused) and left the drive's own `SIDES` register hardcoded to
+`1'b1` in `rtl/floppy.v` -- so a 128K still told its ROM it had a double-sided
+mechanism. The media is what the user mounts; the **mechanism is what the ROM
+interrogates**, and only the second one is on this path.
+
+Fixed by plumbing `drive800k` from `rtl/mac_model.v` down the existing chain
+(`MacPlus.sv` -> `dataController_top.sv` -> `iwm.v` -> both `floppy.v`
+instances) and reporting it as `SIDES`. Plus/SE/512Ke keep `1'b1` and are
+bit-identical to before. The tachometer needs no change: it is already a
+track-indexed CLV table (500/550/600/675/750 RPM), which is correct for the
+400K and 800K drives alike.
+
+**Gate: `sim/tb_drive_sides.v`, 9/9, mutation-tested** (3/9 fail against the
+hardcoded value, and only the 400K rows). The property it holds is **media vs
+mechanism**: they are different signals with different lifetimes -- `diskSides`
+changes when you mount a disk, `drive800k` never changes for a given model --
+so wiring `SIDES` to the wrong one looks right with a disk inserted and wrong
+with an empty drive. Every case pins one against the other, and two neighbour
+registers confirm the `{ca2,ca1,ca0,SEL} = 1100` decode is really `SIDES`.
+
+**Consequence for testing, and it is not optional: these models can only take a
+400K image.** The media gate refuses 819200 bytes outright, so an 800K image on
+a 128K/512K produces no inserted disk at all -- a blinking "?" disk, a
+different failure from this one. Use the 400K MFS control image.
+
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
 model whose ROM probes -- then extend the gate to `configROMSize == 2'b00` so

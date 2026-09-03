@@ -87,6 +87,7 @@ module dataController_top(
 	output memoryOverlayOn,
 	input [1:0] insertDisk,
 	input [1:0] diskSides,
+	input drive800k, // drive MECHANISM: see floppy.v's port comment
 	output [1:0] diskEject,
 	output [1:0] diskMotor,
 	output [1:0] diskAct,
@@ -497,6 +498,7 @@ module dataController_top(
 		.dataOut(iwmDataOut),
 		.insertDisk(insertDisk),
 		.diskSides(diskSides),
+		.drive800k(drive800k),
 		.diskEject(diskEject),
 		.diskMotor(diskMotor),
 		.diskAct(diskAct),

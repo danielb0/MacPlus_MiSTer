@@ -765,6 +765,9 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	// floppy disk interface
 	.insertDisk({dsk_ext_ins, dsk_int_ins}),
 	.diskSides({dsk_ext_ds, dsk_int_ds}),
+	// mac_model's drive800k, straight through: the MEDIA gate above uses it
+	// too (MAC128K_PLAN.md item 8), but the ROM asks the DRIVE.
+	.drive800k(drive800k),
 	.diskEject(diskEject),
 	.dskReadAddrInt(dskReadAddrInt),
 	.dskReadAckInt(dskReadAckInt),

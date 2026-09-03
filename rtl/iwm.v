@@ -53,6 +53,7 @@ module iwm
 	input [1:0] insertDisk,
 	output [1:0] diskEject,
 	input [1:0] diskSides,
+	input drive800k, // drive MECHANISM: see floppy.v's port comment
 	
 	output [1:0] diskMotor,
 	output [1:0] diskAct,
@@ -149,6 +150,7 @@ module iwm
 		.newByteReady(newByteReadyInt),
 		.insertDisk(insertDisk[0]),
 		.diskSides(diskSides[0]),
+		.drive800k(drive800k),
 		.diskEject(diskEject[0]),
 
 		.motor(diskMotor[0]),
@@ -193,6 +195,7 @@ module iwm
 		.newByteReady(newByteReadyExt),
 		.insertDisk(insertDisk[1]),
 		.diskSides(diskSides[1]),
+		.drive800k(drive800k),
 		.diskEject(diskEject[1]),
 
 		.motor(diskMotor[1]),
