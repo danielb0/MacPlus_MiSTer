@@ -260,11 +260,11 @@ clue to how detection works.
 | # | item | file | size |
 |---|---|---|---|
 | 1 | ROM delivery for a third (and fourth) image | `MacPlus.sv:1018,1042` | design decision, then small |
-| 2 | Model selector 1 bit -> 2 bits, and `configROMSize` driven from it | `MacPlus.sv:89,134,620` | small |
-| 3 | `configRAMSize` reachable for 128K/512K | `MacPlus.sv:338` | trivial |
-| 4 | Couple RAM options to model (a 128K cannot have 4MB) | `MacPlus.sv:89,338` | small, mostly OSD |
+| 2 | Model selector 1 bit -> **3** bits (and moved to bits 1-3), straps derived from it | `MacPlus.sv:89,136,641,698,1066` + `rtl/mac_model.v` | **DONE** `21c0460` |
+| 3 | `configRAMSize` reachable for 128K/512K | `MacPlus.sv:338` | **DONE** `21c0460` |
+| 4 | RAM size derived from model, not chosen, for the soldered-RAM machines | `rtl/mac_model.v` | **DONE** `21c0460` |
 | 5 | Gate SCSI off for non-Plus models | `MacPlus.sv:632,694,1098` | small; accuracy only - the 64K ROM never looks, so it is not needed for booting |
-| 6 | Delete the dead `configROMSize` localparam | `MacPlus.sv:336` | trivial |
+| 6 | Delete the dead `configROMSize` localparam | `MacPlus.sv:336` | **DONE** `21c0460` |
 | 7 | **Synthetic bus error for the unmapped SCSI window** | `MacPlus.sv:489,548,600` | **real work** - blocks an authentic 512Ke |
 | 8 | Refuse 800K images in 128K/512K mode | `MacPlus.sv:965-1013` | small - a 400K-only drive cannot take one |
 
@@ -406,10 +406,35 @@ confused with an RTL fault. No RTL change, and no emulator.
 Phase 0 therefore reduces to recording the rig baseline. Both assets are
 already validated.
 
-**Phase 1 - model selector and RAM sizing.** Items 2, 3, 4, 6. Needs no new ROM.
-Proves the selector widening without depending on the ROM-delivery design.
-Delivers no model on its own; verified negatively (Plus and SE unregressed, 512K
-correctly reported).
+**Phase 1 - model selector and RAM sizing. DONE, `21c0460`.** Items 2, 3, 4, 6.
+No new model offered; `rtl/mac_model.v` maps model -> straps in one table, with
+`sim/tb_mac_model.v` (13/13, mutation-tested) as the gate. No Quartus compile
+run -- there is nothing observable to see yet, so hardware verification is
+bundled with Phase 3.
+
+**Two errors in this plan surfaced while wiring it, both now corrected above.**
+
+*Item 2 said "1 bit -> 2 bits". It is 3 bits, and the field had to move.* Five
+models are wanted, so 2 bits is not enough; and bit 10, next to the old bit 9,
+is the serial input (`MacPlus.sv:349` -- live in code even though its OSD entry
+is commented out), so there was no contiguous room. Model now sits at bits 1-3.
+That is an incompatible CONF_STR layout change, so the config version went
+`v,0` -> `v,1` and **every saved setting resets once** on first start.
+
+*The plan listed three consumers of `status_mod`. There are four.*
+`dataController_top` takes it as `machineType` and hangs **eight** behavioural
+differences off it -- sound buffer, drive select, the memory-overlay mechanism,
+VIA port B wiring, and the keyboard, which is a wholly different protocol on the
+SE (ADB) from the Plus. It is a Plus-vs-SE **boolean, not a model index**: a
+128K handed its own model number would get ADB keyboard timing and never see a
+keypress. This is the single most dangerous thing in the whole project, because
+it fails silently, and it is why the mapping is a module with a bench rather
+than a wider `status_mod`.
+
+Item 4 also came out better than specified. Rather than guarding "a 128K cannot
+have 4MB", RAM size is **derived** for the soldered-RAM machines -- the 128K,
+512K and 512Ke were not expandable, so only the Plus and SE honour the OSD
+Memory option and no invented configuration exists to guard against.
 
 **Phase 2 - 64K ROM delivery.** Item 1. Verifiable in simulation before
 hardware: a bench asserting that ROM reads at $400000 land on the right SDRAM
