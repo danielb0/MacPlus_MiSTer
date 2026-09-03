@@ -147,26 +147,38 @@ for {set n 0} {$n < $samples} {incr n} {
 		puts [format "sample %d   bitstream=UNKNOWN -- this build has NO PBLD probe, so it predates ac38fc9" $n]
 	}
 	puts [format "  PIFA  fetch#%3d  PC=%06X      <- where the CPU is" $if_cnt $if_addr]
-	# PFLP = {maxTrack[6:0], curTrack[6:0], pwmMin[7:0], pwmMax[7:0], switched, motor}
+	# PFLP v2 = {pwmLive[7:0], pwmChanges[7:0], stepWrites[6:0], maxTrack[6:0], motorSeen, motor}
 	# Packing mirrors rtl/floppy.v's dbg_floppy assign; keep the two in step.
-	# maxTrack is the HIGH-WATER mark since reset, not the live head position: by
-	# the time this is read the ROM has usually recalibrated back to track 0.
-	# Track 15/16 is the CLV zone-0/zone-1 boundary, which is the whole question
-	# for the 128K happy-Mac-then-"?" failure.
+	#
+	# v1's curTrack / pwm-min-max / switched fields all measured nothing (a
+	# WORKING Plus read 0..255 and switched=1 too). Only maxTrack earned its
+	# bits: Plus 52, both 64K models 0.
+	#
+	# stepWrites is the fork: the identical RTL steps fine on the Plus, so
+	# either the 64K ROM never issues a step, or it issues one we reject.
+	# pwmLive across samples says whether disk_pwm is a control signal the Mac
+	# is holding steady, or noise we are frequency-modulating the tach with.
 	if {[have PFLP]} {
 		set pflp [b2i [rd PFLP]]
-		set f_max  [expr ($pflp >> 25) & 0x7F]
-		set f_cur  [expr ($pflp >> 18) & 0x7F]
-		set f_pmin [expr ($pflp >> 10) & 0xFF]
-		set f_pmax [expr ($pflp >>  2) & 0xFF]
-		set f_sw   [expr ($pflp >>  1) & 0x1]
-		set f_mot  [expr  $pflp        & 0x1]
-		set zone   [expr {$f_max / 16}]
-		puts [format "  PFLP  maxTrack=%2d (CLV zone %d)  curTrack=%2d  motor=%d  switched=%d" $f_max $zone $f_cur $f_mot $f_sw]
-		if {$f_pmin > $f_pmax} {
-			puts "  PFLP  spindle PWM: NEVER WRITTEN -- the Mac never drove the sound-buffer low byte"
+		set f_pwm   [expr ($pflp >> 24) & 0xFF]
+		set f_pchg  [expr ($pflp >> 16) & 0xFF]
+		set f_step  [expr ($pflp >>  9) & 0x7F]
+		set f_max   [expr ($pflp >>  2) & 0x7F]
+		set f_mseen [expr ($pflp >>  1) & 0x1]
+		set f_mot   [expr  $pflp        & 0x1]
+		set zone    [expr {$f_max / 16}]
+		puts [format "  PFLP  maxTrack=%2d (CLV zone %d)  motor=%d (everSpun=%d)" $f_max $zone $f_mot $f_mseen]
+		if {$f_step == 0} {
+			puts "  PFLP  step requests: NONE -- the ROM never asked to seek, so it gave up BEFORE stepping"
+		} elseif {$f_step >= 127} {
+			puts "  PFLP  step requests: 127+ (saturated) -- the ROM is seeking; if maxTrack is still 0 we are REJECTING them"
 		} else {
-			puts [format "  PFLP  spindle PWM range %d..%d  (our map needs 50..219 to cover the CLV table)" $f_pmin $f_pmax]
+			puts [format "  PFLP  step requests: %d   (maxTrack %d -- these should agree unless we reject steps)" $f_step $f_max]
+		}
+		if {$f_pchg >= 255} {
+			puts [format "  PFLP  spindle duty = %d/252, changes SATURATED -- still moving a lot; expected while the ROM hunts, NOT if it never settles" $f_pwm]
+		} else {
+			puts [format "  PFLP  spindle duty = %d/252 (avg of low 6 bits x128, scaled), changed %d times" $f_pwm $f_pchg]
 		}
 	} else {
 		set absent(PFLP) 1

@@ -82,9 +82,10 @@ module floppy
 	// mechanism, 0 = 400K single-sided. Constant per model (rtl/mac_model.v),
 	// unlike diskSides above, which describes whichever image is mounted.
 	input drive800k,
-	// Spindle-speed PWM, from the low byte of the sound buffer. Only a 400K
-	// mechanism obeys it; see the tachometer below.
-	input [7:0] disk_pwm,
+	// Spindle duty: the sum of the LOW 6 BITS of 128 consecutive sound-buffer
+	// words (dataController_top.sv). Range 0..8064. Only a 400K mechanism
+	// obeys it; see the tachometer below.
+	input [12:0] disk_pwm,
 	output diskEject,
 
 	output motor,
@@ -511,30 +512,57 @@ module floppy
 		end
 	end
 
-	// ---- debug telemetry (see the dbg_floppy port comment) ---------------
-	// maxTrack is a high-water mark, not the live track: by the time a probe
-	// is read the ROM has usually recalibrated back to track 0, so the live
-	// value says nothing about where it gave up. pwm min/max bracket the
-	// range the Mac's speed loop actually drove, which is what an invented
-	// PWM->period map has to be calibrated against.
+	// ---- debug telemetry v2 (see the dbg_floppy port comment) -----------
+	// v1 wasted three of its four fields. curTrack read 0 always, the PWM
+	// min/max saturated to 0..255 on a WORKING Plus as well as on the
+	// failing 128K (so it measured nothing), and `switched` was a sticky
+	// seen-latch that is set by any mount and would read 1 on a healthy
+	// machine too. Only maxTrack earned its bits: Plus 52, 64K models 0.
+	//
+	// v2 answers the two questions that actually fork the diagnosis:
+	//
+	//   stepWrites  Does the ROM ever ASK to step? The identical RTL steps
+	//               fine on the Plus, so either the 64K ROM never issues a
+	//               step (it gave up earlier) or it issues one we reject.
+	//               No amount of code reading separates those two.
+	//   pwmLive +   Is disk_pwm a control signal or noise? The Mac writes a
+	//   pwmChanges  CONSTANT PWM into every word of the sound buffer, so a
+	//               real one is stable between samples and changes only when
+	//               the ROM decides to. A change count that pins means we
+	//               are frequency-modulating the tachometer with whatever
+	//               happens to be in that buffer -- which would explain the
+	//               inconsistent symptoms, and nothing else so far does.
 	reg [6:0] dbgMaxTrack;
-	reg [7:0] dbgPwmMin, dbgPwmMax;
-	reg       dbgSwitchedSeen;
+	reg [7:0] dbgPwmChanges;
+	reg [6:0] dbgStepWrites;
+	reg [7:0] dbgPwmPrev;   // top 8 of the averaged duty
+	reg       dbgMotorSeen;
+	wire dbgStepStrobe = cep && _enable == 1'b0 && lstrbEdge == 1'b1 &&
+	                     driveWriteAddr == `DRIVE_REG_STEP && ca2 == 1'b0;
 	always @(posedge clk or negedge _reset) begin
 		if (_reset == 1'b0) begin
-			dbgMaxTrack     <= 7'd0;
-			dbgPwmMin       <= 8'hFF;
-			dbgPwmMax       <= 8'h00;
-			dbgSwitchedSeen <= 1'b0;
-		end else if (cep) begin
-			if (driveTrack > dbgMaxTrack) dbgMaxTrack <= driveTrack;
-			if (disk_pwm  < dbgPwmMin)    dbgPwmMin   <= disk_pwm;
-			if (disk_pwm  > dbgPwmMax)    dbgPwmMax   <= disk_pwm;
-			if (diskSwitched)             dbgSwitchedSeen <= 1'b1;
+			dbgMaxTrack    <= 7'd0;
+			dbgPwmChanges  <= 8'd0;
+			dbgStepWrites  <= 7'd0;
+			dbgPwmPrev     <= 8'd0;
+			dbgMotorSeen   <= 1'b0;
+		end else begin
+			dbgPwmPrev <= disk_pwm[12:5];
+			if (disk_pwm[12:5] != dbgPwmPrev && ~&dbgPwmChanges)
+				dbgPwmChanges <= dbgPwmChanges + 1'd1;
+			if (dbgStepStrobe && ~&dbgStepWrites)
+				dbgStepWrites <= dbgStepWrites + 1'd1;
+			if (cep) begin
+				if (driveTrack > dbgMaxTrack) dbgMaxTrack <= driveTrack;
+				if (motor)                    dbgMotorSeen <= 1'b1;
+			end
 		end
 	end
-	assign dbg_floppy = {dbgMaxTrack, driveTrack, dbgPwmMin, dbgPwmMax,
-	                     dbgSwitchedSeen, motor};
+	// disk_pwm is 13 bits now (a 128-sample sum); the top 8 keep the field at
+	// 8 bits so the bundle still packs to exactly 32. Reported value is
+	// therefore duty/32, i.e. 0..252 for a full-scale 0..8064.
+	assign dbg_floppy = {disk_pwm[12:5], dbgPwmChanges, dbgStepWrites,
+	                     dbgMaxTrack, dbgMotorSeen, motor};
 
 	//`define DRIVE_REG_STEP		2  /* R: drive head stepping (1 = complete) */
 												/* W: 0 = step drive head */
@@ -631,34 +659,31 @@ module floppy
 	// Plus/SE/512Ke keep the old fixed behaviour, which is both authentic
 	// for their 800K drive and already proven on hardware.
 	// A real 400K drive HAS NO IDEA WHICH TRACK THE HEAD IS ON. Its speed is
-	// a function of the PWM alone, and the Mac gets the different speed for
-	// each zone by WRITING A DIFFERENT PWM VALUE. So the period below must
-	// not consult driveTachBase at all.
+	// a function of the commanded duty alone, and the Mac gets the different
+	// speed for each CLV zone by COMMANDING A DIFFERENT DUTY. So the period
+	// below must not consult driveTachBase at all.
 	//
-	// The first attempt had the PWM merely TRIM the per-track table. That
-	// stopped the divide-by-zero -- the speed did respond -- but it applied
-	// each zone change TWICE: once because the head moved, and again when
-	// the Mac wrote the PWM for the new zone. The ROM then measured a speed
-	// its own calibration did not predict. Reads survived zone 0 (boot
-	// blocks, MFS directory and the first tracks of the System file all sit
-	// in tracks 0-15) and failed at the first step into track 16, which is
-	// a happy Mac followed by the flashing '?'.
+	// disk_pwm is the SUM OF THE LOW 6 BITS OF 128 CONSECUTIVE sound-buffer
+	// words, not one sampled byte -- see dataController_top.sv for why that
+	// distinction is the whole bug. Range 0..8064.
 	//
 	// The map only has to be monotonic and to cover the CLV range the ROM
 	// asks for (periods 9996..6634, i.e. 500..750 RPM in the table above),
 	// because the actual byte rate this core delivers is fixed and does not
 	// depend on the modelled speed -- exactly as a real drive's constant
-	// data rate does not. 11000 - 20*pwm puts that range at pwm 50..218,
-	// leaving convergence headroom at both ends and staying inside 14 bits
-	// (5900..11000).
+	// data rate does not. The real duty->speed curve goes through a lookup
+	// table nobody here has, but the ROM closes its own loop by measuring,
+	// so a monotonic line with headroom at both rails converges just as
+	// well: 11000 - (duty*81 >> 7) spans 11000..5897 across the full range.
 	//
 	// Plus/SE/512Ke keep the track-indexed table: an 800K mechanism
 	// self-regulates, which is both authentic and already proven on
 	// hardware.
 	localparam [13:0] PWM_PERIOD_AT_ZERO = 14'd11000;
-	localparam [13:0] PWM_PERIOD_STEP    = 14'd20;
-	wire [13:0] pwm_span   = {6'b0, disk_pwm} * PWM_PERIOD_STEP; // 0..5100
-	wire [13:0] pwm_period = PWM_PERIOD_AT_ZERO - pwm_span;      // 11000..5900
+	// duty * 81 >> 7  ==  duty * 0.633; 81 = 64+16+1, so this is three adds.
+	wire [19:0] pwm_scaled = ({7'b0, disk_pwm} << 6) + ({7'b0, disk_pwm} << 4) + {7'b0, disk_pwm};
+	wire [13:0] pwm_span   = pwm_scaled[19:7];        // 0..5103
+	wire [13:0] pwm_period = PWM_PERIOD_AT_ZERO - pwm_span;
 	wire [13:0] driveTachPeriod = drive800k ? driveTachBase : pwm_period;
 	
 	always @(posedge clk or negedge _reset) begin

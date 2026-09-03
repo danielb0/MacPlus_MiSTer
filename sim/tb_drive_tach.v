@@ -32,7 +32,7 @@ module tb_drive_tach;
 	// and every measurement below would spin forever rather than fail.
 	reg rst_n = 1'b0;
 
-	reg  [7:0] pwm;
+	reg [12:0] pwm;   // AVERAGED duty (sum of low 6 bits x128), 0..8064
 	wire [7:0] rd400, rd800;
 
 	floppy dut400 (
@@ -110,10 +110,11 @@ module tb_drive_tach;
 
 	integer m_lo, m_hi, m8_lo, m8_hi;
 	integer m_trk0, m_trk40, m8_trk0, m8_trk40, m_slow, m_fast;
+	integer m_dith_a, m_dith_b, m_dith_c;
 
 	initial begin
 		$display("");
-		rst_n = 1'b0; pwm = 8'd128;
+		rst_n = 1'b0; pwm = 13'd4045;
 		repeat (4) @(posedge clk);
 		rst_n = 1'b1;
 		@(posedge clk); #1;
@@ -122,8 +123,8 @@ module tb_drive_tach;
 		$display("");
 
 		// ---- THE BUG: two PWMs must give two different measurements --------
-		pwm = 8'd96;  measure400(m_lo);
-		pwm = 8'd160; measure400(m_hi);
+		pwm = 13'd3034;  measure400(m_lo);
+		pwm = 13'd5057; measure400(m_hi);
 		$display("  400K drive: pwm=96 -> %0d clks, pwm=160 -> %0d clks", m_lo, m_hi);
 		ok("400K: two PWM values give DIFFERENT tach periods (divisor != 0)",
 		   m_lo != m_hi);
@@ -135,8 +136,8 @@ module tb_drive_tach;
 		// mechanism does, and it is the behaviour already proven on hardware
 		// for the Plus and SE. A fix that made them obey the PWM would be a
 		// regression dressed up as a feature.
-		pwm = 8'd96;  measure800(m8_lo);
-		pwm = 8'd160; measure800(m8_hi);
+		pwm = 13'd3034;  measure800(m8_lo);
+		pwm = 13'd5057; measure800(m8_hi);
 		$display("  800K drive: pwm=96 -> %0d clks, pwm=160 -> %0d clks", m8_lo, m8_hi);
 		ok("800K: self-regulating, PWM has NO effect (Plus/SE unregressed)",
 		   m8_lo == m8_hi);
@@ -153,7 +154,7 @@ module tb_drive_tach;
 		// (tracks 0-15: boot blocks, MFS directory, the first of the System
 		// file) and failed at the first step into track 16 -- a happy Mac,
 		// then the flashing '?'.
-		pwm = 8'd128;
+		pwm = 13'd4045;
 		force dut400.driveTrack = 7'd0;  measure400(m_trk0);
 		force dut400.driveTrack = 7'd40; measure400(m_trk40);
 		release dut400.driveTrack;
@@ -178,8 +179,8 @@ module tb_drive_tach;
 		// twice those.
 		// Probe the extremes, not a guessed midpoint: the question is whether
 		// the map SPANS the table, and only pwm 0 and 255 answer that.
-		pwm = 8'd0;   measure400(m_slow);
-		pwm = 8'd255; measure400(m_fast);
+		pwm = 13'd0;   measure400(m_slow);
+		pwm = 13'd8064; measure400(m_fast);
 		$display("  400K reachable span: %0d .. %0d clks (must span %0d .. %0d)",
 		         m_fast, m_slow, 2*6634, 2*9996);
 		ok("400K: slowest CLV zone (500 RPM) is reachable", m_slow >= 2*9996);
@@ -191,6 +192,35 @@ module tb_drive_tach;
 		// room to spare.
 		ok("400K: slow end has PWM headroom below it",  m_slow  >= 2*9996 + 400);
 		ok("400K: fast end has PWM headroom above it",  m_fast  <= 2*6634 - 400);
+
+		// ---- THE THIRD BUG: a DITHERED command must give a STABLE speed ----
+		// The Mac does not write one constant PWM byte. It writes a dithered
+		// sequence whose average over ~100 words is the duty (Guide to the
+		// Macintosh Family Hardware), so anything that samples a single word
+		// reads noise. This core did exactly that, and the tachometer was
+		// frequency-modulated at random: the ROM's speed measurement returned
+		// a different answer every attempt, no speed was ever accepted, and
+		// PFLP measured maxTrack=0 on both 64K models against 52 on a working
+		// Plus. Symptoms varied run to run, which is the signature.
+		//
+		// dataController_top.sv now averages, so by the time a duty reaches
+		// this module it is already smooth. What this checks is the property
+		// that failed on hardware: two duties that AVERAGE the same must give
+		// the same period, however they were dithered to get there.
+		pwm = 13'd4045; measure400(m_dith_a);
+		pwm = 13'd4045; measure400(m_dith_b);
+		ok("400K: the same duty measures the same period twice (no jitter)",
+		   m_dith_a == m_dith_b);
+
+		// And a duty one dither-step away must NOT swing the speed wildly --
+		// a single low-6-bit tick out of 128 words is 1/8064 of full scale,
+		// so it must move the period by less than one CLV zone (~800 counts),
+		// or the ROM's loop is chasing quantisation noise again.
+		pwm = 13'd4046; measure400(m_dith_c);
+		$display("  400K: duty 4045 -> %0d clks, 4045 -> %0d, 4046 -> %0d",
+		         m_dith_a, m_dith_b, m_dith_c);
+		ok("400K: one dither tick moves the period far less than a CLV zone",
+		   (m_dith_c > m_dith_a ? m_dith_c - m_dith_a : m_dith_a - m_dith_c) < 800);
 
 		$display("");
 		$display("DRIVE-TACH: %0d of %0d failing", fails, tests);

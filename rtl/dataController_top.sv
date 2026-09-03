@@ -168,7 +168,24 @@ module dataController_top(
 	// Spindle-speed PWM the Mac writes into the sound buffer's low bytes.
 	// Starts mid-scale so the drive idles at its nominal per-track speed
 	// before the Mac has written the buffer at all.
-	reg [7:0] disk_pwm = 8'd128;
+	// Spindle-speed duty, AVERAGED -- not a single sample.
+	//
+	// The Mac does not write one constant PWM byte into the sound buffer. It
+	// writes a DITHERED SEQUENCE, and the duty cycle is the average of the
+	// LOW 6 BITS over ~100 consecutive words (Guide to the Macintosh Family
+	// Hardware). Sampling one word therefore reads an arbitrary point on that
+	// dither -- noise -- which is what the first attempt here did, with all 8
+	// bits instead of 6. The tachometer was then frequency-modulated at
+	// random, the ROM's speed measurement returned a different answer every
+	// time, and the 64K models never accepted a speed: PFLP measured
+	// maxTrack=0 on both of them against 52 on a working Plus.
+	//
+	// 128 samples, not 100: a power of two makes the boxcar a shift, and the
+	// ROM closes its own loop by measurement, so the exact window length is
+	// not critical -- the noise rejection is.
+	reg [12:0] disk_pwm = 13'd4096; // mid-scale (64 * 128/2) until the Mac writes
+	reg [12:0] pwm_acc  = 13'd0;
+	reg  [6:0] pwm_cnt  = 7'd0;
 	reg [7:0] audio_prebuf;
 	reg [7:0] audio_sample;
 
@@ -184,8 +201,15 @@ module dataController_top(
 		// core exposed had an 800K drive, which self-regulates and ignores it.
 		// See floppy.v's tachometer for why throwing it away is what produced
 		// Sad Mac 0F0004.
-		if(clk8_en_p && loadSoundD)
-			disk_pwm <= memoryDataIn[7:0];
+		if(clk8_en_p && loadSoundD) begin
+			pwm_cnt <= pwm_cnt + 1'd1;
+			if (&pwm_cnt) begin
+				disk_pwm <= pwm_acc + {7'b0, memoryDataIn[5:0]};
+				pwm_acc  <= 13'd0;
+			end else begin
+				pwm_acc  <= pwm_acc + {7'b0, memoryDataIn[5:0]};
+			end
+		end
 
 		// Commit: transfer pre-buffer to output at Bresenham trigger time
 		if(clk8_en_p && snd_advance)

@@ -779,6 +779,68 @@ alive and looping, not wedged, which matches the flashing icon and rules out a
 bus hang. Worth keeping: **the probe deck plus a local disassembly turns a PC
 into a named routine**, which is far stronger evidence than a symptom.
 
+### What PFLP measured, and what the documentation then explained
+
+**Probe results, `398b34c4`:**
+
+| model | maxTrack | outcome |
+|---|---|---|
+| Plus | **52** | boots to the desktop |
+| 512K | **0** | fails |
+| 128K | **0** | fails |
+
+**Neither 64K model ever steps the head -- not once, across minutes of retrying.**
+That killed the CLV-zone theory outright (track 16 was never reached, so the two
+preceding fixes were repairing something off the failure path), and 512K failing
+identically exonerated RAM size. Daniel also reported the symptom is
+**inconsistent** -- flashing "?", flashing X, happy Mac, varying run to run and
+changing without input. **A deterministic logic error does not do that. Unstable
+data does.**
+
+**Two of the four probe fields were badly chosen and measured nothing**, which is
+worth recording so the mistake is not repeated: `curTrack` read 0 always,
+`switched` was a sticky seen-latch that any mount sets (a healthy Plus reads 1
+too), and the PWM **min/max** saturated to 0..255 on the working Plus as well as
+on the failures. Only `maxTrack` earned its bits. Min/max over a whole session
+was always going to saturate; the useful measurement is the LIVE value sampled
+repeatedly.
+
+**The documentation then named the bug** (Guide to the Macintosh Family
+Hardware, via the drive-emulation writeups):
+
+> To calculate the PWM duty cycle from the data in the sound buffer, convert the
+> **lower 6 bits** of each value using a table, **sum these over a period of
+> ~100 values**, then calculate the index.
+
+The Mac does **not** write one constant PWM byte into every word. It writes a
+**dithered sequence**, and the duty is the **average of the low 6 bits over
+~100 words**. This core sampled a **single word** and used **all 8 bits** -- an
+arbitrary point on a dither pattern, i.e. noise. The tachometer was therefore
+frequency-modulated at random, the ROM's speed measurement returned a different
+answer every attempt, no speed was ever accepted, and the head never seeked.
+It also explains why 0F0004 stopped: the tach did start varying, so the divisor
+was no longer zero -- it was just varying randomly instead of under the Mac's
+control.
+
+**Fix:** `dataController_top.sv` now accumulates the **low 6 bits** of 128
+consecutive sound-buffer words and hands `floppy.v` the sum (0..8064, 13 bits).
+128 rather than 100 because a power of two makes the boxcar a shift, and the ROM
+closes its own loop by measurement so the window length is not critical -- the
+noise rejection is. The tach map rescales to `11000 - (duty*81 >> 7)`, spanning
+11000..5897 against a CLV table needing 9996..6634.
+
+**Gate: `sim/tb_drive_tach.v` 12/12**, with two new checks aimed exactly at what
+failed on hardware: the same duty must measure the same period twice (no
+jitter), and one dither tick must move the period far less than a CLV zone
+rather than making the loop chase quantisation noise. Measured: 2 clocks.
+
+**Method lesson, twice over now.** Both times this stalled, the answer was in
+documentation rather than in more inference -- first the PWM speed-control
+mechanism behind 0F0004, now the dithered 6-bit encoding behind the unstable
+tach. Both times the earlier search result had already contained the answer in a
+subordinate clause. **When a 40-year-old hardware behaviour is in question, read
+the spec before theorising.**
+
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
 model whose ROM probes -- then extend the gate to `configROMSize == 2'b00` so

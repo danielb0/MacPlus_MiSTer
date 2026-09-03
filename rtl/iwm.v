@@ -54,7 +54,7 @@ module iwm
 	output [1:0] diskEject,
 	input [1:0] diskSides,
 	input drive800k, // drive MECHANISM: see floppy.v's port comment
-	input [7:0] disk_pwm, // spindle-speed PWM: see floppy.v's tachometer
+	input [12:0] disk_pwm, // AVERAGED spindle duty: see floppy.v's tachometer
 	output [31:0] dbg_floppy, // internal drive only -- see floppy.v
 	
 	output [1:0] diskMotor,
