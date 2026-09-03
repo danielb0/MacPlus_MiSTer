@@ -35,7 +35,7 @@ module tb_mac_model;
 	wire [1:0] configROMSize;
 	wire [1:0] configRAMSize;
 	wire       machineType;
-	wire       romSlot;
+	wire [1:0] romSlot;
 
 	integer tests = 0;
 	integer fails = 0;
@@ -56,7 +56,7 @@ module tb_mac_model;
 		input [1:0]    rom;
 		input [1:0]    ram;
 		input          mtype;
-		input          slot;
+		input [1:0]    slot;
 		begin
 			tests = tests + 1;
 			if (configROMSize === rom && configRAMSize === ram &&

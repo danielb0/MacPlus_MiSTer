@@ -349,7 +349,7 @@ assign AUDIO_MIX = 0;
 wire [1:0] configROMSize;
 wire [1:0] configRAMSize;
 wire       machineType;
-wire       romSlot;
+wire [1:0] romSlot;
 
 mac_model mac_model
 (
@@ -986,6 +986,16 @@ wire dio_download;
 wire [23:0] dio_addr = ioctl_addr[24:1];
 wire  [7:0] dio_index;
 
+// rtl/rom_word_addr.v instantiated once per side (download, read) below,
+// rather than each side writing its own concatenation -- see that file for
+// why. dio_index[7:6] is the boot-ROM slot Main_MiSTer is currently sending;
+// romSlot (from mac_model) is the slot the running model reads from.
+wire [20:0] dio_rom_addr;
+rom_word_addr rom_word_addr_dl (.slot(dio_index[7:6]), .word_offset(dio_addr[17:0]),    .addr(dio_rom_addr));
+
+wire [20:0] rom_read_addr;
+rom_word_addr rom_word_addr_rd (.slot(romSlot),        .word_offset(memoryAddr[18:1]),  .addr(rom_read_addr));
+
 // good floppy image sizes are 819200 bytes and 409600 bytes
 reg dsk_int_ds, dsk_ext_ds;  // double sided image inserted
 reg dsk_int_ss, dsk_ext_ss;  // single sided image inserted
@@ -1035,9 +1045,10 @@ always @(posedge clk_sys) begin
 	end
 end
 
-// ROM is being stored at word offset 0x00000/0x40000 (normal/alt, bit6-selected).
-// Floppy images no longer come through here as of Phase 1 - see the
-// floppy_loader instances above.
+// ROM is being stored at word offset 0x00000/0x40000/0x80000/0xC0000, one per
+// boot-ROM slot (rom_word_addr above; MAC128K_PLAN.md Phase 2 widened this
+// from two slots to four). Floppy images no longer come through here as of
+// SCSI_UPGRADE_PLAN.md Phase 1 - see the floppy_loader instances above.
 reg [20:0] dio_a;
 reg [15:0] dio_data;
 reg        dio_write;
@@ -1047,7 +1058,7 @@ always @(posedge clk_sys) begin
 
 	if(ioctl_write) begin
 		dio_data <= {ioctl_data[7:0], ioctl_data[15:8]};
-		dio_a <= {dio_index[6], dio_addr[17:0]};
+		dio_a <= dio_rom_addr;
 		ioctl_wait <= 1;
 	end
 
@@ -1063,7 +1074,7 @@ wire download_cycle = dio_download && dioBusControl;
 ////////////////////////// SDRAM /////////////////////////////////
 
 wire [24:0] sdram_addr = download_cycle ? {4'b0001, dio_a[20:0] } :
-                         ~_romOE        ? {4'b0001, 2'b00, romSlot, memoryAddr[18:1]} :
+                         ~_romOE        ? {4'b0001, rom_read_addr} :
                                           {3'b000, (dskReadAckInt || dskReadAckExt || dskLoadWrEn), memoryAddr[21:1]};
 
 wire [15:0] sdram_din  = download_cycle ? dio_data  : dskLoadWrEn ? slot3_wr_data : memoryDataOut;

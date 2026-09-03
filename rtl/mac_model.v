@@ -29,9 +29,10 @@
 // Plus and SE, which had SIMM sockets, honour `mem_big`.
 //
 // The 64K-ROM models (Macintosh 128K and 512K) are deliberately absent here.
-// They need the third ROM slot from Phase 2; encoding them now would point
-// them at slot 0, which holds the Plus 128K image, and they would run the
-// wrong ROM. They arrive with Phase 3.
+// They need the third ROM slot from Phase 2, added below but not yet claimed
+// by a model: encoding them before Phase 2 landed would have pointed them at
+// slot 0, which holds the Plus 128K image, and they would have run the wrong
+// ROM. They arrive with Phase 3.
 //
 module mac_model
 (
@@ -42,7 +43,7 @@ module mac_model
 	output reg [1:0] configROMSize, // 0 = 64K, 1 = 128K, 2 = 256K, 3 = 512K
 	output reg [1:0] configRAMSize, // 0 = 128K, 1 = 512K, 2 = 1MB, 3 = 4MB
 	output reg       machineType,   // 0 = Plus-like, 1 = SE
-	output reg       romSlot        // which 512KB ROM window to read from
+	output reg [1:0] romSlot        // which bootN.rom to read: MacPlus.sv:1050
 );
 
 	// Model 0 MUST be the Plus. `status` defaults to zero, and the core's
@@ -52,13 +53,23 @@ module mac_model
 	localparam [2:0] MODEL_SE    = 3'd1;
 	localparam [2:0] MODEL_512KE = 3'd2;
 
+	// Slot numbers, not one-hot bits: Main_MiSTer's boot-ROM loader packs the
+	// slot as a plain binary count in ioctl_index[7:6] (user_io.cpp:1619,
+	// `i << 6` for i = 0..3, confirmed against the Main_MiSTer source, not
+	// inferred from file sizes). MacPlus.sv:1050 uses these same values to
+	// pick the read-side SDRAM window, so a slot number here IS the boot file
+	// number: ROM_SLOT_PLUS reads releases/boot0.rom, and so on.
+	localparam [1:0] ROM_SLOT_PLUS = 2'd0; // releases/boot0.rom, 128K
+	localparam [1:0] ROM_SLOT_SE   = 2'd1; // releases/boot1.rom, 256K
+	// ROM_SLOT_64K = 2'd2 (boot2.rom) is reserved for Phase 3's 128K/512K.
+
 	always @(*) begin
 		case (model)
 			MODEL_SE: begin
 				configROMSize = 2'b10;                    // 256K, releases/boot1.rom
 				configRAMSize = mem_big ? 2'b11 : 2'b10;  // 4MB / 1MB
 				machineType   = 1'b1;
-				romSlot       = 1'b1;
+				romSlot       = ROM_SLOT_SE;
 			end
 
 			// A 512Ke is a Plus with 512K soldered in and no SCSI. It shipped
@@ -70,7 +81,7 @@ module mac_model
 				configROMSize = 2'b01;                    // same 128K ROM as the Plus
 				configRAMSize = 2'b01;                    // 512K, soldered
 				machineType   = 1'b0;
-				romSlot       = 1'b0;
+				romSlot       = ROM_SLOT_PLUS;
 			end
 
 			// MODEL_PLUS, and every reserved encoding. Falling back to the
@@ -80,7 +91,7 @@ module mac_model
 				configROMSize = 2'b01;                    // 128K, releases/boot0.rom
 				configRAMSize = mem_big ? 2'b11 : 2'b10;  // 4MB / 1MB
 				machineType   = 1'b0;
-				romSlot       = 1'b0;
+				romSlot       = ROM_SLOT_PLUS;
 			end
 		endcase
 	end
