@@ -107,30 +107,31 @@ That matches what ships: `releases/boot0.rom` is 131072 bytes (the Plus 128K
 ROM) and `releases/boot1.rom` is 262144 bytes (the SE 256K ROM). A third model
 needs a third slot, or a scheme that reuses one.
 
-Two candidate approaches, to be decided in Phase 2 rather than now:
+**DONE, `c2c06c1`. Widening was confirmed correct, not merely chosen.** The plan
+flagged the index encoding as consistent with the two-file/bit-6 evidence but
+unproven, and to confirm it in Main_MiSTer before relying on it. Read the actual
+source: `user_io.cpp:1619` sends `boot0.rom`..`boot3.rom` as `i << 6` in
+`ioctl_index` for `i = 0..3`, and `user_io_file_tx` (`user_io.cpp:2724`) packs
+that as `ioctl_index[7:6]`. So `dio_index[7:6]` was exactly right -- and it
+comes with a hard ceiling worth having on record: the loader loop is `i < 4`, so
+Main_MiSTer supports at most four boot ROMs. A fifth slot needs a change there
+too, not just here. Moot for this project, since one extra slot is all Phase
+2/3 need, but not moot in general.
 
-- **Widen the selector.** `status_mod` becomes 2 bits, the read-side window
-  index becomes 2 bits, and the download side uses `dio_index[7:6]` instead of
-  `dio_index[6]`, giving four slots and a `boot2.rom`. Costs 512KB more
-  reserved SDRAM. Cleanest, and symmetrical with both the existing design and
-  the framework's `bootN.rom` convention. **Confirm the exact index encoding in
-  Main_MiSTer before relying on it** - the index is set HPS-side
-  (`sys/hps_io.sv:665` merely latches it), and the two-file/bit-6 evidence is
-  consistent with `index = N<<6` but does not prove it.
-- **Share the Plus slot.** The 64K image is addressed at $20000 within its
-  512KB slot, and the Plus 128K image occupies $00000-$1FFFF - so they do not
-  overlap and could share one slot, loaded from one combined file. Costs no
-  SDRAM but couples two unrelated images into one download.
+Implemented as a shared module, `rtl/rom_word_addr.v`, instantiated once per
+side (download, read) rather than as two independently widened concatenations.
+Before this, the two sides agreeing on where the slot number sits in the
+address was coincidental; now it is structural, for the same reason
+`rtl/mac_model.v` centralizes `machineType` rather than trusting two call sites
+to stay in sync. Gate: `sim/tb_rom_word_addr.v`, 19/19, mutation-tested (a
+misplaced slot field and a wrong shift amount each fail 3 of 19 -- the four
+named boot-file-window checks, which is exactly what should catch this class of
+bug, since the agreement checks alone would not: a fault inside one shared
+module affects both instantiations identically).
 
-Widening is the recommendation. The diff evidence below says one extra slot
-(`boot2.rom`) is very likely enough, since the two 64K images differ only by a
-floppy-driver revision and an interrupt-mask fix -- so let the user choose which
-image goes in that slot. Widening also does not care if that inference turns out
-wrong: a second extra slot is then just one more index value.
-
-Note also that `MacPlus.sv:336` declares `localparam configROMSize = 1'b1;` and
-**never references it** - line 620 passes a literal concat instead. Dead code;
-delete it while in the area, before it misleads someone.
+Note also that `MacPlus.sv:336` declared `localparam configROMSize = 1'b1;` and
+**never referenced it** - line 620 passed a literal concat instead. Dead code;
+removed in Phase 1 (`21c0460`).
 
 ## The ROM images exist
 
@@ -316,10 +317,11 @@ The self-consistency argument survives in a stronger form: a real 128K was safe
 from this not merely because it lacked SCSI hardware, but because its ROM would
 not have touched a SCSI disk even if one had been attached.
 
-This also gives the Phase 2 falsification test a second job. Booting the 64K ROM
-with SCSI still enabled now tests the no-SCSI-Manager assumption *and* predicts
-a clean boot with an HFS disk mounted. One test, both confirmations -- and if it
-fails, both claims fall together.
+This also gives the falsification test a second job (it runs in Phase 3, not
+Phase 2 -- see that phase below, corrected after the plan first misplaced it).
+Booting the 64K ROM with SCSI still enabled tests the no-SCSI-Manager assumption
+*and* predicts a clean boot with an HFS disk mounted. One test, both
+confirmations -- and if it fails, both claims fall together.
 
 ## Open questions
 
@@ -436,10 +438,14 @@ have 4MB", RAM size is **derived** for the soldered-RAM machines -- the 128K,
 512K and 512Ke were not expandable, so only the Plus and SE honour the OSD
 Memory option and no invented configuration exists to guard against.
 
-**Phase 2 - 64K ROM delivery.** Item 1. Verifiable in simulation before
-hardware: a bench asserting that ROM reads at $400000 land on the right SDRAM
-words for each model. Settle the one-image-or-two question first, since it sizes
-the scheme. Ends with the SCSI-Manager falsification test above.
+**Phase 2 - 64K ROM delivery. DONE, `c2c06c1`.** Item 1. Verified in simulation,
+not yet hardware: `sim/tb_rom_word_addr.v` asserts that a byte written for slot
+N reads back from slot N, for all four slots. No model points at the new slot
+yet -- `rtl/mac_model.v` leaves it reserved -- so there is nothing to boot and
+nothing to see on hardware from this phase alone. **The SCSI-Manager
+falsification test cannot run here after all**, on reflection while writing
+this up: it needs a booting 64K model, which does not exist until Phase 3. Moved
+below, where it belongs.
 
 **Phase 3 - Mac 512K, then Mac 128K.** The first authentic deliverable. Wire
 `configROMSize == 2'b00` to the selector, expose the 128K RAM size, and add item
@@ -450,10 +456,19 @@ these models to boot, and leaving it on is what makes the no-SCSI-Manager
 assumption observable rather than asserted. Gating it here would also add a
 variable to the phase that delivers the first authentic machine.
 
-Hardware pass criterion: boots System 1 or 2 from **the same 400K MFS image the
+Hardware pass criteria: boots System 1 or 2 from **the same 400K MFS image the
 Plus core already boots**, reports the right RAM, and Plus/SE/512Ke-shaped
 models are unregressed. Using that specific image is the point -- it is a
 control, so a failure cannot be blamed on the disk.
+
+This is also where the **SCSI-Manager falsification test** runs (moved here
+from Phase 2, where it could not yet run): with a SCSI hard disk still mounted,
+confirm the 64K ROM boots this HFS-formatted machine cleanly with no complaint.
+That both confirms the no-SCSI-Manager assumption this plan's phase order rests
+on, and predicts the outcome of Daniel's Finder-1.1g observation for these
+models: since the 64K ROM never scans the bus, the System-1.x-vs-SCSI failure
+seen on the Plus should not reproduce here. If it does reproduce, both claims
+fall together and Phase 4's scope grows to cover the 64K models sooner.
 
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
