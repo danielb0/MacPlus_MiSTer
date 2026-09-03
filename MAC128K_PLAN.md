@@ -447,9 +447,15 @@ falsification test cannot run here after all**, on reflection while writing
 this up: it needs a booting 64K model, which does not exist until Phase 3. Moved
 below, where it belongs.
 
-**Phase 3 - Mac 512K, then Mac 128K. RTL/sim DONE, `83cd840`; hardware test
-2026-09-03 HUNG, and the two causes are fixed in RTL/sim -- see "Phase 3's boot
-hang" below. Hardware RE-TEST still outstanding.** The first authentic
+**Phase 3 - Mac 512K, then Mac 128K. DONE AND HARDWARE-CONFIRMED 2026-09-03,
+build `46aec82a`: the Mac 128K BOOTS TO THE FINDER DESKTOP.** The first
+authentic pre-Plus machine in this core. Six bugs, every one reachable only by
+a 64K model, are written up in the sections below -- keep them for the lessons,
+not as open work. Known-good probe baseline at the desktop: `maxTrack=52`
+(matching a working Plus), duty index settled at 52/199, which is the
+documented ~402 rpm operating point for tracks 0-15.
+
+The first authentic
 deliverable. Wired
 `configROMSize == 2'b00` to the selector, exposed the 128K/512K RAM sizes, and
 added item 8. `sim/tb_mac_model.v` extended to 22/22, mutation-tested.
@@ -945,6 +951,44 @@ can produce) and that the window is exactly 100 samples.
 0 = single-sided 400K drive; and the whole drive-command decode --
 TRACKUP/TRACKDN via CA2, TRACKSTEP, MOTORON/MOTOROFF, TACH at
 {CA2,CA1,CA0,HEADSEL} = 0111, SIDES at 1100 -- all match.
+
+### SOLVED: the 128K boots (`46aec82a`, 2026-09-03)
+
+Applying the documented conversion table closed it. Probe at the desktop:
+
+```
+maxTrack = 52 (CLV zone 3)   step requests: 127+ (saturated)
+duty index = 52/199          <- settled, not railed
+```
+
+`maxTrack 52` is exactly what a working Plus reports. The duty settling near
+**50** is the confirmation that matters: the documented operating point for
+tracks 0-15 (~402 rpm) is index ~101 of 399, i.e. ~50 on the probe's halved
+scale. **The ROM's calibration loop converged where the specification says it
+should**, which is a much stronger result than "it happens to boot".
+
+**Scorecard for the whole hunt.** Six bugs, every one reachable only by a 64K
+model, because `configROMSize == 2'b00` and `configRAMSize == 2'b00/01` were
+unreachable dead code before this phase:
+
+| # | bug | found by |
+|---|---|---|
+| 1 | ROM slot 2 exactly aliased the internal floppy image | reading the SDRAM map |
+| 2 | 64K ROM read from `$20000` inside its slot | reading the RTL |
+| 3 | `SIDES` reported a double-sided mechanism | documentation (correct, but not a cause) |
+| 4 | spindle ignored the PWM -> divide by zero | documentation |
+| 5 | duty sampled not averaged, 8 bits not 6 | documentation |
+| 6 | **6-bit field used raw instead of through the conversion TABLE** | documentation |
+
+Plus a timing failure (setup slack -3.945 ns) I introduced and caught before it
+shipped, and which would have produced exactly the intermittent behaviour being
+hunted.
+
+**Remaining Phase 3 items to confirm at leisure:** that the reported RAM matches
+the model, that Plus/SE are unregressed (the ROM region moved under them and
+`SIDES` became a signal), and the SCSI-Manager falsification test -- SCSI was
+deliberately left enabled throughout, so a clean boot with a SCSI disk mounted
+confirms the assumption this plan's phase order rests on.
 
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
