@@ -447,9 +447,19 @@ falsification test cannot run here after all**, on reflection while writing
 this up: it needs a booting 64K model, which does not exist until Phase 3. Moved
 below, where it belongs.
 
-**Phase 3 - Mac 512K, then Mac 128K.** The first authentic deliverable. Wire
-`configROMSize == 2'b00` to the selector, expose the 128K RAM size, and add item
-8. 512K first, because it changes one thing less than the 128K does.
+**Phase 3 - Mac 512K, then Mac 128K. RTL/sim DONE, `83cd840`; hardware
+verification NOT YET RUN.** The first authentic deliverable. Wired
+`configROMSize == 2'b00` to the selector, exposed the 128K/512K RAM sizes, and
+added item 8. `sim/tb_mac_model.v` extended to 22/22, mutation-tested.
+
+Renumbered `MODEL_512KE` from 2 to 4 while doing this -- see `rtl/mac_model.v`'s
+own comment for why (the Phase 1 comment's assumed ordering did not survive
+contact with "512Ke isn't exposed in the OSD yet" and MiSTer's OSD parser
+having no established way to leave a numbered gap).
+
+Still needed before the pass criteria below can be checked: place the chosen
+64K ROM image as `releases/boot2.rom`, and a Quartus compile -- **not run without
+asking first**, per standing rule.
 
 **SCSI stays enabled through this phase, deliberately.** It is not needed for
 these models to boot, and leaving it on is what makes the no-SCSI-Manager
