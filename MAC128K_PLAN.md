@@ -223,10 +223,40 @@ clue to how detection works.
 | 2 | Model selector 1 bit -> 2 bits, and `configROMSize` driven from it | `MacPlus.sv:89,134,620` | small |
 | 3 | `configRAMSize` reachable for 128K/512K | `MacPlus.sv:338` | trivial |
 | 4 | Couple RAM options to model (a 128K cannot have 4MB) | `MacPlus.sv:89,338` | small, mostly OSD |
-| 5 | Gate SCSI off for non-Plus models | `MacPlus.sv:632,694,1098` | small |
+| 5 | Gate SCSI off for non-Plus models | `MacPlus.sv:632,694,1098` | small, but **likely required for the 64K models to boot at all** - see below |
 | 6 | Delete the dead `configROMSize` localparam | `MacPlus.sv:336` | trivial |
 | 7 | **Synthetic bus error for the unmapped SCSI window** | `MacPlus.sv:489,548,600` | **real work** - blocks an authentic 512Ke |
 | 8 | Refuse 800K images in 128K/512K mode | `MacPlus.sv:965-1013` | small - a 400K-only drive cannot take one |
+
+## System 1.x will not boot with a SCSI disk mounted
+
+Observed 2026-09-03 (Daniel): the Plus core boots Finder 1.1g from a 400K disk,
+but **not** if a SCSI hard disk is mounted. Recorded here because it changes
+item 5's priority, and because it should be confirmed rather than assumed.
+
+**The likely mechanism, and it is authentic.** Finder 1.1g is May 1984. It
+predates HFS (September 1985, with the HD20) and SCSI (January 1986) alike, and
+is MFS-only. But the Plus's 128K ROM *has* HFS and mounts an HFS volume itself
+at boot, before the Finder is involved -- so a 1984 Finder is handed a volume
+type it has no concept of. No bug is needed to explain the failure. (A second
+candidate: the ROM also loads and installs the driver from the disk's driver
+descriptor map, which is 1986+ code. Less likely to be the operative one.)
+
+**What must be ruled out.** "Boots fine without the device, hangs with it" is
+exactly the fingerprint of the CD-at-boot wedge, which also looked like period
+behaviour and was not -- three theories died before `40f2e1c1`. Discriminate
+with the cheap test from `macplus-macpaint-relaunch-system-error`: sample
+`PACT` twice. Advancing (millions of cycles) means the CPU is running, so a
+software crash or spin -- authentic. Frozen means the CPU is stalled mid-access,
+so a bus wedge -- ours. The visible symptom sorts it too: a bomb box or Sad Mac
+is software; a silent hang with no disk activity is a wedge.
+
+**Why it matters to this plan.** If authentic, gating SCSI off for the 64K
+models is not cosmetic -- it is what makes them **usable**, since a 128K or 512K
+running System 1.x with our SCSI present would hit this on every boot. That is
+also self-consistent: a real 128K had no SCSI, so System 1.1 never met this
+problem on the machine it shipped with. Item 5 is promoted accordingly, and is
+scheduled in Phase 3 where it belongs rather than deferred to Phase 4.
 
 ## Open questions
 
