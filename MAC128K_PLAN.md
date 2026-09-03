@@ -298,10 +298,20 @@ confused with an RTL fault. No RTL change, and no emulator.
   byte order, which matters because the download path swaps
   (`MacPlus.sv:1017`). The Mac checks the same sum at power-on, so a bad image
   would give a Sad Mac ROM-checksum code rather than a mystery.
-- **MFS 400K boot disk: outstanding.** Validate it by booting it on the
-  **existing Plus core** on the rig -- the Plus ROM reads MFS, so a Plus that
-  boots it proves the image is sound and leaves only the 64K-ROM-specific path
-  unproven. No emulator and no new tooling.
+- **MFS 400K boot disk: DONE, already tested.** The Plus core boots System 1
+  and System 2 from a 400K disk, hardware-tested (Daniel, 2026-09-03), as a
+  real Plus does. So the image is known-good before this project starts, and no
+  emulator or new tooling is needed.
+
+  This is worth more than a retired risk: it makes the Phase 3 disk a
+  **control**. If the same image that boots on the Plus fails on the 128K, the
+  disk is exonerated by construction and the fault is in ROM delivery, RAM
+  sizing or the 64K decode. It is also incidental evidence for item 8 -- the
+  floppy path already boots a single-sided 400K image, so `DRIVE_REG_SIDES`
+  behaves in a boot scenario and not only a data one.
+
+Phase 0 therefore reduces to recording the rig baseline. Both assets are
+already validated.
 
 **Phase 1 - model selector and RAM sizing.** Items 2, 3, 4, 6. Needs no new ROM.
 Proves the selector widening without depending on the ROM-delivery design.
@@ -316,8 +326,10 @@ the scheme. Ends with the SCSI-Manager falsification test above.
 **Phase 3 - Mac 512K, then Mac 128K.** The first authentic deliverable. Wire
 `configROMSize == 2'b00` to the selector, expose the 128K RAM size, and add
 items 5 and 8. 512K first, because it changes one thing less than the 128K does.
-Hardware pass criterion: boots System 1.x/2.x from the MFS image validated in
-Phase 0, reports the right RAM, and Plus/SE/512Ke-shaped models are unregressed.
+Hardware pass criterion: boots System 1 or 2 from **the same 400K MFS image the
+Plus core already boots**, reports the right RAM, and Plus/SE/512Ke-shaped
+models are unregressed. Using that specific image is the point -- it is a
+control, so a failure cannot be blamed on the disk.
 
 **Phase 4 - bus error, and with it the real 512Ke.** Items 5 (for the Plus ROM
 case) and 7. This is where `addrDecoder.v:119` may finally have to be
