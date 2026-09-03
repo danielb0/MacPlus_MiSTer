@@ -105,35 +105,54 @@ module disk_pwm_duty
 		endcase
 	endfunction
 
+	// PIPELINED IN THREE STAGES, deliberately. Doing the accumulate, the
+	// sum*205 scaling and the clamp in one combinational chain overran the
+	// clk_sys setup budget by 3.9 ns (Quartus reported a real timing
+	// failure, slack -3.945). Samples arrive roughly every 2 us and the
+	// window is 100 of them, so spending two extra CYCLES here costs
+	// nothing measurable and buys a comfortable path.
 	reg [12:0] acc = 13'd0;
 	reg  [6:0] cnt = 7'd0;
 
+	// ---- stage 1: accumulate ------------------------------------------
 	wire [12:0] sum_next = acc + {7'b0, pwm_convert(sample)};
-
-	// sum/10 as sum*205 >> 11 (0.100098, ~0.1% high). Max sum = 100*63 = 6300.
-	wire [23:0] scaled  = sum_next * 24'd205;
-	wire [12:0] tenth   = scaled[23:11];
-	wire signed [14:0] idx = $signed({2'b0, tenth}) - 15'sd11;
-
-	wire [8:0] idx_clamped = (idx <= 0)        ? 9'd0   :
-	                         (idx >= 15'sd399) ? 9'd399 :
-	                                             idx[8:0];
-
-	// Mid-scale until the Mac has written the buffer at all, so the drive idles
-	// at a plausible speed rather than at a rail.
-	initial duty_index = 9'd200;
+	reg [12:0] sum_final = 13'd0;
+	reg        sum_ready = 1'b0;
 
 	always @(posedge clk) begin
+		sum_ready <= 1'b0;
 		if (sample_en) begin
 			if (cnt == 7'd99) begin      // the 100th sample completes the window
-				duty_index <= idx_clamped;
-				acc        <= 13'd0;
-				cnt        <= 7'd0;
+				sum_final <= sum_next;
+				sum_ready <= 1'b1;
+				acc       <= 13'd0;
+				cnt       <= 7'd0;
 			end else begin
 				acc <= sum_next;
 				cnt <= cnt + 1'd1;
 			end
 		end
 	end
+
+	// ---- stage 2: scale (sum/10 as sum*205 >> 11, 0.100098) -----------
+	reg [23:0] scaled  = 24'd0;
+	reg        scl_rdy = 1'b0;
+	always @(posedge clk) begin
+		scl_rdy <= sum_ready;
+		if (sum_ready) scaled <= sum_final * 24'd205;
+	end
+
+	// ---- stage 3: offset, clamp, publish ------------------------------
+	wire [12:0] tenth = scaled[23:11];
+	wire signed [14:0] idx = $signed({2'b0, tenth}) - 15'sd11;
+	wire [8:0] idx_clamped = (idx <= 0)        ? 9'd0   :
+	                         (idx >= 15'sd399) ? 9'd399 :
+	                                             idx[8:0];
+
+	// Mid-scale until the Mac has written the buffer at all, so the drive
+	// idles at a plausible speed rather than at a rail.
+	initial duty_index = 9'd200;
+
+	always @(posedge clk) if (scl_rdy) duty_index <= idx_clamped;
 
 endmodule

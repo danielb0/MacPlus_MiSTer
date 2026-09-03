@@ -41,12 +41,21 @@ module tb_disk_pwm_duty;
 		end
 	endtask
 
+	// The duty pipeline is three stages deep (accumulate, scale, clamp), so
+	// the published index lags the 100th sample by two clocks. That latency
+	// is deliberate -- a single-cycle version missed the clk_sys setup
+	// budget by 3.9 ns -- and is irrelevant in service, where samples arrive
+	// every ~2 us. Every push settles it so the checks below read the
+	// published value rather than a stage in flight.
+	task settle; begin repeat (4) @(negedge clk); end endtask
+
 	// Push n samples of a constant value.
 	task push; input [5:0] v; input integer n; integer k; begin
 		for (k = 0; k < n; k = k + 1) begin
 			@(negedge clk); sample = v; sample_en = 1;
 			@(negedge clk); sample_en = 0;
 		end
+		settle;
 	end endtask
 
 	// Push one full 100-sample window alternating between two values.
@@ -55,6 +64,7 @@ module tb_disk_pwm_duty;
 			@(negedge clk); sample = (k[0] ? b : a); sample_en = 1;
 			@(negedge clk); sample_en = 0;
 		end
+		settle;
 	end endtask
 
 	initial begin
