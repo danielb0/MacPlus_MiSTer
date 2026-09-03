@@ -86,7 +86,14 @@ localparam CONF_STR = {
 	"O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
 	"-;",
-	"O9,Model,Plus,SE;",
+	// Bits 1-3, not the single bit 9 this used to be: the model list has to
+	// reach five entries (Plus, SE, 512Ke, 512K, 128K) and bit 10 next door is
+	// the serial input, so the field had to move somewhere contiguous and
+	// free. Only Plus and SE are offered yet - the 512Ke waits on SCSI
+	// absence (Phase 4) and the 64K models on the third ROM slot (Phase 2).
+	// Moving the field is an incompatible layout change, hence the config
+	// version bump below.
+	"O13,Model,Plus,SE;",
 	"O5,Speed,8MHz,16MHz;",
 	"O6,Floppy Write,Off,On;",
 	"ODE,CPU,68000,68010,68020;",
@@ -95,7 +102,7 @@ localparam CONF_STR = {
 	//"OA,Serial,Off,On;",
 	//"-;",
 	"R0,Reset & Apply CPU+Memory;",
-	"v,0;", // [optional] config version 0-99. 
+	"v,1;", // [optional] config version 0-99.
 	        // If CONF_STR options are changed in incompatible way, then change version number too,
 			// so all options will get default values on first start.
 	"V,v",`BUILD_DATE
@@ -118,7 +125,7 @@ pll pll
 
 reg       status_mem;
 reg [1:0] status_cpu;
-reg       status_mod;
+reg [2:0] status_model;
 reg       n_reset = 0;
 always @(posedge clk_sys) begin
 	reg [15:0] rst_cnt;
@@ -133,7 +140,7 @@ always @(posedge clk_sys) begin
 			rst_cnt    <= rst_cnt - 1'd1;
 			status_mem <= status[4];
 			status_cpu <= status[14:13];
-			status_mod <= status[9];
+			status_model <= status[3:1];
 		end
 		else begin
 			n_reset <= 1;
@@ -332,10 +339,27 @@ assign AUDIO_MIX = 0;
 
 
 
-// set the real-world inputs to sane defaults
-localparam 	  configROMSize = 1'b1;  // 128K ROM
+// The model selection becomes hardware straps in one place. See rtl/mac_model.v
+// for why machineType is a Plus-vs-SE boolean rather than the model number,
+// and why RAM size is derived rather than chosen for the soldered-RAM models.
+//
+// (The `localparam configROMSize = 1'b1` that used to sit here was dead - it
+// was declared and never referenced, because the instantiation below passed a
+// literal concat instead.)
+wire [1:0] configROMSize;
+wire [1:0] configRAMSize;
+wire       machineType;
+wire       romSlot;
 
-wire [1:0] configRAMSize = status_mem?2'b11:2'b10; // 1MB/4MB
+mac_model mac_model
+(
+	.model         ( status_model  ),
+	.mem_big       ( status_mem    ),
+	.configROMSize ( configROMSize ),
+	.configRAMSize ( configRAMSize ),
+	.machineType   ( machineType   ),
+	.romSlot       ( romSlot       )
+);
 			  
 //
 // Serial Ports
@@ -617,7 +641,7 @@ addrController_top ac0
 	._cpuRW(_cpuRW),
 	._cpuAS(_cpuAS),
 	.turbo(status_turbo),
-	.configROMSize({status_mod,~status_mod}),
+	.configROMSize(configROMSize),
 	.configRAMSize(configRAMSize), 
 	.memoryAddr(memoryAddr),
 	.memoryLatch(memoryLatch),
@@ -674,7 +698,7 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.clk16_en_n(clk16_en_n),
 	.E_rising(E_rising),
 	.E_falling(E_falling),
-	.machineType(status_mod),
+	.machineType(machineType),
 	.turbo(status_turbo),
 	._systemReset(n_reset),
 	._cpuReset(_cpuReset), 
@@ -1039,7 +1063,7 @@ wire download_cycle = dio_download && dioBusControl;
 ////////////////////////// SDRAM /////////////////////////////////
 
 wire [24:0] sdram_addr = download_cycle ? {4'b0001, dio_a[20:0] } :
-                         ~_romOE        ? {4'b0001, 2'b00, status_mod, memoryAddr[18:1]} :
+                         ~_romOE        ? {4'b0001, 2'b00, romSlot, memoryAddr[18:1]} :
                                           {3'b000, (dskReadAckInt || dskReadAckExt || dskLoadWrEn), memoryAddr[21:1]};
 
 wire [15:0] sdram_din  = download_cycle ? dio_data  : dskLoadWrEn ? slot3_wr_data : memoryDataOut;
