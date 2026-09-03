@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 //
-// tb_mac_model.v - MAC128K_PLAN.md Phase 1 gate.
+// tb_mac_model.v - MAC128K_PLAN.md Phase 1/3 gate.
 //
 // mac_model.v is pure combinational logic, so the interesting failures are not
 // timing but wrong table entries -- and a wrong entry here is silent. A model
@@ -9,23 +9,26 @@
 // keyboard. Neither announces itself, so every entry is asserted explicitly
 // rather than spot-checked.
 //
-// Three properties matter more than the individual rows:
+// Four properties matter more than the individual rows:
 //
 //   1. Model 0 is the Plus. `status` defaults to zero, so if this ever moves,
 //      every existing user's config silently changes machine on next start.
 //
 //   2. Reserved encodings fall back to the Plus. The model field is 3 bits
-//      but only three values are defined, and a config saved by a future
+//      but only five values are defined, and a config saved by a future
 //      build (or a corrupt one) must not latch an undefined strap.
 //
 //   3. mem_big is honoured ONLY where the real machine had sockets. The
-//      512Ke had its 512K soldered down; if mem_big leaked into it, the OSD
-//      Memory option would invent a machine that never existed.
+//      128K, 512K and 512Ke had their RAM soldered down; if mem_big leaked
+//      into any of them, the OSD Memory option would invent a machine that
+//      never existed.
 //
-// The 64K-ROM models are not tested because they are not yet implemented --
-// they need Phase 2's third ROM slot. When Phase 3 adds them, the reserved-
-// encoding assertions below are what will fail, and that is the intended
-// signal to update this bench alongside the table.
+//   4. The 512K and 128K both read ROM slot 2 (boot2.rom), and neither is
+//      machineType 1. Phase 3 landed the 64K models sharing one ROM slot per
+//      MAC128K_PLAN.md's ROM diff (the two known 64K images differ by 57 of
+//      65536 bytes, none of it a memory-map constant), so this is the
+//      assertion that would catch either model being pointed at the wrong
+//      slot or picking up SE behaviour by mistake.
 //
 module tb_mac_model;
 
@@ -36,6 +39,7 @@ module tb_mac_model;
 	wire [1:0] configRAMSize;
 	wire       machineType;
 	wire [1:0] romSlot;
+	wire       drive800k;
 
 	integer tests = 0;
 	integer fails = 0;
@@ -80,7 +84,8 @@ module tb_mac_model;
 		.configROMSize ( configROMSize ),
 		.configRAMSize ( configRAMSize ),
 		.machineType   ( machineType   ),
-		.romSlot       ( romSlot       )
+		.romSlot       ( romSlot       ),
+		.drive800k     ( drive800k     )
 	);
 
 	integer m;
@@ -106,43 +111,71 @@ module tb_mac_model;
 		mem_big = 1'b1; #1;
 		expect_straps("SE, 4MB", 2'b10, 2'b11, 1'b1, 1'b1);
 
-		// ---- 3. Mac 512Ke ------------------------------------------------
-		// The same 128K ROM as the Plus, so slot 0 and no new image. RAM is
-		// 512K and NOT negotiable.
+		// ---- 3. Mac 512K and Mac 128K, Phase 3's deliverable --------------
+		// Both run the 64K ROM in slot 2 (boot2.rom); RAM is the one thing
+		// that tells them apart, and it is soldered, not chosen.
 		model = 3'd2; mem_big = 1'b0; #1;
-		expect_straps("512Ke", 2'b01, 2'b01, 1'b0, 1'b0);
+		expect_straps("512K", 2'b00, 2'b01, 1'b0, 2'b10);
+		model = 3'd3; mem_big = 1'b0; #1;
+		expect_straps("128K", 2'b00, 2'b00, 1'b0, 2'b10);
 
-		// ---- 4. the property that matters most ---------------------------
-		// mem_big must not reach a soldered-RAM machine. This is the failure
-		// that would quietly invent a 4MB 512Ke.
+		// ---- 4. mem_big must not reach either soldered-RAM machine --------
+		// This is the failure that would quietly invent a 4MB 128K.
 		mem_big = 1'b1; #1;
-		expect_straps("512Ke ignores mem_big - RAM was soldered", 2'b01, 2'b01, 1'b0, 1'b0);
+		expect_straps("128K ignores mem_big - RAM was soldered", 2'b00, 2'b00, 1'b0, 2'b10);
+		model = 3'd2; mem_big = 1'b1; #1;
+		expect_straps("512K ignores mem_big - RAM was soldered", 2'b00, 2'b01, 1'b0, 2'b10);
 
-		// ---- 5. every pre-Plus model is Plus-like to dataController ------
+		// ---- 5. Mac 512Ke, reachable but not yet exposed in the OSD -------
+		// The same 128K ROM as the Plus, so slot 0 and no new image. RAM is
+		// 512K and NOT negotiable. Model value 4, not 2: MacPlus.sv's CONF_STR
+		// does not list it yet (still has SCSI, so it is not yet an authentic
+		// 512Ke), and 2/3 went to the machines that ARE exposed.
+		model = 3'd4; mem_big = 1'b0; #1;
+		expect_straps("512Ke", 2'b01, 2'b01, 1'b0, 2'b00);
+		mem_big = 1'b1; #1;
+		expect_straps("512Ke ignores mem_big - RAM was soldered", 2'b01, 2'b01, 1'b0, 2'b00);
+
+		// ---- 6. every pre-Plus model is Plus-like to dataController ------
 		// Not a model index. A 128K given machineType = 1 gets ADB keyboard
-		// timing and never sees a keypress.
-		model = 3'd2; #1;
-		ok("512Ke is machineType 0, not its model number", machineType === 1'b0);
+		// timing and never sees a keypress. Checked for all four, not just
+		// the one that prompted this module.
+		model = 3'd2; #1; ok("512K is machineType 0, not its model number",   machineType === 1'b0);
+		model = 3'd3; #1; ok("128K is machineType 0, not its model number",   machineType === 1'b0);
+		model = 3'd4; #1; ok("512Ke is machineType 0, not its model number",  machineType === 1'b0);
 
-		// ---- 6. reserved encodings fall back to the Plus -----------------
+		// ---- 7. reserved encodings fall back to the Plus -----------------
 		// A config saved by a later build, or a corrupt one, must not latch an
-		// undefined strap. Checked for every undefined value, not just one.
-		for (m = 3; m < 8; m = m + 1) begin
+		// undefined strap. Checked for every undefined value, not just one --
+		// note this range shrank from Phase 1's 3..7 as real models claimed
+		// 2, 3 and 4.
+		for (m = 5; m < 8; m = m + 1) begin
 			model = m[2:0]; mem_big = 1'b0; #1;
-			expect_straps("reserved encoding falls back to Plus", 2'b01, 2'b10, 1'b0, 1'b0);
+			expect_straps("reserved encoding falls back to Plus", 2'b01, 2'b10, 1'b0, 2'b00);
 		end
 
-		// ---- 7. model 0 is the Plus, and must stay so --------------------
+		// ---- 8. model 0 is the Plus, and must stay so --------------------
 		// `status` defaults to zero. If this row ever moves, every existing
 		// user's saved config silently changes machine on the next start.
 		model = 3'd0; mem_big = 1'b0; #1;
 		ok("model 0 straps a 128K ROM (the Plus), not something else",
 		   configROMSize === 2'b01 && machineType === 1'b0 && romSlot === 1'b0);
 
+		// ---- 9. drive800k - item 8, MacPlus.sv's 800K-image refusal -------
+		// Only the 128K and 512K have a mechanically single-sided drive. If
+		// this were wrong for the Plus, SE or 512Ke, a legitimate 800K image
+		// would be silently refused on a machine that shipped with a
+		// double-sided drive.
+		model = 3'd0; #1; ok("Plus drive takes 800K",   drive800k === 1'b1);
+		model = 3'd1; #1; ok("SE drive takes 800K",     drive800k === 1'b1);
+		model = 3'd2; #1; ok("512K drive is 400K-only", drive800k === 1'b0);
+		model = 3'd3; #1; ok("128K drive is 400K-only", drive800k === 1'b0);
+		model = 3'd4; #1; ok("512Ke drive takes 800K",  drive800k === 1'b1);
+
 		$display("");
 		$display("MAC-MODEL: %0d of %0d failing", fails, tests);
-		if (fails == 0) $display("PHASE 1 GATE: PASS - model straps correct, mem_big contained, reserved safe");
-		else            $display("PHASE 1 GATE: FAIL");
+		if (fails == 0) $display("PHASE 1/3 GATE: PASS - model straps correct, mem_big contained, reserved safe");
+		else            $display("PHASE 1/3 GATE: FAIL");
 		$finish;
 	end
 

@@ -87,13 +87,15 @@ localparam CONF_STR = {
 	"OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
 	"-;",
 	// Bits 1-3, not the single bit 9 this used to be: the model list has to
-	// reach five entries (Plus, SE, 512Ke, 512K, 128K) and bit 10 next door is
-	// the serial input, so the field had to move somewhere contiguous and
-	// free. Only Plus and SE are offered yet - the 512Ke waits on SCSI
-	// absence (Phase 4) and the 64K models on the third ROM slot (Phase 2).
-	// Moving the field is an incompatible layout change, hence the config
-	// version bump below.
-	"O13,Model,Plus,SE;",
+	// reach five entries and bit 10 next door is the serial input, so the
+	// field had to move somewhere contiguous and free. Moving it is an
+	// incompatible layout change, hence the config version bump below.
+	//
+	// 512Ke is not listed: it still has SCSI, which is not an authentic
+	// 512Ke (that needs Phase 4's synthetic bus error), so showing it now
+	// would misrepresent it as a machine that never existed. It is reachable
+	// as model value 4 (rtl/mac_model.v) but not via this menu until then.
+	"O13,Model,Plus,SE,512K,128K;",
 	"O5,Speed,8MHz,16MHz;",
 	"O6,Floppy Write,Off,On;",
 	"ODE,CPU,68000,68010,68020;",
@@ -350,6 +352,7 @@ wire [1:0] configROMSize;
 wire [1:0] configRAMSize;
 wire       machineType;
 wire [1:0] romSlot;
+wire       drive800k;
 
 mac_model mac_model
 (
@@ -358,7 +361,8 @@ mac_model mac_model
 	.configROMSize ( configROMSize ),
 	.configRAMSize ( configRAMSize ),
 	.machineType   ( machineType   ),
-	.romSlot       ( romSlot       )
+	.romSlot       ( romSlot       ),
+	.drive800k     ( drive800k     )
 );
 			  
 //
@@ -996,7 +1000,13 @@ rom_word_addr rom_word_addr_dl (.slot(dio_index[7:6]), .word_offset(dio_addr[17:
 wire [20:0] rom_read_addr;
 rom_word_addr rom_word_addr_rd (.slot(romSlot),        .word_offset(memoryAddr[18:1]),  .addr(rom_read_addr));
 
-// good floppy image sizes are 819200 bytes and 409600 bytes
+// good floppy image sizes are 819200 bytes and 409600 bytes. 819200 is
+// additionally gated on drive800k (MAC128K_PLAN.md item 8): the 128K and
+// 512K's drive is mechanically single-sided -- no head for the second side,
+// not just a format limit -- so an 800K image on those models is refused
+// exactly like any other size the drive can't read: neither ds nor ss goes
+// true, insertDisk never asserts for that slot, and nothing downstream needs
+// to know why. Plus/SE/512Ke are unaffected -- their real drives took 800K.
 reg dsk_int_ds, dsk_ext_ds;  // double sided image inserted
 reg dsk_int_ss, dsk_ext_ss;  // single sided image inserted
 
@@ -1019,7 +1029,7 @@ always @(posedge clk_sys) begin
 		dsk_int_ss <= 1'b0;
 	end
 	else if (ldr_int_done) begin
-		dsk_int_ds <= (ldr_int_size == 64'd819200);
+		dsk_int_ds <= (ldr_int_size == 64'd819200) && drive800k;
 		dsk_int_ss <= (ldr_int_size == 64'd409600);
 	end
 
@@ -1035,7 +1045,7 @@ always @(posedge clk_sys) begin
 		dsk_ext_ss <= 1'b0;
 	end
 	else if (ldr_ext_done) begin
-		dsk_ext_ds <= (ldr_ext_size == 64'd819200);
+		dsk_ext_ds <= (ldr_ext_size == 64'd819200) && drive800k;
 		dsk_ext_ss <= (ldr_ext_size == 64'd409600);
 	end
 
