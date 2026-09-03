@@ -173,10 +173,22 @@ is a doubling where 128K->512K is a factor of four, and it sits inside the
 floppy driver. Both argue against a memory reading. Inference from the diff, not
 a boot test; confirm in Phase 2.
 
-**Consequence for the design: one extra 64K slot is very likely sufficient**,
-with the user choosing which image goes in it rather than the core hardcoding a
-model->ROM pairing. The pairing is not clean-cut anyway -- a 128K sold in late
-1984 may well have shipped with the October ROM.
+**Consequence for the design: one extra 64K slot is sufficient**, with the user
+choosing which image goes in it rather than the core hardcoding a model->ROM
+pairing. The pairing is not clean-cut anyway -- a 128K sold in late 1984 may
+well have shipped with the October ROM.
+
+**Decided 2026-09-03 (Daniel): one slot, user's choice.** Concretely, drop the
+wanted 64K image into `boot2.rom` on the SD card -- the same mechanism as
+`boot0.rom`/`boot1.rom` today, so no new RTL beyond the extra index and no OSD
+entry.
+
+The consequence, stated so it is not a surprise later: the model selector then
+sets **RAM size only, not the ROM**. Switching between Macintosh 128K and
+Macintosh 512K in the OSD will not switch ROM revisions -- both run whatever is
+in `boot2.rom`. Per the diff, that costs a floppy-driver revision and an
+interrupt-mask fix, not machine identity. If it ever chafes, a second slot is
+one more index value.
 
 The 512Ke needs no new image: it shipped the **same 128K ROM as the Plus**,
 which is consistent with every 128K image in the folder being Plus-labelled.
