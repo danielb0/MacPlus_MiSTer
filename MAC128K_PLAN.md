@@ -675,6 +675,56 @@ a symptom's *usual* cause rather than from the mechanism. The search result
 that named it said "does not get valid RPM readings" in the same sentence, and
 that clause was the actual answer. Read the mechanism, not the headline.
 
+### Happy Mac, then the flashing "?": the trim was still wrong
+
+**0F0004 is GONE** -- the spindle loop converges, so the PWM work was right in
+substance. The 128K/512K now read the boot blocks, accept the disk and show a
+happy Mac, then revert to the flashing "?" after a while.
+
+**The disk exonerates itself and dates the failure precisely.** Parsing
+`System Disk 1.0.img` (the same image that boots on the Plus): MFS, boot block
+`$4C4B` valid, `bbVersion $0011`, System with a 137,728-byte resource fork.
+Layout:
+
+| what the ROM reads | logical blocks | track | zone |
+|---|---|---|---|
+| boot blocks | 0-1 | 0 | 0 |
+| MFS directory | 4-15 | 0-1 | 0 |
+| System file | 16 onward | 1 .. most of the disk | 0, then **1, 2, 3** |
+
+Everything read before the happy Mac lives in **tracks 0-15, which is CLV zone
+0**. The failure is the first step into track 16.
+
+**The cause was the shape of the fix, not the idea.** A real 400K drive has no
+idea which track the head is on: its speed is a function of the PWM ALONE, and
+the Mac obtains each zone's speed by WRITING A DIFFERENT PWM. Trimming the
+per-track table made the period depend on BOTH, so every zone change was
+applied twice -- once because the head moved, again when the Mac wrote the PWM
+for the new zone -- and the ROM measured a speed its own calibration did not
+predict. Zone 0 never exercises that, which is exactly why it got as far as it
+did.
+
+Fixed by making the 400K period a function of `disk_pwm` only:
+`11000 - 20*pwm`, spanning half-periods 11000..5900 against a table needing
+9996..6634, i.e. reachable at pwm 50..219 with headroom at both rails. The
+modelled speed is free to be "cosmetic" here because **this core's byte rate is
+fixed and does not depend on it** -- which is itself faithful, since a real
+drive's data rate is constant across zones and that is the whole point of CLV.
+Plus/SE/512Ke keep the track-indexed table.
+
+**Gate: `sim/tb_drive_tach.v` now 10/10, mutation-tested against the trim
+design, which fails 5/10** -- track-independence AND, tellingly, all four CLV
+range checks: the trim could not reach the extreme zones from any single PWM
+value at all. Added checks: the period is independent of the track for a 400K
+drive and still zone-dependent for an 800K one, the map spans the full CLV
+table, and both ends keep PWM headroom rather than sitting on a rail.
+
+**Method note worth keeping: the disk image is evidence.** Parsing the boot
+block and MFS directory locally turned "it fails somewhere after the happy Mac"
+into "it fails at the first track-16 read", which named the bug. `sim/`-side
+Python can read these images directly; MFS signature is `$D2D7` at offset 1024,
+boot block `$4C4B` at 0.
+
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
 model whose ROM probes -- then extend the gate to `configROMSize == 2'b00` so

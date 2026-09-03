@@ -108,7 +108,8 @@ module tb_drive_tach;
 		end
 	endtask
 
-	integer m_lo, m_hi, m_mid, m8_lo, m8_hi;
+	integer m_lo, m_hi, m8_lo, m8_hi;
+	integer m_trk0, m_trk40, m8_trk0, m8_trk40, m_slow, m_fast;
 
 	initial begin
 		$display("");
@@ -140,18 +141,56 @@ module tb_drive_tach;
 		ok("800K: self-regulating, PWM has NO effect (Plus/SE unregressed)",
 		   m8_lo == m8_hi);
 
-		// ---- the loop must settle on the known-good speed ------------------
-		// Mid-scale PWM reproduces the per-track period this core already
-		// reads disks at, so the ROM converges on a speed that works rather
-		// than on some point of an unmeasured curve.
-		pwm = 8'd128; measure400(m_mid);
-		$display("  400K drive: pwm=128 -> %0d clks; 800K -> %0d clks", m_mid, m8_lo);
-		ok("400K at mid-scale PWM matches the fixed 800K period (track 0)",
-		   m_mid == m8_lo);
-
 		// ---- range: the ROM needs room either side to converge ------------
 		ok("400K: adjustment range is meaningful, not a rounding artefact",
 		   (m_lo - m_hi) > 100);
+
+		// ---- THE SECOND BUG: speed must NOT depend on the track -----------
+		// A real 400K drive has no idea where the head is; the Mac gets each
+		// zone's speed by writing a different PWM. Making the period depend on
+		// BOTH applied every zone change twice, so the ROM measured a speed
+		// its own calibration did not predict. That read fine through zone 0
+		// (tracks 0-15: boot blocks, MFS directory, the first of the System
+		// file) and failed at the first step into track 16 -- a happy Mac,
+		// then the flashing '?'.
+		pwm = 8'd128;
+		force dut400.driveTrack = 7'd0;  measure400(m_trk0);
+		force dut400.driveTrack = 7'd40; measure400(m_trk40);
+		release dut400.driveTrack;
+		$display("  400K drive: track 0 -> %0d clks, track 40 -> %0d clks", m_trk0, m_trk40);
+		ok("400K: period is INDEPENDENT of track (PWM alone owns the speed)",
+		   m_trk0 == m_trk40);
+
+		// The 800K drive is the opposite and must stay that way: it regulates
+		// itself to the correct CLV zone speed with no help from the Mac.
+		force dut800.driveTrack = 7'd0;  measure800(m8_trk0);
+		force dut800.driveTrack = 7'd40; measure800(m8_trk40);
+		release dut800.driveTrack;
+		$display("  800K drive: track 0 -> %0d clks, track 40 -> %0d clks", m8_trk0, m8_trk40);
+		ok("800K: still self-regulates PER ZONE (Plus/SE unregressed)",
+		   m8_trk0 != m8_trk40);
+
+		// ---- the map must cover every zone the ROM will ask for -----------
+		// If a zone's target period were unreachable at any PWM, the ROM's
+		// loop could not converge there and the read would fail on exactly
+		// those tracks. Half-periods 9996 (500 RPM) and 6634 (750 RPM) are
+		// the extremes of floppy.v's own CLV table; measured full periods are
+		// twice those.
+		// Probe the extremes, not a guessed midpoint: the question is whether
+		// the map SPANS the table, and only pwm 0 and 255 answer that.
+		pwm = 8'd0;   measure400(m_slow);
+		pwm = 8'd255; measure400(m_fast);
+		$display("  400K reachable span: %0d .. %0d clks (must span %0d .. %0d)",
+		         m_fast, m_slow, 2*6634, 2*9996);
+		ok("400K: slowest CLV zone (500 RPM) is reachable", m_slow >= 2*9996);
+		ok("400K: fastest CLV zone (750 RPM) is reachable", m_fast <= 2*6634);
+
+		// Headroom, not just coverage: if a zone's target sat hard against a
+		// rail the ROM's loop could reach it only by saturating, with nothing
+		// left to correct with. Both ends must land inside the PWM range with
+		// room to spare.
+		ok("400K: slow end has PWM headroom below it",  m_slow  >= 2*9996 + 400);
+		ok("400K: fast end has PWM headroom above it",  m_fast  <= 2*6634 - 400);
 
 		$display("");
 		$display("DRIVE-TACH: %0d of %0d failing", fails, tests);

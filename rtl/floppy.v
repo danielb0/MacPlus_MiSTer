@@ -598,9 +598,36 @@ module floppy
 	//
 	// Plus/SE/512Ke keep the old fixed behaviour, which is both authentic
 	// for their 800K drive and already proven on hardware.
-	wire signed [15:0] pwm_dev = $signed({8'b0, disk_pwm}) - 16'sd128;
-	wire signed [15:0] pwm_trimmed = $signed({2'b00, driveTachBase}) - (pwm_dev <<< 3);
-	wire [13:0] driveTachPeriod = drive800k ? driveTachBase : pwm_trimmed[13:0];
+	// A real 400K drive HAS NO IDEA WHICH TRACK THE HEAD IS ON. Its speed is
+	// a function of the PWM alone, and the Mac gets the different speed for
+	// each zone by WRITING A DIFFERENT PWM VALUE. So the period below must
+	// not consult driveTachBase at all.
+	//
+	// The first attempt had the PWM merely TRIM the per-track table. That
+	// stopped the divide-by-zero -- the speed did respond -- but it applied
+	// each zone change TWICE: once because the head moved, and again when
+	// the Mac wrote the PWM for the new zone. The ROM then measured a speed
+	// its own calibration did not predict. Reads survived zone 0 (boot
+	// blocks, MFS directory and the first tracks of the System file all sit
+	// in tracks 0-15) and failed at the first step into track 16, which is
+	// a happy Mac followed by the flashing '?'.
+	//
+	// The map only has to be monotonic and to cover the CLV range the ROM
+	// asks for (periods 9996..6634, i.e. 500..750 RPM in the table above),
+	// because the actual byte rate this core delivers is fixed and does not
+	// depend on the modelled speed -- exactly as a real drive's constant
+	// data rate does not. 11000 - 20*pwm puts that range at pwm 50..218,
+	// leaving convergence headroom at both ends and staying inside 14 bits
+	// (5900..11000).
+	//
+	// Plus/SE/512Ke keep the track-indexed table: an 800K mechanism
+	// self-regulates, which is both authentic and already proven on
+	// hardware.
+	localparam [13:0] PWM_PERIOD_AT_ZERO = 14'd11000;
+	localparam [13:0] PWM_PERIOD_STEP    = 14'd20;
+	wire [13:0] pwm_span   = {6'b0, disk_pwm} * PWM_PERIOD_STEP; // 0..5100
+	wire [13:0] pwm_period = PWM_PERIOD_AT_ZERO - pwm_span;      // 11000..5900
+	wire [13:0] driveTachPeriod = drive800k ? driveTachBase : pwm_period;
 	
 	always @(posedge clk or negedge _reset) begin
 		if (_reset == 1'b0) begin		
