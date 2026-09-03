@@ -268,9 +268,16 @@ only and booted a known-good disk, so a failure had one plausible cause. The
 128K lands ROM delivery, the 64K decode path, a new RAM size and an untried disk
 format at once, so a failure has four. Both mitigations are cheap and are built
 into the phases below: prove ROM delivery in simulation before hardware, and
-validate the ROM image and MFS boot disk in Mini vMac (which emulates a 128K
-natively) before the FPGA is involved. That separates "is my test asset good"
-from "is my RTL right".
+validate both test assets before the FPGA is involved. That separates "is my
+test asset good" from "is my RTL right".
+
+An earlier draft proposed Mini vMac for that validation. **Dropped -- neither
+half of it needs an emulator.** The ROM images verify against their own stored
+checksums (below), and a 400K MFS disk can be booted on the *existing, trusted
+Plus core* on the rig, because the Plus ROM reads MFS. Mini vMac would also have
+been more friction than implied: it ships no ROM (it wants a supplied
+`vMac.ROM`), and its stock build is Mac Plus only -- a 128K or 512K needs a
+custom variation build.
 
 **The assumption this ordering rests on.** That the 64K ROM contains no SCSI
 Manager -- true as far as we know, since SCSI arrived with the Plus's 128K ROM.
@@ -280,9 +287,21 @@ still enabled and see whether it cares.
 
 **Phase 0 - baseline and assets.** Record what Plus and SE do today on the test
 rig (s0=mac_80mb, s1=HD20 boots, s4=the ISO) so any later regression is
-attributable. Separately, confirm the 64K ROM image and an MFS 400K boot disk
-work together in Mini vMac. No RTL change, and it retires the test-asset risk
-before any of it can be confused with an RTL fault.
+attributable. Then retire the test-asset risk, so none of it can later be
+confused with an RTL fault. No RTL change, and no emulator.
+
+- **ROM images: DONE, 2026-09-03.** All five in `C:\temp\Mac\ROMS` verify
+  against their own stored checksum -- the first longword equals the sum of the
+  remaining big-endian 16-bit words. `28BA61CE` and `28BA4E50` (64K, 65536
+  bytes) and `4D1EEEE1`/`4D1EEAE1`/`4D1F8172` (128K, 131072 bytes) all match
+  their filenames. That proves they are intact, untruncated and in the right
+  byte order, which matters because the download path swaps
+  (`MacPlus.sv:1017`). The Mac checks the same sum at power-on, so a bad image
+  would give a Sad Mac ROM-checksum code rather than a mystery.
+- **MFS 400K boot disk: outstanding.** Validate it by booting it on the
+  **existing Plus core** on the rig -- the Plus ROM reads MFS, so a Plus that
+  boots it proves the image is sound and leaves only the 64K-ROM-specific path
+  unproven. No emulator and no new tooling.
 
 **Phase 1 - model selector and RAM sizing.** Items 2, 3, 4, 6. Needs no new ROM.
 Proves the selector widening without depending on the ROM-delivery design.
