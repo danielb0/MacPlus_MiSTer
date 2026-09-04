@@ -322,7 +322,22 @@ module dcd_link
 		else begin
 			rxValid      <= 0;
 			rxBad        <= 0;
-			newByteReady <= 0;
+
+			// NEWBYTEREADY MUST BE HELD UNTIL THE NEXT cen, NOT CLEARED ON
+			// EVERY CLOCK. It is set below inside `if (cen)`, so an
+			// unconditional clear here made it high for exactly the one clk
+			// AFTER a cen tick - the clock on which cen is necessarily low.
+			// iwm.v latches with `if (cen && newByteReady)`, so the two could
+			// never coincide and not one reply byte could reach the data
+			// latch. floppy.v sets and clears its own inside `if (cep)` for
+			// this reason, which is why the floppy path never showed it.
+			//
+			// Clearing under cen instead spans the pulse from one cen tick to
+			// the next: the IWM samples it high on the following tick, latches
+			// the byte, and this clear drops it on that same tick. Exactly one
+			// latch per byte. The clear comes BEFORE the transmit FSM below,
+			// so a byte presented on a cen tick still overrides it.
+			if (cen) newByteReady <= 0;
 
 			// State 4 is RESET: the device performs the equivalent of a
 			// power-up reset. Handled here rather than folded into _reset so
@@ -580,13 +595,26 @@ module dcd_link
 						end
 					end
 
-				TX_END: begin
-					// De-assert /HSHK. The Mac is spinning in state 3 waiting
-					// for exactly this, then drops to idle state 2.
-					hshk_n  <= 1'b1;
-					txBusy  <= 1'b0;
-					txState <= TX_IDLE;
-				end
+				// THE `cen` HERE IS WHAT SAVES THE LAST BYTE OF EVERY FRAME.
+				// readData only presents txByte while txBusy is set, and the
+				// IWM latches a byte on the cen tick AFTER the one that
+				// offered it. Tearing down on the very next clk instead
+				// dropped txBusy inside that gap, so the CPU latched
+				// {senseBit, 7'b0} = $80 in place of the final group's LSB
+				// byte - which silently cleared bit 0 of all seven bytes of
+				// the last group. Waiting for the next cen means txBusy is
+				// still set at the instant the IWM samples (nonblocking, so
+				// this clear lands after that edge), and the byte survives.
+				//
+				// It cost one cen tick, 125 ns, before /HSHK is released; the
+				// Mac is spinning in state 3 waiting for exactly that release
+				// and does not care.
+				TX_END:
+					if (cen) begin
+						hshk_n  <= 1'b1;
+						txBusy  <= 1'b0;
+						txState <= TX_IDLE;
+					end
 
 				default: txState <= TX_IDLE;
 				endcase

@@ -133,7 +133,8 @@ module iwm
 	wire senseInt = readDataInt[7]; // bit 7 doubles as the sense line here
 	wire newByteReadyExt;
 	wire [7:0] readDataExt;
-	wire senseExt = readDataExt[7]; // bit 7 doubles as the sense line here
+	// senseExt is muxed with the DCD's line below, next to the readData mux it
+	// belongs with - see readDataExtSel.
 
 	// write path: which drive's data register a CPU write targets follows
 	// selectExternalDriveNext, mirroring q7Next/q6Next's use below for the
@@ -142,6 +143,31 @@ module iwm
 	                    ({q7Next, q6Next} == 2'b11) && (diskEnableExt | diskEnableInt);
 	wire writeReqInt = cen && dataRegWrite && !selectExternalDriveNext;
 	wire writeReqExt = cen && dataRegWrite &&  selectExternalDriveNext;
+
+	// THE DCD NEEDS AN EDGE, NOT A LEVEL. dataRegWrite is a level on _cpuLDS,
+	// which fx68k asserts at the S2 enPhi1 edge and releases at S7 enPhi2 -
+	// three CPU clock periods, so three cen samples (sim/tb_iwm_latch.v holds
+	// it for exactly that on a read, for the same reason). floppy.v never
+	// noticed: it refuses a writeReq while writeBusyReg is set, and that busy
+	// lasts a whole 16 us byte time. dcd_link.v has no such interlock and took
+	// every pulse as a new byte, so the Mac's $AA $81 $B1 ... arrived as
+	// $AA $AA $AA $81 $81 $81 ... - the second $AA became the count byte, the
+	// framing was gone, and no command could ever checksum.
+	//
+	// Consecutive data-register writes are always separated by the handshake
+	// read at $1800 ($419AE8's `tst.b (a3) / bpl`), which is a READ and so
+	// drops dataRegWrite in between, making an edge safe here. The floppy's
+	// writeReqExt above is deliberately left alone: its path is bit-identical
+	// to what has always shipped.
+	reg dataRegWriteSeen;
+	always @(posedge clk or negedge _reset) begin
+		if (_reset == 1'b0)
+			dataRegWriteSeen <= 1'b0;
+		else if (cen)
+			dataRegWriteSeen <= dataRegWrite;
+	end
+	wire writeReqDcd = cen && dataRegWrite && !dataRegWriteSeen &&
+	                   selectExternalDriveNext;
 
 	wire writeBusyInt, writeUnderrunInt;
 	wire writeBusyExt, writeUnderrunExt;
@@ -275,7 +301,7 @@ module iwm
 		.lstrb(lstrb),
 		._enable(~diskEnableExt),
 		.writeData(dataIn[7:0]),
-		.writeReq(writeReqExt),
+		.writeReq(writeReqDcd), // one-shot: see dataRegWriteSeen above
 		.readData(readDataDcd),
 		.newByteReady(newByteReadyDcd),
 		.sd_lba(dcd_sd_lba),
@@ -295,6 +321,23 @@ module iwm
 
 	wire [7:0] readDataExtSel      = dcdPresent ? readDataDcd     : readDataExt;
 	wire       newByteReadyExtSel  = dcdPresent ? newByteReadyDcd : newByteReadyExt;
+
+	// THE SENSE LINE HAS TO COME THROUGH THE SAME MUX AS THE DATA, and used to
+	// be readDataExt[7] unconditionally - i.e. the external FLOPPY's, always.
+	// That single wire is why nothing on hardware had ever observed the DCD.
+	// The status register (Q7=0, Q6=1) is where BOTH programs that look for a
+	// DCD look: the ROM's ID probe at $418600 and HD Diag's `tst.b $1c00(a2)`
+	// at $D938. With the floppy answering, state 7 returned its INSTALLED
+	// register - 0 - and the probe failed at $418634's `bpl`, so the ROM took
+	// the "not a DCD" branch on every boot and HD Diag said "init driver
+	// failed". The $28 it reported was the floppy's MOTORON/TK0 register read
+	// as a stuck handshake, not our drive holding the line.
+	//
+	// Taking bit 7 of readDataExtSel rather than a second copy of the mux
+	// keeps the two in step by construction, and with nothing mounted it
+	// reduces to readDataExt[7] exactly - the external port stays bit-
+	// identical to what it has always been.
+	wire senseExt = readDataExtSel[7];
 
 	wire [7:0] readData = selectExternalDrive ? readDataExtSel : readDataInt;
 	wire newByteReady = selectExternalDrive ? newByteReadyExtSel : newByteReadyInt;
