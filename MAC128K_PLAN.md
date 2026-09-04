@@ -3070,6 +3070,84 @@ last-opcode / frame-count / last-error probes is the first move if the board
 says nothing, not more simulation.
 
 
+### The /HSHK bug, found on hardware by disassembling HD Diag's spin loop
+
+**2026-09-04. First hardware test of the phase, and it failed: HD Diag reported
+"init driver failed", then "Comm error" on a hard reset. The bug is real, it is
+now fixed (`7e76cae`), and the way it was CONFIRMED is worth more than the bug.**
+
+**THE BUG.** `rtl/dcd_link.v` only ever asserted /HSHK when the DRIVE wanted to
+talk. But before sending any command the Mac asserts HOST (state 3) and **spins
+until the drive pulls /HSHK low**, giving up with error `$11`:
+
+```
+419AB0  subq.l #$1, d7        ; $140000 iterations, about 3.3 s at 8 MHz
+419AB2  beq.w  $419c56        ;   -> error $11
+419AB6  tst.b  $1c00(a0)      ; read sense
+419ABA  bmi.b  $419ab0        ; LOOP WHILE SENSE == 1
+419ABC  tst.b  $400(a0)       ; ca1=0, and only NOW send
+```
+
+TashTwenty's receiver is the mirror image and settles the release as well: wait
+while state 2, require state 3, `bcf PORTC,RC4` to assert, wait while state 3,
+require state 1. When the Mac has sent everything it returns to state 3 -- its
+`IntEn3` comment is "mac is done and is waiting for !HSHK to be deasserted".
+
+**HOW IT WAS CONFIRMED, and this is the reusable part.** The instruction-fetch
+sampler (`PIFA`/`PIFD`) was pointed at the machine while Daniel triggered a hard
+reset in HD Diag. 55 of 150 samples landed in a 40-byte range in RAM, and
+`PIFD` supplies the WORD fetched at each address, so the loop reassembles
+directly:
+
+```
+00D938  subq.l #$1, d1        ; HD Diag's own timeout counter
+00D93A  beq.b  $d96a          ;   -> timed out, reported as "Comm error"
+00D93C  tst.b  $1c00(a2)      ; the SAME IWM sense register
+00D940  bmi.b  $d938          ; LOOP WHILE SENSE == 1
+00D942  moveq  #$28, d0
+```
+
+**Same register, same structure, same exit condition as the ROM** -- from a
+completely independent implementation, since HD Diag carries its own driver in
+RAM (which is why it runs on a 128K whose ROM has no DCD engine at all). The
+drive was never pulling /HSHK low, on real silicon.
+
+**THE TECHNIQUE GENERALISES: probe the DEVICE, not the CPU, unless the CPU is
+stuck -- and when it is stuck, PIFA+PIFD is a disassembler.**
+[[mister-jtag-issp-debugging]] already recorded this shape; this is the second
+time it has ended a stall, and the first where the wedged code was in RAM and
+therefore unreadable any other way.
+
+**A FALSE STEP WORTH KEEPING.** A first capture across a BOOT showed zero
+samples anywhere in `$419600`-`$419E40`, and that was read as "the handshake is
+not what is blocking us". **That reading was wrong and the error is instructive:
+only a SUCCESSFUL identification followed by a command produces the 3.3 s spin
+that sampling can catch. A FAILED identification is microseconds of work and is
+invisible at 2.5 samples/sec.** So the boot capture could never distinguish
+"identification failed" from "identification succeeded, command deferred", and
+concluding anything from its silence was over-reading a negative result. HD Diag
+reaches the wait because it drives the lines directly without needing the ROM's
+identification to pass first.
+
+**STILL OPEN: whether boot-time identification works.** The handshake fix is
+confirmed NECESSARY; whether it is SUFFICIENT for the ROM to find and mount an
+HD20 at boot is not yet known. The next escalation, if a fixed build still will
+not mount, is a `PDCD` probe rather than more sampling: `present`, `selected`, a
+STICKY states-seen bitmap (did the Mac ever drive state 5? state 3?), `rxHs`,
+sync and command counts, and the last opcode -- all sticky, with the source side
+of `altsource_probe` wired as an arm/clear so a sub-millisecond event can be
+caught between JTAG samples 0.4 s apart. Every probe in the deck already
+declares `source_width(1)` with `.source()` unconnected, so the wiring exists.
+**Mind the ~20 hub-node ceiling: the deck is AT 20, so one goes out for each one
+that comes in.**
+
+**And the bench gap, for the third time in one phase.** All three benches jumped
+straight to state 1 and started sending, which the drive accepted, so nothing
+could have caught this. They now perform the real handshake at both ends of
+every command: link 42/42, status 46/46, read 34/34, and the handshake mutation
+sweep kills 8 of 8.
+
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
