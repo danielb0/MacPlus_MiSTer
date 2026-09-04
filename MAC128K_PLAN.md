@@ -1991,6 +1991,97 @@ built as `(groupcount_tx | groupcount_rx << 16) + $810081`, i.e. each count plus
 one with bit 7 set, which is not in the text the OCR gave us and wants checking
 against the page images before anything is built on it.
 
+### The `.Sony` PTCH, and the `$96` question is answered (2026-09-04)
+
+**New tooling: `scripts/mfs_extract.py`** -- an MFS reader (list files, walk the
+12-bit allocation chain, extract forks) plus a resource-fork parser. MFS is the
+flat pre-HFS format of every 400K disk, so this is reusable well beyond Phase 5.
+Don't re-derive it.
+
+```
+python scripts/mfs_extract.py HD_20_Startup.img
+python scripts/mfs_extract.py HD_20_Startup.img "Hard Disk 20"
+python scripts/mfs_extract.py HD_20_Startup.img "Hard Disk 20" PTCH 2 > sony.bin
+```
+
+**The three `PTCH` resources are exactly what the Mac GUI article said**, which
+is a nice independent check on that secondary source:
+
+| id | name | size |
+|---|---|---|
+| 0 | TFS | 24,758 |
+| 1 | Dispatch Kernel | 290 |
+| 2 | **`.Sony`** | **6,606** |
+
+**THE `$96` HITS IN THE PTCH ARE BOTH FALSE, and one of them is the GCR trap for
+the second time.** A raw byte scan finds `00 96` at `$E02` and `$106A`.
+Disassembled:
+
+- `$E00` is `move.b #$96,(a3)` inside a block that also touches `$DFFDFF`
+  directly, indexes the 64-entry six-bit table at `$25A`, and counts `$2BE` =
+  702 -- **the floppy GCR writer**, byte-for-byte the same code as the ROM's
+  `$419324`. The PTCH is a whole `.Sony` replacement, so of course it carries
+  the floppy driver too.
+- `$106A` is not an instruction at all: it is the displacement of
+  `bsr.w $1100` (`61000096`).
+
+So the patch has **no DCD `$96` either**. The only sync it ever transmits is
+`$AA`, at two sites (`$157A`, `$167E`) -- the same count and the same roles,
+initial and post-hold-off, as the ROM.
+
+**AND THE PATCH IS THE SAME CODE AS THE ROM, WHICH KILLS ONE OF THE TWO
+READINGS.** Byte comparison against the Plus ROM:
+
+| ROM region | bytes | found in the PTCH |
+|---|---|---|
+| transmit prologue `$419A40` | 48 | yes, at `$14D8` |
+| ID probe `$418630` | 26 | yes, at `$54A` |
+
+Sweeping the whole driver in 32-byte windows, 25% match verbatim, in two long
+contiguous runs: `$4192D0`-`$4193D0` (the floppy GCR writer) and
+**`$419AB0`-`$419C30` (384 bytes -- the DCD transmit engine, containing BOTH
+sync sites)**. The remaining 75% is the same logic with different displacements,
+which is what two builds of one source look like after relocation; the parts
+that match exactly are precisely the tight register-only inner loops that carry
+no addresses.
+
+**Therefore reading 1 above is dead.** The ROM driver is not a read-only subset
+that the patch completes -- the patch *is* the driver, it is what a 512K uses
+for full HD20 support including writing, and its transmit engine is byte-
+identical to the ROM's. There is one transmit engine and it sends `$AA`.
+
+**Reading 2 stands: Apple's shipping DCD implementation does not use the `$96`
+sync.** The protocol document says write and write-verify use it; the code that
+actually shipped, in both builds, does not. This is exactly the category BMOW
+warned about when they said the documents conflicted with tests on a real
+Macintosh, and it is why the source hierarchy in this plan puts the ROM above
+the specifications.
+
+**State this honestly, because it cuts the other way too: this is now ONE
+implementation seen in TWO BUILDS, not two independent witnesses.** I went into
+this pass expecting the patch to be an independent implementation and it is not,
+so it does not corroborate the spec being wrong -- it only shows that the one
+implementation we must satisfy never sends `$96`. That is enough for the RTL
+requirement and not enough for a claim about the protocol in general.
+
+**RTL REQUIREMENT, now firm:** the DCD engine **must accept `$AA` as the sync on
+write and write-verify commands, and must never require `$96`.** Accepting both
+is free; requiring `$96` deadlocks against Apple's own driver. Whether a real
+HD20 would also have accepted `$AA` is a question about the drive, not about us,
+and the firmware reassembly could answer it if it ever matters -- a bounded
+question of exactly the kind that file is worth opening for.
+
+**The genuinely independent check, if one is ever wanted**, is the other
+direction entirely: BMOW's Floppy Emu and TashTwenty are DRIVE-side
+implementations written by other people, and what they accept as a write sync
+would corroborate or contradict this. Not needed before the RTL, because the
+requirement above is safe under either answer.
+
+**Unchanged and still open:** the two bytes the transmitter sends between the
+sync and the first group, built as `(tx_groups | rx_groups << 16) + $810081`.
+They are in the byte-identical run, so both builds agree, but nothing in the OCR
+text explains them. Check the page images before building anything on them.
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
