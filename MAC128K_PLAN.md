@@ -2082,6 +2082,121 @@ sync and the first group, built as `(tx_groups | rx_groups << 16) + $810081`.
 They are in the byte-identical run, so both builds agree, but nothing in the OCR
 text explains them. Check the page images before building anything on them.
 
+### The two bytes after the sync: ANSWERED, and by two independent sides (2026-09-04)
+
+Checked before building, on Daniel's instruction. The answer needed all three
+sources and none of them alone would have given it.
+
+**Rendering the page images needs no new software.** PyMuPDF (`fitz`) is already
+installed and is what produced `pal_p5.png`; poppler/`pdftoppm` is not present
+and is not needed. The scans are **JBIG2**, so `pypdf` cannot extract them and
+PIL is not installed -- go straight to `fitz`:
+
+```python
+import fitz
+d = fitz.open(pdf)
+d[i].get_pixmap(matrix=fitz.Matrix(2.2, 2.2)).save('p%d.png' % (i+1))
+```
+
+**A titling bug in the March document, worth knowing before anyone reads it.**
+Pages 3 and 4 are **both titled "Data Transmission From Mac to Drive"**. Page 4
+is the real one -- it ends with an `ack` on the Data line, and its notes say
+"René will send ACK/NAK 35-40us after handshake" and "last byte received".
+**Page 3 is Drive-to-Mac**: its notes say "René will send sync within 33us" and
+"last byte of the group is sent". Saved as
+`C:/temp/Mac/HD20/mar85_p3_drive_to_mac.png` and `mar85_p4_mac_to_drive.png`.
+A concrete instance of the unreliability BMOW warned about, in the title of a
+figure rather than anywhere subtle.
+
+**The timing figures this plan recorded all check out against the images**, and
+now each is attached to the right direction:
+
+| | Mac -> Drive (p4) | Drive -> Mac (p3) |
+|---|---|---|
+| first response | 14 us, **up to 2 s during self test** | -- |
+| sync | drive waits forever for a valid sync | drive sends sync within 33 us |
+| holdoff acknowledged | after last byte **received** | after last byte **sent** |
+| holdoff release | responds within **14 us** | within **18 us** |
+| resume | starts with the interrupted group | ...within **34 us** |
+| end of transmission | drive acks within 3 us of last byte | drive signals within 3 us |
+| ACK/NAK | **35-40 us after handshake** | -- |
+
+Both pages also state the rule this plan already had: a held-off group **"will be
+ignored and will not be included in the checksum"**, and transmission resumes
+**with** the interrupted group. Plus one detail not recorded before: the Mac
+receives the end-of-transmission signal **one byte time later** than the drive
+raises it.
+
+**THE DIAGRAMS DO NOT SHOW THE TWO BYTES.** Both Data waveforms are
+`sync` -> `data`, with nothing between. So the protocol document does not
+describe them anywhere -- not in the text, and not in the figures the OCR lost.
+
+**But they are real, and the ROM uses them in BOTH directions.** The receive
+prologue at `$419852` hunts the `$AA` (timeout `$10000`, error `$21`), then
+reads **two bytes before any group data**:
+
+```
+41984C  cmpi.b #$AA,(a3)     ; hunt for sync
+419856  move.b (a3),d1       ; FIRST byte after the sync
+41985E  cmpi.b #$BF,d1       ; special case -> d7.high = 6
+41986A  move.b (a3),d1       ; SECOND byte after the sync
+419874  move.b (a3),d2       ; ...then the group
+```
+
+symmetric with the transmitter's `$AA`, then `d6 + $810081` low byte, then its
+high-word byte.
+
+**THE DRIVE FIRMWARE SETTLES IT, and this is the first genuinely INDEPENDENT
+corroboration in the whole phase.** `342-0343-B.asm` at `L1da2` (line 2941) is
+the Z8's host-receive routine:
+
+```
+L1da2   ld  R9, #0AAh        ; the expected sync byte
+        ld  >52h, #07Fh      ; two working bytes, pre-set to $7F
+        ld  >53h, #07Fh
+L1dc1   lde R8, @RR0
+        cp  R8, R9           ; hunt for $AA
+        jr  Z, L1dce
+L1dce   lde R8, @RR0         ; wait for a byte with the MSB set
+        or  R8, R8
+        jr  PL, L1dce
+        and >52h, R8         ; FIRST byte  -> mask off the MSB, keep 7 bits
+L1dd7   lde R8, @RR0
+        or  R8, R8
+        jr  PL, L1dd7
+        and >53h, R8         ; SECOND byte -> same
+```
+
+**So the two bytes after the sync are the GROUP COUNTS, one per direction, each
+sent as `$80 | (count + 1)` and recovered by masking with `$7F`.** The Mac side
+builds them with `+$810081` on a longword holding both counts; the drive side
+ANDs each into a byte pre-loaded with `$7F`. Two different CPUs, two different
+teams' code, same framing -- and unlike the ROM-versus-PTCH comparison, these
+really are independent implementations.
+
+The reassembly's author did not know what they were either: `DefsHD20.inc`
+line 192 is literally `; ??? EQU 053h`. So this is a small genuine addition to
+what is publicly understood about DCD, not something recovered from a label.
+
+**What the RTL must do:** after the `$AA` sync, emit or consume **two count
+bytes** before the first group -- transmit count first, then receive count, each
+`$80 | (groups + 1)`. Do not build a framer that goes straight from sync to
+data; both real implementations would reject it.
+
+**Two things still not explained, and neither blocks the RTL:**
+
+- **`cmpi.b #$BF,d1`** on the Mac's receive path, which sets `d7.high = 6` when
+  the drive's first count byte is `$BF`. `$BF` masks to `$3F` = 63, so it would
+  mean 62 groups. Whether that is a real count or a sentinel is not yet clear;
+  it is one branch and it can be traced when the read path is implemented.
+- **`BlockLength EQU 524+2+6`** in `DefsHD20.inc` -- the drive's own block is
+  524 data + 2 CRC + 6 ECC = 532. That is the same 532 as the wire, but split
+  differently: 524 = 512 + the 12 standard Sony tags, with CRC and ECC making up
+  the rest, whereas the wire's 532 is described everywhere else as 512 + 20 tag
+  bytes. **Flag, do not build on it.** It does not disturb the 512-byte image
+  recommendation, because the Mac only ever sees the 512 either way -- but the
+  two decompositions should be reconciled before anyone writes tag handling.
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
