@@ -1068,11 +1068,27 @@ timing-sensitive than reads. It plausibly explains why floppy writes worked
 first time.
 
 **So the obvious fallback is already spent: do NOT "try the 512K ROM" if writes
-ever misbehave -- it is already in use.** The remaining lever would be the
-opposite one, and only for strict authenticity: a real Macintosh 128 shipped
-`28BA61CE`, so putting that image in the free slot 3 and pointing
-`MODEL_128K` at it would be more faithful, at the cost of the interrupt-mask
-fix. Accuracy versus reliability, and reliability is currently winning.
+ever misbehave -- it is already in use.**
+
+**And the accuracy/reliability trade-off I recorded here does NOT exist.**
+Checked 2026-09-03 rather than assumed: **Macintosh 128Ks were sold with the
+`28BA4E50` ROM.** Apple moved to a **dual-use logic board** -- same part
+numbers `630-0101` / `820-0086-C`, built with either 128K or 512K of RAM --
+around the time the 512K entered production, and the 64K ROM went from revision
+A (`342-0220-A`/`342-0221-A`, = `28BA61CE`) to revision B
+(`342-0220-B`/`342-0221-B`, = `28BA4E50`) with it. Documented evidence includes
+a 128K board carrying rev B ROMs beside a CPU date-coded **8504** (early 1985).
+
+So `28BA4E50` is not "the 512K's ROM" -- it is **the second revision of the
+shared 64K ROM**, and a 128K built from roughly late 1984 onward had it from
+the factory. **Running it on our 128K is period-authentic, not a compromise**,
+and there is nothing to revisit. Slot 3 plus `28BA61CE` would merely model an
+*early-1984* 128K instead of a 1985 one; both are real machines.
+
+Two things NOT established, so do not assert them: the exact rev A -> B
+changeover date (one source says ~August 1984, another says the timeframe is
+unclear), and whether Apple ever offered existing 128K owners a ROM-only
+upgrade.
 
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
