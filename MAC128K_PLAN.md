@@ -1839,6 +1839,33 @@ conversion (`dc2dsk`, `releases/bin2dsk.sh`).
   what the partition structure turns out to be -- the sector size alone settles
   it. Still open: the layout inside those blocks, and whether the extra 20 bytes
   are Apple tag bytes.
+
+  **ANSWERED IN FULL 2026-09-04 -- and it is BARE HFS, as believed.** Daniel
+  produced `C:/temp/Mac/HD20/320_32MB_volume.dsk`, and parsing it settles the
+  layout from an artefact instead of an argument:
+
+  - **33,553,920 bytes = exactly 65,535 x 512.** A whole number of 512-byte
+    blocks and NOT of 532-byte ones (63,071.28), so the image is stored in
+    512-byte sectors -- confirming the recommendation above.
+  - **Block 0 is `'LK'`** -- HFS boot blocks, so the volume is bootable.
+  - **Block 2 (offset 1024) is `'BD'`** -- the HFS Master Directory Block, right
+    where a bare volume puts it.
+  - **No `'ER'` Driver Descriptor Map and no partition map.** Bare HFS from block
+    0, exactly as this plan guessed and unlike every SCSI image we ship.
+  - Volume `3.2 32MB (P)`, 65,514 allocation blocks of 512 bytes, 3 files in the
+    root, 30.9 MB free, attributes `$0100` (cleanly unmounted).
+
+  **One honest caveat: it is 32 MB, and a real HD20 is about 20 MB** (38,964
+  data blocks). So this is an HD20-SHAPED volume rather than an image of a real
+  HD20. Capacity is something we report in the identity block, so we can claim
+  whatever we mount -- but whether `SonyDCD` accepts more than a real unit ever
+  had is untested. If it objects, fall back to a 20 MB volume; the Floppy Emu
+  reportedly serves far larger images in HD20 mode, so this is unlikely to bite.
+
+  **Two artefacts, two different tests.** `320_32MB_volume.dsk` is a formatted
+  bootable volume and exercises the READ path and boot; `mac_20mb.vhd` is a
+  correctly sized blank and exercises FORMAT and the write path by letting the
+  Mac initialise it. Keep both.
 - Which models can boot it. HD20 boot support is believed to live in the 128K
   ROM, i.e. Plus and 512Ke; the 64K-ROM machines would need the HD20 system
   software from floppy, if at all. Confirm from the ROM.
