@@ -1464,6 +1464,94 @@ Rigid Disk Interface Meeting" (2/27). The March document says all three should b
 combined "as soon as possible", which never happened. `IWM_Interface_PAL.pdf`
 may cover some of the same ground -- not yet read.
 
+### The PAL document: the drive's side of the phase lines
+
+`IWM_Interface_PAL.pdf` is the HD20's own interface logic, not the Mac's -- a
+**PAL 16R6 clocked at 7.5 MHz**, dated 12/13/84. Two facts about the real drive
+fall out of it that the protocol document never states:
+
+- **The HD20 contains its own IWM**, codenamed "Nisha". The PAL sits between the
+  host IWM and Nisha, watching the write-data lines of BOTH.
+- **The controller is a Zilog Z8**; the PAL presents it with three decoded
+  signals (Reset, HoldOff, Host) rather than raw phase lines.
+
+Neither matters for emulation directly -- we implement the drive behaviourally,
+not its silicon -- but they explain why the protocol is shaped the way it is,
+and the phase decode below is authoritative for the state machine.
+
+**Phase Line Control for "Renee"** (read from the page image; the OCR of this
+table is unusable):
+
+| Ph3 | Ph2 | Ph1 | Ph0 | Reset | HoldOff | Host | Data to Host |
+|---|---|---|---|---|---|---|---|
+| 1 | 0 | 0 | 0 | 0 | 0 | 0 | |
+| 1 | 0 | 0 | 1 | 0 | 0 | 1 | |
+| 1 | 0 | 1 | 0 | 0 | 1 | 0 | |
+| 1 | 0 | 1 | 1 | 0 | 1 | 1 | |
+| 1 | 1 | 0 | 0 | **1** | 0 | 0 | |
+| 0 | 1 | 0 | 1 | | | | **0** |
+| 0 | 1 | 1 | 0 | | | | **1** |
+| 0 | 1 | 1 | 1 | | | | **1** |
+
+The prose notes on page 2-3 agree with the table, which is worth saying out loud
+given BMOW's warning that these documents contradict each other: `/RESET` when
+the phase lines are `1100`, `/CMD` when `10X1`, `/HOLDOFF` when `101X`, read data
+enabled when `10XX` -- all gated by `/ENABLE` low. So `/CMD` IS the "Host"
+column, and data only flows in the `Ph3=1, Ph2=0` group, never in the ID states.
+
+**The identification is a static level, not a transaction.** In states 5, 6 and 7
+the drive holds Data-to-Host at **0, 1, 1** respectively. The "phantom states" of
+a non-chaining drive -- all ones -- are therefore literally distinguishable from
+a real drive's 0,1,1, which is exactly how the Mac finds the end of the chain.
+This is the single most implementable thing in either document: it is the first
+thing a DCD engine has to get right, and it needs no protocol at all.
+
+Read-data pulses are a high-going pulse of **two clock periods** (at 7.5 MHz)
+generated on each transition of either write-data line.
+
+### Hunting the DCD driver in the ROM: inconclusive, and one trap
+
+**The trap, recorded because it is a good one.** The DCD sync bytes are `$AA`,
+`$96` and the fast-NAK `$D5`. Searching the ROM for places where all three
+cluster looks like a perfect way to find the driver. It is not: **`$D5 $AA $96`
+is the Apple GCR sector address prologue**, which this core's own
+`floppy_track_encoder.v` emits. Five clusters were found and they are almost
+certainly all floppy GCR tables. The protocol reuses the familiar constants, so
+they cannot discriminate. Do not repeat this search.
+
+**What was actually established, all of it negative:**
+
+- **No dedicated driver name.** The Plus ROM's only disk driver string is
+  `.Sony` (alongside `.Sound`, `.Print`, `.MPP`, `.ATP`, `.AIn`/`.AOut`,
+  `.BIn`/`.BOut`). There is no `.HD20`-style name. If the ROM does speak DCD, it
+  does so from inside `.Sony` -- which is plausible, since it is the same
+  physical port, and it would mean an HD20's `DrvQEl` carries `ioRefNum = -5`
+  like a floppy and needs nothing new from the boot search.
+- **No 532 or 524 literal**, in either ROM, as an immediate operand.
+- **No `HD20`, `Hard Disk`, `Rene`, `Nisha` or `Widget` text** in either ROM.
+
+**This is suggestive, NOT conclusive, and must not be written up as a finding
+yet.** A block size of 532 need never appear as a literal -- it can be built as
+`512 + 20`, or fall out of a loop count, or live in a table. Negative searches
+over hand-written 68000 code are weak evidence.
+
+**The next step is therefore NOT more constant-hunting.** Three things to settle
+first, cheapest first:
+
+1. **Is HD20 boot support actually in the Plus ROM at all?** This has been
+   assumed throughout the plan and never checked. If the DCD driver in fact
+   shipped as the **HD20 INIT / system software on floppy**, then the Mac side is
+   Apple's own loadable code and our job reduces to emulating the DEVICE
+   faithfully -- which would be good news, but it changes "which models can boot
+   it" completely, because a machine cannot boot from a disk whose driver only
+   loads after boot.
+2. **Follow `.Sony` instead of hunting constants.** The driver dispatches on the
+   drive number / queue element; find where it decides a unit is not a floppy.
+   That is a structural search rather than a needle hunt, and it is the same
+   technique that found the boot search this morning.
+3. **Check a later ROM.** If the SE or II ROM contains obvious DCD code and the
+   Plus ROM does not, that dates the feature and settles item 1 immediately.
+
 **`IWM_Interface_PAL.pdf` may matter as much as the protocol docs.** We
 implement the IWM and the external drive port, so the hardware side of how a DCD
 device hangs off that connector is directly ours, not the drive vendor's.
