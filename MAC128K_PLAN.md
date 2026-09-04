@@ -3497,8 +3497,10 @@ Mac spends spinning in state 3 anyway. **The Status reply passed this by luck**
 -- its last group is four pads and the checksum, whose bit 0 happened to be
 zero. A bench that only ran Status would have shipped it.
 
-**FIFTH, and it is NOT DCD-specific: the IWM never armed its latch-clear when
-the byte arrived during the read.** `rtl/iwm.v` had
+**FIFTH -- WITHDRAWN the same day; see "The fifth fix was the bench's, not
+the IWM's" below. Kept as written so the reasoning that went wrong can be
+read.** As claimed at the time: NOT DCD-specific: the IWM never armed its
+latch-clear when the byte arrived during the read. `rtl/iwm.v` had
 
 ```
 if (iwmRead && readDataLatch[7]) readLatchClearTimer <= 4'hD;
@@ -3532,6 +3534,74 @@ floppy reads after this build, this one-line change is the first suspect.**
 it, and then the hardware order from item 6 -- `clear`, boot, read `present` and
 states-seen 7/6/5, then HD Diag. Everything above is simulation. Nothing here
 has been observed on the board.
+
+### Review of the fixes, 2026-09-05: the fifth fix was the bench's, not the IWM's
+
+**`072b90f` is reverted. The three seam fixes and the `TX_END` fix stand. The
+"68 duplicate reads" were an artefact of the seam bench's CPU model, and the
+RTL change made to satisfy it would have LOST bytes on hardware, floppy reads
+included.** Nothing is compiled; this section brings the tree to the point
+where the compile is the next step.
+
+**THE ONE EDGE.** `fx68k.sv` captures the data bus with `dbin <= iEdb` on
+`enPhi2 & bcComplete` ("on PHI2, starting the external S7 phase") and releases
+`rLDS` on that IDENTICAL edge (`enPhi2 & bcComplete` in `busControl`).
+`enPhi2` is `clk8_en_n`, which is the IWM's `cen`, and the path from
+`readDataLatch` to `iEdb` is combinational. Both assignments are nonblocking:
+the CPU sees the pre-edge bus at the third `cen` of the access, and the IWM
+sees the pre-edge `_cpuLDS`, still low, on the same edge. **A drive byte the
+IWM latches on that edge is not what that access returned.** The old arming
+condition, reading `readDataLatch[7]` pre-edge, does not arm the clear for it;
+the next poll is that byte's FIRST read and arms the clear then. One read per
+byte, which is right. The IWM manual quoted at the top of `iwm.v` says the
+same thing the RTL does: a valid read needs D7 high "for at least one fclk
+period" with /DEV low, and a byte landing on the release edge has zero such
+periods.
+
+`sim/tb_iwm_dcd.v`'s `cpu_read` held `_cpuLDS` across that edge and sampled
+`dataOut` AFTER it. That sees a byte fx68k cannot. So a byte landing on the
+last `cen` was counted as read, its clear was (correctly) not armed, and the
+next poll returned it -- reported as a duplicate. `072b90f` then armed the
+clear on that edge: the latch empties 12 ticks (1.5 us) after an edge the CPU
+never sampled, and the next poll at 16-18 cycles finds nothing.
+
+**Measured, with the bench's CPU model corrected to sample pre-edge on the
+third `cen` and a counter of bytes landing on an access's last `cen`:**
+
+| poll period (cen) | last-cen landings | `072b90f` iwm.v | `c7e1bce` iwm.v |
+| --- | --- | --- | --- |
+| 24 (`POLL_GAP` 21, as committed) | 0 | 29/29 | 29/29 |
+| 23 (`POLL_GAP` 20) | 17 / 44 | **22/29 -- a byte lost, both frames fail** | 29/29, 0 duplicates |
+
+The committed bench never exercised the race at all: a byte lands every 128
+`cen`, and 128 mod 24 = 8 visits three phases out of twenty-four, none of them
+the last tick. That is why the bench passed either way at the alignment it
+had, and why the 68 duplicates appeared only once the read frame drifted onto
+the other model's blind spot. **A bench that cannot reach the race passes
+whichever way the RTL is wrong.** This is the same bench-gap shape recorded
+three times already in this phase, now on the CPU side of the seam.
+
+**What changed:**
+
+- `rtl/iwm.v`: the arming condition is back to `iwmRead && readDataLatch[7]`,
+  byte-identical to `c7e1bce`.
+- `sim/tb_iwm_dcd.v`: `cpu_read` samples pre-edge on the third `cen` and
+  releases on it, mirroring fx68k; `POLL_GAP` is 20 so the 23-tick period is
+  coprime with 128 and every phase is visited within 23 bytes; `lastCenHits`
+  counts bytes landing on an access's last tick and the gate asserts it is
+  non-zero, so the bench is known to reach the race it covers. 30/30.
+- `sim/tb_iwm_latch.v` shares the older access structure. Its gates -- no
+  bus-phase dependence, 16 MHz matching 8 MHz -- do not turn on the sample
+  edge, so it is unchanged, but it is not evidence for either model and should
+  not be cited as such.
+
+**The record.** "Every good byte leaves the timer at 13, the byte before a
+duplicate leaves it at 0" was a true observation of a bench reading an edge
+the CPU does not. The lesson is [[feedback-read-the-spec-for-historical-hardware]]'s
+again, one layer down: the CPU model in a bench is a historical-hardware claim
+too, and fx68k was there to be read. `rtl/build_tag.v` in the working tree
+was stamped `072b90fe`; it is restored to the committed unstamped value, and
+must be re-stamped from HEAD before the compile.
 
 ### Do we need the firmware?
 

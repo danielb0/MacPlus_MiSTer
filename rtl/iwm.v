@@ -531,27 +531,7 @@ module iwm
 			// preceding the poll loop and then stays put, which is why the
 			// failure looks random between runs but sticks within one.
 			if (latchClearCe) begin
-				// THE BYTE THAT ARRIVES DURING THE READ COUNTS TOO. Testing
-				// readDataLatch alone reads the PRE-EDGE latch, so a drive
-				// byte landing on the last cen tick of an access left the
-				// countdown unarmed - readLatchClearTimer stayed 0, the latch
-				// never self-cleared, and the very next poll returned the same
-				// byte a second time. The manual quoted at the top of this
-				// file defines a valid read as /DEV low with D7 outputting a
-				// one "for at least one fclk period", and that final tick is
-				// exactly one fclk period with /DEV still low, so the hardware
-				// arms it and so must we.
-				//
-				// Found by sim/tb_iwm_dcd.v: a 617-byte DCD reply frame took
-				// 68 duplicate bytes and could not decode. It is alignment-
-				// dependent in the way sim/tb_iwm_latch.v documents, so it is
-				// not DCD-specific - the same race is open to any long run of
-				// polled disk bytes. tb_iwm_latch passes identically either
-				// way, which is why it survived this long, and the floppy read
-				// path is hardware-proven while this is not: if floppy reads
-				// regress after this build, THIS is the first suspect.
-				if (iwmRead && (readDataLatch[7] ||
-				                (cen && newByteReady && readData[7]))) begin
+				if (iwmRead && readDataLatch[7]) begin
 					readLatchClearTimer <= 4'hD; // clear latch 14 clocks after the conclusion of a valid read
 				end
 			end

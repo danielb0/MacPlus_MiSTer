@@ -79,9 +79,21 @@ module tb_iwm_dcd;
 	// byte twice ($54 in the first decoded slot, which is {$AA[6:0],x}).
 	// That is sim/tb_iwm_latch.v's subject - the shared latch, nothing
 	// DCD-specific - so sit well inside its passing region instead of on the
-	// boundary. 24 cycles start to start is 3.0 us against a 1.5 us hold, and
+	// boundary. 23 cycles start to start is 2.9 us against a 1.5 us hold, and
 	// still gives ~5 polls per 16 us drive byte.
-	localparam integer POLL_GAP = 21;
+	//
+	// AND THE PERIOD MUST BE COPRIME WITH 128, or the bench cannot reach the
+	// race it exists to cover. A drive byte lands every 128 cen and the poll
+	// repeats every POLL_GAP + 3, so the byte's phase against the access
+	// advances by (128 mod period) each byte. With a period of 24 that is 8,
+	// which visits three phases out of twenty-four and NEVER lands a byte on
+	// an access's last cen tick - the one alignment where the CPU's sample and
+	// the IWM's latch fall on the same edge. That alignment is what the
+	// lastCenHits counter below measures and the gate asserts on, and it was
+	// exactly the alignment that a wrong bench model and a wrong RTL "fix"
+	// disagreed about (see iwmGetByte). 23 is prime, so every phase is
+	// visited within 23 bytes.
+	localparam integer POLL_GAP = 20;
 
 	reg         _reset       = 1'b0;
 	reg         selectIWM    = 1'b0;
@@ -207,6 +219,28 @@ module tb_iwm_dcd;
 		end
 	endtask
 
+	// THE READ SAMPLES THE BUS THE WAY fx68k DOES, AND THAT ONE EDGE MATTERS.
+	// fx68k captures `dbin <= iEdb` on `enPhi2 & bcComplete` (fx68k.sv, the
+	// DBIN latch: "on PHI2, starting the external S7 phase") and releases rLDS
+	// on that IDENTICAL edge (`enPhi2 & bcComplete` in busControl). enPhi2 is
+	// clk8_en_n, which is the IWM's cen. Both are nonblocking, so the CPU sees
+	// the PRE-EDGE data bus at the third cen of the access and the IWM sees
+	// the pre-edge _cpuLDS, still low, on the same edge. A drive byte the IWM
+	// latches on that edge is therefore NOT what this access returned.
+	//
+	// The first version of this task held _cpuLDS across that edge and read
+	// dataOut AFTER it. That sees a byte fx68k cannot, so a byte landing on
+	// the last cen was counted as read here, its clear was (correctly) not
+	// armed, and the next poll returned it - which this bench reported as 68
+	// "duplicates" in a 617-byte frame. The RTL was then changed to arm the
+	// clear on that edge (072b90f), which passed this bench and would have
+	// LOST the byte on hardware: armed on an edge the CPU did not sample, the
+	// latch empties 1.5 us later and the next poll at 2 us finds nothing. With
+	// this task corrected, the original arming condition shows zero duplicates
+	// and zero losses at every alignment, and the changed one loses a byte as
+	// soon as a poll period coprime with 128 exercises the alignment. Count
+	// the alignment when it happens, so the gate can assert it was reached.
+	integer lastCenHits = 0;
 	task cpu_read;
 		input  [3:0] addr;
 		output [7:0] d;
@@ -216,9 +250,18 @@ module tb_iwm_dcd;
 			_cpuRW       = 1'b1;
 			selectIWM    = 1'b1;
 			_cpuLDS      = 1'b0;
-			for (n = 0; n < 3*CPUP; n = n + 1) @(posedge clk);
-			#1;
-			d         = dataOut[7:0];   // sampled while the access is still up
+			n = 0;
+			while (n < 3) begin
+				@(negedge clk);              // mid-cycle: cen is the NEXT edge's
+				if (cen) begin
+					n = n + 1;
+					if (n == 3) begin
+						d = dataOut[7:0];    // pre-edge, as dbin <= iEdb is
+						if (dut.newByteReady) lastCenHits = lastCenHits + 1;
+					end
+				end
+			end
+			@(posedge clk); #1;              // the edge that releases rLDS
 			_cpuLDS   = 1'b1;
 			selectIWM = 1'b0;
 		end
@@ -301,25 +344,19 @@ module tb_iwm_dcd;
 	// byte is genuine only if the latch took a new one from the drive since
 	// the last successful read. nbrLatched is that count.
 	//
-	// THIS FOUND A FOURTH DEFECT, AND IT IS NOT ONE OF THE THREE SEAM BUGS
-	// AND NOT DCD-SPECIFIC. iwm.v arms its latch-clear countdown with
+	// THIS ONCE REPORTED A "FOURTH DEFECT" IN iwm.v THAT WAS THIS BENCH'S OWN.
+	// iwm.v arms its latch-clear countdown with
 	//     if (iwmRead && readDataLatch[7]) readLatchClearTimer <= 4'hD;
-	// which reads readDataLatch BEFORE the edge. When a drive byte is latched
-	// on the LAST cen tick of a CPU read access, that pre-edge value is still
-	// zero, so the countdown is never armed at all - readLatchClearTimer stays
-	// 0, the latch never self-clears, and the next poll returns the same byte
-	// a second time. Observed directly: every good byte leaves timer = 13, the
-	// byte before a duplicate leaves timer = 0.
-	//
-	// It applies to floppy reads identically, and it is alignment-dependent in
-	// exactly the way sim/tb_iwm_latch.v documents - the 393-byte Status frame
-	// below lands on a safe phase and decodes perfectly, the 617-byte read
-	// frame does not. The IWM specification quoted at the top of rtl/iwm.v
-	// calls a valid read "/DEV low and D7 outputting a one for at least one
-	// fclk period", which that final cen tick satisfies, so the hardware would
-	// have armed it. Fixing it means touching the shared, hardware-proven
-	// floppy latch path, which is outside the three-bug fix plan - so it is
-	// gated here by name and left for a decision.
+	// which reads readDataLatch BEFORE the edge, so a drive byte latched on
+	// the LAST cen tick of a read access does not arm it. That is correct:
+	// fx68k did not sample that byte either (see cpu_read), so the next poll
+	// is its FIRST read and arms the clear then. The earlier cpu_read sampled
+	// after the edge, saw the byte, and called the next read a duplicate. The
+	// IWM manual's own definition agrees with the RTL - a valid read needs D7
+	// high "for at least one fclk period" with /DEV low, and a byte landing
+	// on the release edge has zero such periods. Duplicates are still counted
+	// here because a real one - the tight-poll re-arm that tb_iwm_latch.v
+	// covers - would show up the same way.
 	integer rxTimeouts = 0;
 	integer dupBytes   = 0;
 	integer firstDupAt = -1;
@@ -629,9 +666,6 @@ module tb_iwm_dcd;
 		check("BUG 2: every byte the drive offered was seen by the IWM's cen-gated latch",
 		      (nbrLatched > 0) && (nbrLatched === nbrEdges));
 		check("no byte timed out on the way through the data latch", rxTimeouts === 0);
-		// SEPARATE FROM THE THREE SEAM BUGS, and pre-existing: see the note on
-		// dupBytes at its declaration. The Status frame happens to land on a
-		// safe phase; the longer read frame below does not.
 		check("no byte was read twice from the data latch (Status frame)",
 		      dupBytes === 0);
 
@@ -679,6 +713,15 @@ module tb_iwm_dcd;
 		if (dupBytes != 0)
 			$display("        (%0d duplicate reads, first at frame byte %0d - see the dupBytes note)",
 			         dupBytes, firstDupAt);
+		// The alignment the whole latch argument turns on: a byte landing on
+		// the very edge that ends a read. If this is zero the two frames above
+		// proved nothing about it, whichever way the RTL arms its clear - see
+		// POLL_GAP. It is asserted here, after both frames, so that the count
+		// covers the longer one.
+		check("the poll loop landed bytes on a read's LAST cen tick, so that race was exercised",
+		      lastCenHits > 0);
+		$display("        (%0d bytes landed on a read access's last cen tick; dup=%0d timeouts=%0d)",
+		         lastCenHits, dupBytes, rxTimeouts);
 
 		$display("");
 		$display("tb_iwm_dcd: %0d/%0d", pass, pass + fail);
