@@ -1501,8 +1501,12 @@ may cover some of the same ground -- not yet read.
 **PAL 16R6 clocked at 7.5 MHz**, dated 12/13/84. Two facts about the real drive
 fall out of it that the protocol document never states:
 
-- **The HD20 contains its own IWM**, codenamed "Nisha". The PAL sits between the
-  host IWM and Nisha, watching the write-data lines of BOTH.
+- The PAL sits between the host IWM and the drive side, watching the write-data
+  lines of both. The document names the drive side "Nisha", and I first read
+  that as the HD20 having its own IWM. **That reading is wrong: "Nisha" is a
+  DRIVE MECHANISM, not an IWM** -- see the reassembly notes below. What the
+  drive-side interface actually is remains unsettled between the two sources,
+  and it is not on our critical path either way.
 - **The controller is a Zilog Z8**; the PAL presents it with three decoded
   signals (Reset, HoldOff, Host) rather than raw phase lines.
 
@@ -1622,11 +1626,41 @@ behaviourally, exactly as the SCSI targets were done.
   drive do with opcode `$04`?", which reduces to finding one dispatch table),
   never as general reading. Saved at `C:/temp/Mac/HD20/hd20.lst`.
 
-- **`firmware/reassembly/FW3372_PS2013-10-02.zip` (1.0M) -- NOT yet downloaded,
-  and probably the file that matters.** A "reassembly" is normally annotated
-  source that rebuilds to the original binary, i.e. actual reverse-engineering
-  work with meaningful symbol names. If it is, it supersedes `hd20.lst`
-  entirely. Check this before ever investing time in the raw listing.
+- **`firmware/reassembly/FW3372_PS2013-10-02.zip` (1.0M) -- DOWNLOADED
+  2026-09-04, and it is the real thing. Use this, not `hd20.lst`.** Extracted to
+  `C:/temp/Mac/HD20/reassembly/`: `342-0343-B.asm` (the source), `.lst`, a PDF
+  listing, `DefsHD20.inc`, and the original `.bin` -- whose MD5 matches the IDA
+  dump byte for byte, so it is provably the same firmware. By Patrick (RWTH
+  Aachen `asl` assembler), reassembling to Rev. 3372.
+
+  **Quality: 6,608 lines, about half carrying comments, with real symbol names**
+  (`HostCmndBuf`, `Get_HostParms`, `Cmnd_Ptr`, `Cur_Cyl`, `DiskStat`,
+  `BadBlock`) and prose descriptions of each procedure. It is annotated
+  reverse-engineering work, not a dump.
+
+**Three things the reassembly settles, and one limit that matters:**
+
+- **The HD20 firmware is DERIVED FROM WIDGET** -- the Lisa 2 / Mac XL internal
+  drive controller -- which is why the author could reuse Widget's comments.
+  That is a useful lineage: Widget is far better documented than the HD20, so a
+  question the HD20 sources cannot answer may be answerable from Widget.
+- **A controller supports TWO mechanisms**, distinguished at runtime from the
+  servo response: **Nisha**, 5.25", 610 tracks, 2 heads -- which is exactly the
+  geometry in the protocol document's identity block -- and **Rodime RO552**,
+  3.5", 305 tracks, 4 heads. So "Nisha" is a mechanism, not an IWM, and the
+  identity block we saw describes the Nisha-equipped variant.
+- **The host byte stream is handled by the Z8's on-chip UART**, not by bit-
+  banging: `DefsHD20.inc` configures Port 3 bit 0 as SIO in and bit 7 as SIO
+  out, and the interrupt vectors are `IRQ3 = Serial in`, `IRQ4 = T0, Serial
+  out`, so timer T0 paces transmission. `HostCmndBuf` is **8 bytes**, matching
+  the command layout in the protocol document.
+- **LIMIT: the source is incomplete, and the gap could matter.** The Z8's
+  INTERNAL ROM (`341-0339-A`, the low `0x0000-0x07FF`) has never been dumped --
+  the author does not own an HD20 -- and many calls go into that region with
+  their meaning only guessed. So if a link-layer detail (7-for-8 packing,
+  checksum, hold-off resumption) turns out to live in the internal ROM, this
+  source cannot answer it and we are back to the specifications plus the Mac
+  ROM. Establish early whether the answers we need are above `0x0800`.
 - **`342-0414-A.jed` (51K) -- the PAL fuse map**, the exact equations. It
   supersedes a reading of the hand-drawn table if the phase decode is ever in
   doubt.
