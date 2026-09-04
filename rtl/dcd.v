@@ -68,7 +68,7 @@
      off  size  field              value
        0     2  Device_Type        0
        2     2  Device_Manuf       1, which 1.2a gives as "Apple = 1"
-       4     1  Device_Character   $F6
+       4     1  Device_Character   $DE
        5     3  Num_Blocks         highest block = capacity - 1
        8     2  Num_Spares         0
       10     2  Num_BadBlocks      0
@@ -76,13 +76,23 @@
       64   256  Icon               rtl/dcd_icon.vh
      320    12  trailer            a Pascal string; nothing reads it
 
+   Device_Character is $DE, NOT the $F6 TashTwenty writes, and the difference
+   is deliberate: Writable is cleared and Write_Protected set, because
+   MultiBlock Write is not implemented. THIS IS NOT COSMETIC. HFS writes the
+   volume's MDB back at mount time to mark it in use, and with opcode $01
+   unanswered that write becomes a handshake timeout - so claiming to be
+   writable would make a perfectly good read path present as a broken drive,
+   and would hide the real result behind a failure mode we already know about.
+   A locked volume is a state the Mac has handled natively since 1984.
+
    $F6 is Mountable + Readable + Writable + Ejectable + Icon_Included +
-   Disk_In_Place. TashTwenty writes exactly this constant, which is what
-   confirms 1.2a's bit values are the shipping ones. EJECTABLE IS THE ONE BIT
-   I AM NOT SURE OF - a fixed disk arguably should not claim it, and
-   TashTwenty's own comment writes it "ejectable (?)". It is set because $F6 is
-   the value known to mount on real hardware; $E6 is the one-bit experiment if
-   the Finder is ever seen to behave oddly about unmounting.
+   Disk_In_Place, and TashTwenty writes exactly that constant, which is what
+   confirms 1.2a's bit values are the shipping ones. We send the same set with
+   $20 traded for $08. EJECTABLE IS THE ONE BIT I AM NOT SURE OF - a fixed disk
+   arguably should not claim it, and TashTwenty's own comment writes it
+   "ejectable (?)". It is kept because $F6 is the value known to mount on real
+   hardware; clearing it is the one-bit experiment if the Finder is ever seen
+   to behave oddly about unmounting.
 
    NUM_BLOCKS IS CAPACITY MINUS ONE, and this is the one field held on someone
    else's empirical result rather than on a document. TashTwenty decrements it,
@@ -224,6 +234,16 @@ module dcd
 
 	wire [23:0] maxBlock = (blockCount == 24'd0) ? 24'd0 : (blockCount - 24'd1);
 
+	// Device_Character. Everything but the write pair is fixed: Mountable,
+	// Readable, Ejectable, Icon_Included, Disk_In_Place = $D6. Exactly one of
+	// Writable ($20) and Write_Protected ($08) joins it.
+	//
+	// Flip WRITE_IMPLEMENTED when MultiBlock Write lands. The read-only-mount
+	// case is already wired behind it, so a locked image stays locked then too.
+	localparam WRITE_IMPLEMENTED = 1'b0;
+	wire writeProtected = ~WRITE_IMPLEMENTED | readonly;
+	wire [7:0] deviceChar = 8'hD6 | (writeProtected ? 8'h08 : 8'h20);
+
 	// The two replies share a six-byte header and differ after it. replyRead
 	// is latched when the command is decoded, not derived from the opcode
 	// register, because a read answers N times and the opcode is long gone.
@@ -248,7 +268,7 @@ module dcd
 		else if (txAddr <  10'd8)  txData = 8'h00;              // 0  Device_Type
 		else if (txAddr == 10'd8)  txData = 8'h00;              // 2  Device_Manuf
 		else if (txAddr == 10'd9)  txData = 8'h01;              //    ...= 1, Apple
-		else if (txAddr == 10'd10) txData = 8'hF6;              // 4  Device_Character
+		else if (txAddr == 10'd10) txData = deviceChar;         // 4  Device_Character
 		else if (txAddr == 10'd11) txData = maxBlock[23:16];    // 5  Num_Blocks
 		else if (txAddr == 10'd12) txData = maxBlock[15:8];
 		else if (txAddr == 10'd13) txData = maxBlock[7:0];

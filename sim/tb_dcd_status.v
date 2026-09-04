@@ -270,12 +270,20 @@ module tb_dcd_status;
 		      {identity(0), identity(1)} === 16'h0000);
 		check("Device_Manuf is 1 (Apple) at identity offset 2",
 		      {identity(2), identity(3)} === 16'h0001);
-		check("Device_Character is $F6 at identity offset 4",
-		      identity(4) === 8'hF6);
-		check("  ...which is Mountable, Readable and Writable",
-		      (identity(4) & 8'hE0) === 8'hE0);
+		// $DE, not the $F6 TashTwenty writes: Writable traded for
+		// Write_Protected because MultiBlock Write is not implemented. HFS
+		// writes the MDB back at mount time to mark a volume in use, so a
+		// drive that claims to be writable turns a working read path into a
+		// handshake timeout at the worst possible moment.
+		check("Device_Character is $DE at identity offset 4",
+		      identity(4) === 8'hDE);
+		check("  ...which is Mountable and Readable",
+		      (identity(4) & 8'hC0) === 8'hC0);
 		check("  ...and declares an icon and a disk in place",
 		      (identity(4) & 8'h06) === 8'h06);
+		check("  ...and reports WRITE-PROTECTED, not writable",
+		      ((identity(4) & 8'h08) === 8'h08) &&
+		      ((identity(4) & 8'h20) === 8'h00));
 
 		// ---- capacity: 24-bit, and one less than the image ----
 		cap = {8'h00, identity(5), identity(6), identity(7)};
@@ -378,6 +386,8 @@ module tb_dcd_status;
 		mount(64'd38965);                  // a real HD20, 20 MB
 		repeat (4) @(posedge clk);
 		runStatus;
+		check("a second mount still reports write-protected",
+		      identity(4) === 8'hDE);
 		check("a 20 MB capacity reports as 38964, the highest block",
 		      {identity(5), identity(6), identity(7)} === 24'd38964);
 		sum = 0;
