@@ -1174,6 +1174,154 @@ framing and command set, sharing only the physical lines -- plus a storage
 backend and hardware bring-up. Comparable in size to the SCSI work, and it
 occupies the external drive slot alongside the internal floppy.
 
+## The ROM's startup disk search, disassembled (2026-09-04)
+
+**Why this exists.** Daniel mounted two bootable floppies on a 128K and it
+booted from the SECOND one, and asked whether that is how the machine is
+supposed to behave. Rather than reason from the symptom, the ROM was
+disassembled -- [[feedback-read-the-spec-for-historical-hardware]], and here the
+ROM *is* the specification, since Apple never published the boot search. The
+answer turned out to be "not a bug", but the disassembly is worth keeping: it
+is the exact code path an HD20 has to appear in, so it is Phase 5's starting
+point rather than a one-off.
+
+**Method.** capstone `CS_ARCH_M68K` over the images in `C:\temp\Mac\ROMS`, the
+same technique that produced the Sad Mac decoder in Phase 3. Both families were
+read: `28BA4E50` (the 64K image actually installed as `boot2.rom`) and
+`4D1F8172` (the Plus image, `boot0.rom`). The entry points were found by
+searching for the boot-block signature `'LK'` = `$4C4B`, which occurs exactly
+ONCE in each image.
+
+### 64K ROM (128K / 512K / 512Ke): alternate between two drives, forever
+
+Boot loop at `$4004A0`, in flow order -- so the addresses are not monotonic:
+
+```
+$4004A0  lea      $4008C8(pc),a0   ; "insert disk" icon
+$4004A6  moveq    #1,d6            ; d6 = drive 1 = INTERNAL
+$4004A8  btst     #4,$020B.w       ; boot-drive override flag
+$4004AE  beq      $4004B2
+$4004B0  addq.w   #1,d6            ;   if set: start at drive 2 = EXTERNAL
+$4004B2  moveq    #3,d3            ; toggle mask
+$4004B6  tst.b    $0172.w          ; MBState
+$4004BA  bpl      $400500          ;   mouse button DOWN -> eject, do not boot
+$4004BC  move.w   #$FFFB,$18(a0)   ; ioRefNum = -5, the .Sony driver
+         move.w   #1,$2C(a0)       ; ioPosMode = fsFromStart
+         clr.l    $2E(a0)          ; ioPosOffset = 0
+         move.l   #$10000,$20(a0)  ; ioBuffer
+         move.l   #$400,$24(a0)    ; ioReqCount = 1024 = blocks 0 and 1
+         move.w   d6,$16(a0)       ; ioDrvNum  <- the drive being tried
+         move.w   d6,$0210.w       ; BootDrive
+$4004E8  _Read
+$4004EA  beq      $400546
+$4004EE  cmpi.w   #$FFBF,d0        ; -65 offLinErr (no disk) -> just retry
+$4004F2  beq      $40051C
+$4004F4  cmpi.w   #$FFC0,d0        ; -64 noDriveErr (no drive)
+$4004F8  bne      $400500
+$4004FA  eor.w    d3,d6            ;   toggle once...
+$4004FC  moveq    #0,d3            ;   ...then STOP toggling: stick to the
+$4004FE  bra      $40051C          ;   drive that actually exists
+$400546  cmpi.w   #$4C4B,(a1)+     ; 'LK' boot-block signature -> boot
+$40054A  bne      $400500          ;   readable but not bootable -> eject
+$400500  move.w   #7,$1A(a0)       ; csCode 7 = EJECT
+         _Control
+         lea      $4008E6(pc),a0   ; switch to the "bad disk" X icon
+$400540  eor.w    d3,d6            ; alternate 1 <-> 2 and go round again
+$400542  bra      $4004BC
+```
+
+What this establishes:
+
+- **Drive 1 (internal) is tried first**, drive 2 (external) second.
+- **The search never gives up.** `eor.w d3,d6` with `d3 = 3` flips 1 <-> 2 on
+  every pass, with the flashing-disk icon and a delay between passes. A machine
+  sitting at the "insert disk" screen is polling BOTH drives continuously, so
+  **whichever disk arrives first wins, regardless of which drive it is in.**
+- **A readable but non-bootable disk is EJECTED** and the search moves on.
+- **`noDriveErr` (-64) is how the ROM prunes a drive that is not there**: it
+  toggles once and zeroes the toggle mask, sticking to the surviving drive.
+- **Mouse button held at startup ejects instead of booting** (`MBState`,
+  `$0172`). That is documented 1984 behaviour, and it is what confirms the
+  low-memory decoding above is right -- including `BootDrive` at `$0210`.
+
+### Plus 128K ROM: walk the drive queue
+
+Boot loop at `$4006E4`. Structurally different, same outcome:
+
+```
+$4006E4  move.l   $030A.w,d6       ; DrvQHdr.qHead -- the drive queue
+$4006EA  btst     #4,$020B.w
+$4006F0  bne      $40077C          ;   if set: skip this element
+$400712  movea.l  d6,a1
+$400714  move.w   $8(a1),d3        ; dQRefNum  -> ioRefNum
+$400720  move.w   $6(a1),d3        ; dQDrive   -> ioDrvNum
+$400728  move.w   d3,$0210.w       ; BootDrive
+$40072E  tst.b    $0172.w          ; MBState, same eject-on-mouse-down
+$400734  _Read
+$400738  cmpi.w   #$4C4B,(a6)      ; same 'LK' check
+$40077C  jsr      $407D40(pc)      ; next queue element
+```
+
+So the Plus boots **in drive-queue order** -- installation order, i.e. internal
+floppy, external floppy, then whatever the SCSI driver enqueued.
+
+**This is the Phase 5 hook.** An HD20 is bootable on a Plus/512Ke exactly if
+its driver puts a `DrvQEl` in that queue with a working `dQRefNum`; the boot
+code itself needs no HD20 knowledge at all. That is a much smaller target than
+"teach the ROM about DCD", and it is the first thing to confirm once the DCD
+disassembly starts.
+
+### `$020B` bit 4: a real override, provenance unknown
+
+Both ROM families consult `btst #4,$020B` before the search: the 64K ROM starts
+at drive 2 instead of drive 1, the Plus ROM skips the first queue element.
+**Neither ROM ever writes it.** A sweep of every absolute-addressed operand in
+`$0200`-`$020F` across both images found reads only, and no low-memory clear
+loop covers the address, so its value at boot is whatever the memory test left
+in DRAM.
+
+Two things NOT established, so do not assert them: what the byte is called (it
+could not be matched to a documented low-memory global), and that nothing sets
+it -- the sweep would not catch a write through a walking pointer. Treat
+"nothing initialises `$020B`" as "no absolute writer found", which is weaker.
+
+### The two-floppy observation: mount order, not a defect
+
+The most likely explanation, and Daniel's own: the disks were mounted one at a
+time while the machine was already looping at the flashing-disk screen, and the
+loop takes whichever disk appears first. **A real 128K does exactly the same**,
+so there is nothing to fix.
+
+Two conditions have to hold before an observation like this tests drive
+PREFERENCE at all, and both are easy to miss:
+
+- **Both images mounted BEFORE the boot search starts** -- mount both, then
+  Reset & Apply. Only then must drive 1 win.
+- **The mounts allowed to settle.** `insertDisk` is held LOW for the whole time
+  `floppy_loader` is staging an image into SDRAM -- hundreds of ms for an 800K
+  image -- so a reset issued straight after a mount hands the ROM an internal
+  drive that honestly reports "empty", and it steps to drive 2.
+
+If a deliberate both-mounted-then-reset trial ever DOES boot drive 2, `$020B`
+bit 4 is the first suspect, and the value is readable through the probe deck.
+Testing this on the early Systems is awkward for an unrelated reason: System
+1/2/3 have no Shut Down command, so the procedure is eject, wait for the disk
+LED to settle (so `floppy_sd_writer` has flushed its shadow to SD), then
+Reset & Apply.
+
+### One genuine deviation found on the way
+
+`rtl/floppy.v:134` reports `DRVIN`, `INSTALLED` and `READY` as "present" for
+**both** drives unconditionally, whether or not an image is mounted. On real
+hardware an absent external drive answers `noDriveErr` (-64) -- which is
+precisely the case the 64K loop above uses to stop alternating and settle on
+the drive that exists. The core never gives the ROM that signal, so it will
+alternate between a real drive and a phantom one forever.
+
+Not release-blocking, and not the cause of the two-floppy observation. But it
+is the same class of problem as Phase 4 -- reporting a device that is not there
+-- so it should be fixed alongside the SCSI gate rather than separately.
+
 ## Verification
 
 House ladder applies unchanged: a failing test before the fix, iverilog
