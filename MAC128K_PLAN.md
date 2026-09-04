@@ -1815,6 +1815,182 @@ driver script `dis.py`, because it shadows Python's own `dis` module and
 capstone fails to import with a circular-import error that says nothing about
 the real cause.
 
+### The receive path, the command block, and one conflict with the spec (2026-09-04)
+
+Second disassembly pass, picking up the four targets left open above. Three of
+them are closed; the fourth turned into something more interesting than expected.
+
+**The 8-to-7 decoder, `$4198C4`-`$41996E`, is the exact mirror of the encoder:**
+
+```
+4198C4  lsr.b  #1,d4       ; d4 = the LSB byte; its next LSB falls into X
+4198C6  addx.b d1,d1       ; d1 = d1+d1+X = (received << 1) | that LSB
+4198C8  add.b  d1,d5       ; running checksum on the DECODED byte
+4198CA  move.b d1,(a1)+    ; store
+4198CC  move.b (a3),d1     ; read the next byte from the IWM
+4198CE  dbmi   d6,.-4      ; poll for it, d6 = $50 = 80 tries
+4198D2  bpl    error $22   ; exhausted -> error $22
+```
+
+Transmit peels the LSB out with `roxr.b #1` and sets the MSB with `or #$80`;
+receive shifts it back in with `addx.b dN,dN`. The group is **prefetched whole**
+(`$419886`-`$4198AC` fills `d1`-`d4` with eight bytes) before decoding starts,
+which is how the driver can consume the LSB byte first even though the drive
+sends it last -- so the spec's awkward "LSB-byte first from the Mac, last from
+the drive" asymmetry costs the receiver nothing. Our engine has to honour it.
+
+**THE CHECKSUM IS NOW CONFIRMED FROM BOTH ENDS OF THE DRIVER.** The transmit
+side sends `neg.b d5`; the receive side, at `$419A08`, simply does
+`move.b d5,d0 / beq ok` -- **the sum of every decoded byte INCLUDING the received
+checksum byte must be zero.** That is what `-sum` is for, and the two halves were
+read independently, so this is no longer a single-site reading.
+
+**The trailing partial group is decoded in full but stored in part.**
+`$4199A0`-`$4199F6` unrolls all seven positions with `subq.w #1,d7 / bmi` guarding
+only the `move.b dN,(a1)+`. So a short final group still contributes all seven
+positions to the checksum. An implementer would very plausibly get this wrong.
+
+**Error codes, recovered from the branch targets:**
+
+| code | raised when |
+|---|---|
+| `$10` | sense low before a transmission even starts -- nothing there |
+| `$11` | timeout waiting for `/HSHK` after asserting HOST (budget `$140000`) |
+| `$13` | timeout waiting for `/HSHK` high at end of transmission (budget `$FF`) |
+| `$22` | per-byte receive timeout (budget `$50`) |
+| `$24` | resync failed -- 65536 tries hunting the `$AA` after a hold-off |
+| `$25` | sense low at the end of a received group |
+| `$26` | **checksum mismatch** |
+
+**Hold-off on the receive side, `$419974`-`$41999E`, and it shows WHY hold-off
+exists:**
+
+```
+419976  andi.w #$F8FF,sr   ; DROP the interrupt mask -- let the SCC be serviced
+41997A  subq.w #1,d7       ; back up one group
+419982  ori.w  #$700,sr    ; mask again
+419986  tst.b  $200(a0)    ; ca0H: state 0 -> 1, release HOFF
+419992  cmpi.b #$AA,(a3)   ; hunt for a fresh sync byte
+419998  bra    $4198C4     ; re-decode the group from the top
+```
+
+**So the drive must retransmit the interrupted group from its start, preceded by
+a fresh `$AA`.** That is the spec sentence "resume with the group that was
+interrupted", made concrete -- and the RTL must implement retransmission, not
+continuation.
+
+**`a5` and `a6` are the SCC, which settles what hold-off is for.** `$419A2A`
+does `movem.l $1D8.w,a5-a6`, so **`a5` = SCCRd (`$01D8`) and `a6` = SCCWr
+(`$01DC`)**. Every `tst.b (a5)` scattered through both loops is a poll for a
+pending serial character, and that is what triggers HOFF. The protocol document
+says hold-off exists so "an SCC interrupt can be detected at the beginning of a
+group and serviced"; the driver polls the SCC literally, in both directions.
+Nothing about this is guesswork any more.
+
+**THE COMMAND BLOCK, and it is exactly the spec's layout.** `$19C(a1)` onward in
+SonyVars (`$134`), assembled at `$41967C`-`$419688`:
+
+| offset | field | built by |
+|---|---|---|
+| `$19C` | **opcode** | `0` read, `1` write, `2` write-verify, `3` status, `4` diagnostic |
+| `$19D` | block count, one byte | `move.b d3,$19D(a1)` |
+| `$19E`-`$1A0` | **24-bit block number** | `move.l d5,d0 / lsl.l #8,d0 / move.l d0,$19E(a1)` |
+| `$1A1` | pad | the zero left by that shift |
+
+Six bytes, plus the sync and the checksum, is the eight-byte command the
+protocol document specifies -- and it matches `HostCmndBuf`, which the firmware
+reassembly independently reports as **8 bytes**. Three sources, one layout.
+
+The `lsl.l #8` is worth noticing on its own: the block number is left-justified
+in a longword so that the three bytes land in wire order. **It is a genuine
+24-bit path with no truncation anywhere** -- which is the thing the >32 MB test
+requirement above exists to catch, and it is reassuring that the Mac side was
+built for it.
+
+**Opcode numbering confirmed, and the tag bytes go on the DATA direction only.**
+`$4196C2` reads `$19C(a1)` and splits on it:
+
+```
+cmpi.b #3,d1 ; bge  -> no adjustment      (Status and Diagnostic carry no data)
+tst.b  d1    ; beq  -> addi.w #$14,d7     (READ:  +20 on the RECEIVE count)
+             ; bne  -> addi.w #$14,d6     (WRITE: +20 on the TRANSMIT count)
+then both:     addq.w #6 ; divu.w #7      (groups = ceil(n/7))
+```
+
+`d6` and `d7` are the transmit and receive byte counts, seeded at `$419694` with
+`#$200` = 512 in one and zero in the other, swapped by direction with `exg.l`.
+So **532 on the wire in whichever direction carries data, 512 in the image, and
+Status/Diagnostic get no tag bytes at all.** The read-path tag question from the
+previous pass is answered as far as counting goes: the driver reserves 20 bytes
+and receives them; what it does with them afterwards is in the buffer handling,
+not here.
+
+**Transmit handshake, `$419A98`-`$419ABC`, matches the spec sentence for
+sentence:** sense first (`$10` if dead), `ca0H` takes state 2 -> 3 asserting
+HOST, spin until `/HSHK` goes low (`$11` on timeout), `ca1L` takes state 3 -> 1,
+then the sync byte. The `$11` budget is `$140000` iterations of a four-cycle
+loop -- **over a second at 7.8333 MHz**, which is the protocol document's
+"up to 2 SECONDS while self-testing" showing up as a real number in real code.
+
+**I WALKED INTO THE GCR TRAP THIS PLAN ALREADY WARNED ABOUT, and the warning
+paid for itself.** Searching the driver for `#$96` -- the DCD write sync -- hits
+`$419324`. It is **floppy GCR code, not DCD**: the same routine touches
+`$DFFDFF` directly, indexes a 64-entry six-bit table at `$25A`, and runs a
+`$2BE` = 702 byte count. Exactly the "`$D5 $AA $96` is the Apple GCR sector
+prologue" collision recorded above. **The warning was right and it should stay
+right at the top of anyone's Phase 5 reading.**
+
+**AND THAT LEAVES A REAL CONFLICT WITH THE SPECIFICATION, which is recorded as
+an observation and NOT yet as a conclusion.** In the whole DCD engine
+(`$419700`-`$419E00`) there is **no `$96` anywhere**, and the only sync ever
+transmitted is `$AA`, hardcoded at two sites -- the initial one at `$419AE2` and
+the post-hold-off resync at `$419BE6`. Checked across all three Plus ROM
+revisions:
+
+| ROM | `$96` in the DCD engine | `$AA` written to the IWM data register |
+|---|---|---|
+| `4D1EEEE1` | 0 | 2 |
+| `4D1EEAE1` | 0 | 2 |
+| `4D1F8172` | 0 | 2 |
+
+So it is not a revision quirk. The protocol document is explicit that write and
+write-verify use a `$96` sync and that the fast-ACK echoes whichever sync was
+sent -- yet this driver builds write commands (it adds the 20 tag bytes to the
+transmit count for opcodes 1 and 2, so the write path is plainly reachable) and
+still sends `$AA`. The receive side agrees with itself: both sync hunts compare
+against `$AA` and nothing else.
+
+**Two readings, and I have not yet distinguished them:**
+
+1. The ROM driver is effectively read-only in practice, and write support is
+   what the `.Sony` `PTCH` on the HD20 startup floppy adds. The command-block
+   construction would then be shared code that the ROM never drives with
+   opcode 1.
+2. This implementation simply does not use `$96`, and the spec statement did not
+   survive contact with the shipping driver -- which is precisely the class of
+   thing BMOW warned about when they said the documents conflicted with tests on
+   a real Macintosh.
+
+**Either way there is an RTL consequence, and it is the safe one in both cases:
+our DCD engine must accept `$AA` as the sync on a write and must not require
+`$96`.** Accepting both costs nothing; requiring `$96` would deadlock against
+Apple's own driver.
+
+**How to settle it**, and it is the natural next artefact anyway: pull the three
+`PTCH` resources out of the "Hard Disk 20" file on `HD_20_Startup.img` and
+disassemble the `.Sony` one. It is a self-contained DCD driver with no floppy
+code around it -- a better read than the ROM in several ways -- and it is the
+half that a 512K uses, so it has to contain whatever the ROM lacks. That needs
+an MFS reader plus resource-fork parsing, which is new tooling but small.
+
+**Still open after this pass:** what the driver does with the 20 tag bytes once
+received (it counts and stores them; whether anything reads them is a buffer
+question, not a link-layer one), the identity block's landing site, and the two
+bytes the transmitter sends between the sync and the first group -- they are
+built as `(groupcount_tx | groupcount_rx << 16) + $810081`, i.e. each count plus
+one with bit 7 set, which is not in the text the OCR gave us and wants checking
+against the page images before anything is built on it.
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
