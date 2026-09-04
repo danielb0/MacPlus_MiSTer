@@ -1862,10 +1862,34 @@ conversion (`dc2dsk`, `releases/bin2dsk.sh`).
   had is untested. If it objects, fall back to a 20 MB volume; the Floppy Emu
   reportedly serves far larger images in HD20 mode, so this is unlikely to bite.
 
-  **Two artefacts, two different tests.** `320_32MB_volume.dsk` is a formatted
-  bootable volume and exercises the READ path and boot; `mac_20mb.vhd` is a
-  correctly sized blank and exercises FORMAT and the write path by letting the
-  Mac initialise it. Keep both.
+  **THE STARTUP DISK IS HERE TOO**, `C:/temp/Mac/HD20/HD_20_Startup.img`
+  (Daniel, 2026-09-04) -- and it needs no conversion: **409,600 bytes, raw 400K,
+  `'LK'` boot blocks, MFS volume (`$D2D7`) named `HD 20 Startup`**, 10 files, 69
+  KB free. It mounts in this core's existing floppy slots as-is. Contents:
+
+  | type/creator | file |
+  |---|---|
+  | `ZSYS/MACS` | System |
+  | `FNDR/MACS` | Finder |
+  | `ZSYS/MACS` | **Hard Disk 20** -- the driver, and note the type codes match the Mac GUI article exactly: not an INIT, a `PTCH` carrier |
+  | `APPL/HDTS` | **HD 20 Test** -- Rodger Mohme's utility, ancestor of HD SC Setup |
+  | `APPL/DMOV` | Font/DA Mover |
+  | `PRES/IWRT` | ImageWriter |
+  | | DeskTop, Note Pad File, Scrapbook File, Clipboard File |
+
+  So the diagnostic tooling is already on the startup disk; the bitsavers
+  `diag/` floppies are a bonus rather than a prerequisite.
+
+  **THE ARTEFACT SET FOR PHASE 5 IS NOW COMPLETE**, and it covers every path:
+
+  | artefact | what it tests |
+  |---|---|
+  | `HD_20_Startup.img` (400K MFS) | the 512K route -- driver arrives as a `.Sony` patch from floppy |
+  | `320_32MB_volume.dsk` | READ path and booting, on a 512Ke/Plus via ROM `SonyDCD` |
+  | `mac_20mb.vhd` (blank 20 MB) | FORMAT and the WRITE path, by letting the Mac initialise it |
+  | `HD 20 Test` (on the startup disk) | low-level exercise without needing a bootable volume |
+
+  Nothing further needs to be found or built before implementation starts.
 - Which models can boot it. HD20 boot support is believed to live in the 128K
   ROM, i.e. Plus and 512Ke; the 64K-ROM machines would need the HD20 system
   software from floppy, if at all. Confirm from the ROM.
