@@ -1325,13 +1325,34 @@ was true for decades and is no longer true; the docs surfaced and BMOW's HD20
 work drew on them. Note the connection -- this core descends from Plus Too,
 which is BMOW, so our own upstream ancestor is the leading DCD implementer.
 
-**Revised first task: read the two PDFs, then use the ROM to confirm.** The 128K
-ROM (`boot0.rom`, `4D1F8172`) still contains Apple's own DCD driver -- the Mac's
-half of the protocol, first-hand -- and the disassembly workflow is proven (it
-produced the Sad Mac decoder and the exception-vector mapping in Phase 3, and
-the boot-search analysis above). But it is now the CORROBORATING source, not the
-primary one. Read the spec first; disassemble to check our reading and to see
-which parts the ROM actually implements.
+**But the specs are NOT sufficient on their own, and that is the second
+correction in one day -- do not over-correct twice.** BMOW, who used these very
+documents to build the Floppy Emu's HD20 mode, reports that they conflicted with
+each other in many details, were silent on critical points, and conflicted with
+tests performed on a real Macintosh -- which forced Mac ROM disassembly to
+resolve. So the first correction above ("the ROM is now the CORROBORATING
+source, not the primary one") is itself wrong.
+
+**The actual source hierarchy for this phase, in order of authority:**
+
+1. **Real hardware behaviour** -- what the Mac and a real drive actually do.
+2. **The 128K ROM** (`boot0.rom`, `4D1F8172`), which contains Apple's own DCD
+   driver: the Mac's half of the protocol, first-hand, and the half we must
+   satisfy. It arbitrates wherever the two documents disagree, because it is
+   what actually shipped. The disassembly workflow is proven -- Sad Mac decoder
+   and exception-vector map in Phase 3, boot search above.
+3. **The two 1985 specifications**, which give structure, vocabulary and the
+   framing nobody would infer -- but which contradict each other.
+
+Read the specs FIRST anyway, because they make the ROM disassembly legible:
+knowing to look for a 7-into-8 byte encoding and a state-based command/response
+machine turns an unreadable driver into a recognisable one. Just never treat a
+spec statement as settled when the ROM says otherwise.
+
+**Second independent implementation to compare against: TashTwenty**, a
+single-chip DCD (Hard Disk 20) interface, separate from the Floppy Emu and
+discussed on 68kMLA. Two independent implementations plus Apple's own driver is
+a far better position than the plan originally assumed.
 
 **`IWM_Interface_PAL.pdf` may matter as much as the protocol docs.** We
 implement the IWM and the external drive port, so the hardware side of how a DCD
