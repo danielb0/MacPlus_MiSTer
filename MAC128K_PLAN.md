@@ -2560,6 +2560,260 @@ the note above, the command layer's control flow goes through runtime-installed
 dispatch vectors, so that gate is simulation against the real ROM or hardware,
 not more static reading.
 
+### STOP: we built Phase 5 on the WRONG SPEC REVISION (2026-09-04)
+
+**Found while starting MultiBlock Read, by reading the sources before designing
+the framing -- [[feedback-read-the-spec-for-historical-hardware]] paying for
+itself again. `C:\temp\Mac\HD20\` holds TWO specifications, and everything above
+was built on the earlier one.**
+
+- `Software_Protocol_for_Directly_Connected_Disks_Mar85.pdf` -- Young & Hanlon,
+  **version 1.1, 28 March 1985**. What this plan has been quoting throughout.
+- `Directly_Connected_Disks_Specification_1.2a_May85.pdf` -- **version 1.2a,
+  May 1985** (KBY, dated 4/11 in the page footers). Read here only for the
+  handshake/sync question; **its command formats were never read, and they
+  differ substantially.**
+
+**THE SHIPPING PLUS ROM IMPLEMENTS 1.2a.** Four independent confirmations, all
+from disassembling `$419600`-`$419E40` of `4D1F8172` with capstone:
+
+| # | site | what it shows | 1.1 | 1.2a |
+|---|---|---|---|---|
+| 1 | `$419716 ori.b #$40,$19C(a1)` | subsequent write blocks carry opcode **`$41`** | `$01` | **`$41`** |
+| 2 | `$4197EE subq.b #1,d3`, checked at `$41978C cmp.b $19D(a1),d3` | reply seq **counts DOWN** from #blks to 1 | up from 0 | **down** |
+| 3 | the byte accounting below | reply header is **6 bytes** | 4 bytes | **6** |
+| 4 | `$419D2C move.l #$14C,d7` | Status identity block is **332 bytes** | 36 | **332** |
+
+**THE BYTE ACCOUNTING, and it closes exactly.** `$4196FA`/`$419704` do
+`addq.w #6,dN / divu.w #7,dN / andi.w #$7F,dN`. `divu` leaves the quotient in the
+low word and the REMAINDER in the high word, and the receiver uses both:
+`d7.low` is the whole-group loop (`dbne d7,$4198C4`) and `d7.high` is the number
+of bytes to store from the trailing partial group (`$4199A0` onward). So for a
+data byte count `n` the Mac reads `q+1` groups and **stores exactly `n+6`
+bytes** -- the `+6` is the reply header. Checks out on both directions:
+
+- **read**, `n` = 512+20 = 532: `q`=76, `r`=6, so 77 groups on the wire = 539
+  slots, and the payload is `<$80><seq><stat><pad><pad><pad>` + 532 + `<CHK>` =
+  **539 exactly, no padding**. 1.1's 4-byte header needs two slots of pad; 1.2a
+  fits perfectly.
+- **status**, `n` = 332: `q`=48, `r`=2, so **49 groups** = 343 slots, storing
+  338 = 6 + 332.
+
+**AND THE BUFFER-SWITCH COUNTERS INDEPENDENTLY CONFIRM THE 6, AND SETTLE THE TAG
+ORDER.** Both directions switch from the command block to the caller's data
+buffer at **byte 26 = 6 header + 20 tags**:
+
+- receive: `$4198BC moveq #3,d6 / swap d6`, then the `dbra d6` at `$419932` sits
+  after the 5th store of the group -> switches at 3*7+5 = **26**.
+- transmit: 6 bytes are prefetched in the prologue (`$419A42`-`$419A94`), then
+  the `dbra d7` at `$419B88` with `d7`=2 (`$419AC8`) sits after the 6th fetch of
+  the group -> 6 + 2*7 + 6 = **26**.
+
+**So the 532 is `<20 tag bytes><512 data>`, tags FIRST.** That was an open
+question and it is now answered from the driver's own pointer arithmetic.
+
+**`move.l #$14C,d7` FINALLY HAS A MEANING.** This plan recorded it as
+"reconciles with a 42-byte response under no reading I tried". It does not
+reconcile because **the Status reply is not 42 bytes**: `$14C` = 332 is the
+identity block length, and the reply is 49 groups. Corroboration from the same
+routine: `$419CC4` installs a pointer to `$1F0(a1)`, which is `$1F0-$1C4` = 44
+bytes into the Status buffer at `a4` = `$1C4(a1)`, i.e. identity offset
+20+44 = **64** -- exactly where 1.2a's `ID_Block` puts `Icon`, and exactly what
+the Mac GUI article meant by "the HD20's icon lives in the controller's
+firmware".
+
+**1.2a's `ID_Block`** (the OCR transposes the columns; order reconstructed, and
+the sizes sum to 512 which is what the document's own "Filler bytes to make it
+512 bytes" requires):
+
+| offset | field | size |
+|---|---|---|
+| 0 | Device_Type | word |
+| 2 | Device_Manuf | word (Apple = 1) |
+| 4 | Device_Character | byte |
+| 5 | Num_Blocks | 3 bytes |
+| 8 | Num_Spares | word |
+| 10 | Num_BadBlocks | word |
+| 12 | Manuf_Reserved | 52 |
+| **64** | **Icon** | 256 |
+| 320 | Filler | 192 |
+
+Device characteristics bits: `Mountable $80`, `Readable $40`, `Writable $20`,
+`Ejectable $10`, `Write-protected $08`, `Icon Included $04`, `Disk In Place $02`.
+
+**1.2a also replaces the bare `$D5` fast-NAK with a NAK FRAME**,
+`<$AA><$7F><5 pad><CHK>` -- one group -- and has the drive answer each write
+block with `<$AA><$81><seq><stat><3 pad><CHK>`, also one group, rather than with
+a bare fast-ACK.
+
+**TWO MORE RTL CONSEQUENCES, both from the drive firmware and both cheap to get
+wrong:**
+
+- **The drive sizes its reply from the Mac's SECOND count byte.**
+  `342-0343-B.asm` `L1ead` does `ld R2, 53h` -- the second post-sync byte,
+  masked to 7 bits -- immediately before sending the `$AA`, and the transmit
+  loop ends `dec R2 / jr NZ`. So the drive sends exactly the number of groups
+  the Mac asked for. **`rtl/dcd_link.v` currently CONSUMES AND DISCARDS that
+  byte** ("the command layer decides that from the opcode"); it must expose it,
+  and the command layer should honour it rather than hardcoding lengths. That is
+  also what makes us robust across driver revisions.
+- **The checksum is always the LAST SLOT of the LAST group.** In the same loop,
+  when `R2` hits zero the drive emits `com R4 / inc R4` -- the negated running
+  sum -- as the **7th** data byte of that group, and then the LSB byte. So
+  padding goes BEFORE the checksum, not after. Our link layer places `CHK` at
+  `txLen` and zero-pads after it: numerically equivalent, since the pads are
+  zero and the Mac sums all seven positions of the trailing group, but it does
+  not match the drive. Fix by setting `txLen` to fill whole groups so `CHK`
+  lands last.
+
+**WHAT THIS INVALIDATES.** `rtl/dcd.v`'s Status command is built to 1.1: 41
+payload bytes, 42 on the wire, 6 groups, and the 36-byte `'Rene-1 RM MH '` block
+lifted from the firmware template at `$00B7`. The 128K ROM asks for **49 groups
+and a 332-byte 1.2a-layout block**. The firmware template is genuine but
+**March-era**, and reading it was not the mistake -- building the reply from it
+was.
+
+**And note what the 19/19 gate was worth here: nothing.** `sim/tb_dcd_status.v`
+frames the command and decodes the reply using our own understanding of the
+protocol, so it asserts our framing against itself. Twelve mutants caught, and
+not one of them could have caught "the whole revision is wrong". **A bench built
+from the same reading as the RTL cannot test that reading.** The only gate that
+would have caught it is the ROM, which is why the next one has to be simulation
+against the real ROM, or hardware.
+
+`rtl/dcd_link.v` is believed unaffected -- sync, count bytes, 7-for-8, the
+checksum and hold-off are the same in both revisions -- but the count-byte
+plumbing above is a change to it.
+
+**NEXT, in order:**
+
+1. **Settle the 332-byte block from a drive-side implementation before coding
+   it.** 1.2a leaves `Device_Type`, `Device_Manuf`, the 52 reserved bytes and
+   the icon content undetermined, and 332-64 = 268 against a 256-byte `Icon`
+   field leaves 12 bytes unaccounted (a `where` Pascal string is the obvious
+   guess, and it is a guess). **TashTwenty and BMOW's Floppy Emu are drive-side
+   implementations by other people** -- this plan already named them as the
+   independent cross-check -- and either would settle all of it at once.
+2. Rewrite `rtl/dcd.v` Status to 1.2a; plumb the second count byte through
+   `rtl/dcd_link.v`; make `CHK` land in the last slot. Re-gate and re-mutate.
+3. Then MultiBlock Read, whose framing is now **fully determined**:
+   `<$AA>` then 77 groups of `<$80><seq><stat><pad><pad><pad><20 tags><512
+   data><CHK>`, with `seq` counting DOWN from the block count to 1.
+
+**Reading order from here on: 1.2a is the specification, 1.1 is history.** Where
+the two conflict, the ROM has agreed with 1.2a every time it has been asked.
+
+
+### Step 1 settled: the identity block, from three independent implementations
+
+**Done 2026-09-04. Every open question in the STOP note above is now closed, and
+the answer is not a reconstruction: three implementations that have no author in
+common all frame the Status reply identically.**
+
+**First, I re-derived the ROM evidence rather than trusting the note.** The four
+disassembly sites hold up, and two of them are worth restating because they are
+what makes the rest safe:
+
+- `$419D2C move.l #$14C,d7` sits inside `cmpi.b #$3,$19C(a1) / bne`, so 332 is
+  specifically the Status data length, and `$419D3E lea $1C4(a1),a4` is the
+  buffer it lands in.
+- `$4196C2`-`$4196FA` is the length arithmetic in full, and it explains the
+  `+20` this plan spent so long on. `d1` is the opcode; **`addi.w #$14,d7` is
+  reached only when `d1 == 0`** (Read, tags added to the RECEIVE count) and
+  `addi.w #$14,d6` only when `d1` is 1 or 2 (Write, tags added to the TRANSMIT
+  count). Status takes `bge` at `cmpi.b #$3,d1` and **gets no tags at all** --
+  which is why its 332 is a bare identity block where a read's 532 is
+  `<20 tags><512 data>`.
+
+**The 26-byte buffer switch is now read off the instructions, not inferred.**
+`$4198BC moveq #3,d6 / swap d6` presets the group counter to 3, and the seven
+`move.b dN,(a1)+` stores of a group sit at `$4198CA`, `$4198E0`, `$4198FA`,
+`$41990C`, `$419924`, then `$419930 swap d6 / dbra d6,$419938 / movea.l a4,a1`,
+then `$419940` and `$419954`. The switch is therefore after the **5th** store of
+the **4th** group -- 3*7+5 = **26** -- and it is **unconditional**, with no
+opcode test anywhere near it. That single fact carries the whole layout:
+
+> For Status there are no tags, so reply byte 26 is identity byte **20**, and
+> the icon the driver publishes from `$419CC4 lea $1F0(a1),a2` is at
+> `$1F0-$1C4 = 44` into the buffer, i.e. identity offset **20+44 = 64**.
+
+**Then the cross-check the STOP note asked for, and it is unanimous.**
+
+| | header | identity | tail | frame |
+|---|---|---|---|---|
+| Plus ROM `4D1F8172` | 6 | 332 read | -- | 49 groups |
+| **TashTwenty** (Tashtari, PIC16F1704) | 6 | 332 written | 4 pad + CHK | 49 groups |
+| **Floppy Emu** (BMOW, 2014) | 6 | 336 struct | CHK | 49 groups |
+
+BMOW and TashTwenty differ only in where they draw the line between "identity
+block" and "frame padding" -- BMOW's `padding[16]` at 320 is TashTwenty's
+12-byte trailer plus the 4 pad bytes. **The bytes on the wire are the same 343.**
+Both are known to mount on real hardware, which is the gate our own bench cannot
+be.
+
+**`Directly_Connected_Disks_Specification_1.2a_May85` is WRONG about the length,
+and this is worth keeping.** Its Status page says in as many words that the ID
+block "need be only 288 bytes long, but a total of 532 bytes are still sent".
+The shipping ROM asks for 332, and the drive obeys the count byte rather than
+the document. So even the correct revision of the specification does not
+describe the shipping behaviour -- **the ROM outranks both documents**, and the
+only reason we can say that with confidence is that two other people's working
+implementations agree with the ROM and not with the paper.
+
+**The settled layout.** 6-byte header, then:
+
+| offset | field | size | what we send |
+|---|---|---|---|
+| 0 | `Device_Type` | word | 0 |
+| 2 | `Device_Manuf` | word | 1 (Apple) |
+| 4 | `Device_Character` | byte | `$F6` |
+| 5 | `Num_Blocks` | 3 | highest block = capacity-1 |
+| 8 | `Num_Spares` | word | 0 |
+| 10 | `Num_BadBlocks` | word | 0 |
+| 12 | `Manuf_Reserved` | 52 | identifies this core |
+| 64 | `Icon` | 256 | 128 icon + 128 mask |
+| 320 | trailer | 12 | a Pascal string, free space |
+
+= 332. Header `<$83><blks><stat><pad><pad><pad>`, then 4 pad, then `CHK` in the
+**final slot of the final group**: 6+332+4+1 = 343 = 49*7.
+
+**`Device_Character = $F6`** is Mountable+Readable+Writable+Ejectable+
+Icon_Included+Disk_In_Place. The 1.2a bit values are confirmed by TashTwenty
+using exactly this constant. **Ejectable is the one bit I am not sure of** -- a
+fixed disk arguably should not set it, and TashTwenty's own comment writes it
+`ejectable (?)`. It is set here because $F6 is the value known to mount; `$E6`
+is the one-bit experiment if the Finder ever behaves oddly about unmounting.
+
+**`Num_Blocks` is capacity MINUS ONE, and this is the one field held on
+someone else's empirical result rather than on a document.** TashTwenty
+decrements it with the comment "it appears that the block size of the drive is
+actually the maximum block on the drive / TODO look into this further". The DCD
+driver in the Plus ROM never reads the field -- I checked every reference to
+`$1A2`-`$1AB` across `$419600`-`$419E40` and there is none -- so it is consumed
+further out and I cannot settle it from the ROM. **Minus one is the safe
+direction whichever reading is right**: if the Mac wants a count we lose one
+block of a volume, whereas if it wants a maximum and we send a count it can
+address one block past the end.
+
+**Three things that are settled but belong to later steps:**
+
+- **NAK is a frame, not a byte.** TashTwenty answers a bad checksum with
+  "a blank one-group command buffer with a command number of `$7F`", which is
+  1.2a's `<$AA><$7F><5 pad><CHK>` exactly.
+- **The continued-write opcode is `$41`**, dispatched as such by TashTwenty and
+  produced by the ROM's `ori.b #$40,$19C(a1)`.
+- **The reply's second byte is the block count, not a bare sequence number.**
+  TashTwenty copies the command's block count straight into it for a read; the
+  ROM compares it against a counter that walks DOWN to 1. For Status both ends
+  make it zero, so it is untested until MultiBlock Read.
+
+**And the group count really is the Mac's to choose.** TashTwenty sizes its
+whole reply buffer from `RC_RSPG & $7F` -- the second count byte -- before it
+writes a single field into it, and the HD20's own firmware does `ld R2, 53h` for
+the same purpose. So the drive is a slave to the count in both real
+implementations, and `rtl/dcd.v` should be too rather than hardcoding 49.
+
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
