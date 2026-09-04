@@ -1875,6 +1875,25 @@ conversion (`dc2dsk`, `releases/bin2dsk.sh`).
   blocks move per command. That is a transfer-size limit, not a capacity one,
   but the engine has to honour it.
 
+  **TEST REQUIREMENT: get one image LARGER than 32 MB, and use it.** A 32 MB
+  volume is 65,535 blocks -- exactly 16 bits -- so every block number in the
+  engine fits in a word and **a 16-bit truncation anywhere in the addressing
+  path would pass every test built on the artefacts we have.** The block number
+  on the wire is 3 bytes for exactly this reason, and only a larger image
+  exercises bits 16-23. Daniel reports bigger images are available from the same
+  source as `320_32MB_volume.dsk`.
+
+  This is the same shape as two bugs this project has already been bitten by --
+  the SDRAM region alias in `rtl/sdram_map.vh`, and the A17 forcing in
+  `addrController_top.v` that had never once executed. A seam that only breaks
+  past a power of two, with nothing crossing it. Cross it deliberately.
+
+  **Authenticity note, so the two do not get confused:** a real HD20 is ~20 MB,
+  so large volumes are a CONVENIENCE feature, not accuracy -- the Floppy Emu
+  offers them and nobody minds. Whether this core exposes them is a separate
+  decision from whether the engine handles them correctly. It must handle them
+  correctly either way, because the identity block reports whatever is mounted.
+
   **THE STARTUP DISK IS HERE TOO**, `C:/temp/Mac/HD20/HD_20_Startup.img`
   (Daniel, 2026-09-04) -- and it needs no conversion: **409,600 bytes, raw 400K,
   `'LK'` boot blocks, MFS volume (`$D2D7`) named `HD 20 Startup`**, 10 files, 69
