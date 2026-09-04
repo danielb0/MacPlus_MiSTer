@@ -1354,6 +1354,116 @@ single-chip DCD (Hard Disk 20) interface, separate from the Floppy Emu and
 discussed on 68kMLA. Two independent implementations plus Apple's own driver is
 a far better position than the plan originally assumed.
 
+### What the two 1985 specifications actually say
+
+Downloaded 2026-09-04 to `C:\temp\Mac\HD20\` (from the `bitsavers.trailing-edge.com`
+mirror -- bitsavers.org itself 403s a non-browser agent on file downloads, and
+spoofing a User-Agent to get round that is not something to do). Both scans carry
+an OCR text layer, extracted alongside as `.txt`, so they are greppable. OCR noise
+is mild but real: `fmished`, `defmed`, `flISt`, and some table cells transposed --
+check anything surprising against the page image before trusting it.
+
+`Software_Protocol_for_Directly_Connected_Disks_Mar85.pdf` is by **Karl B. Young
+and Michael Hanlon, version 1.1, 28 March 1985**, and is subtitled "7-for-8
+version". "Rene" throughout is the drive's internal codename.
+
+**Physical layer -- the DB-19 lines are REPURPOSED, not shared.** This is the
+thing that makes DCD a different engine rather than a floppy variant:
+
+| DB-19 | floppy meaning | DCD meaning | owner |
+|---|---|---|---|
+| 11 | PH0 | handshake state bit 0 | IWM |
+| 12 | PH1 | handshake state bit 1 | IWM |
+| 13 | PH2 | handshake state bit 2 (N/C on drive side) | IWM |
+| 14 | PH3 | **/Enable** -- selects among daisy-chained DCDs | IWM |
+| 15 | /WrReq | **Read Data** (drive -> Mac) | |
+| 16 | HDSel | **Write Data** (Mac -> drive) | VIA 6522 |
+
+So the data path is HDSel out and /WrReq in, with PH0-PH2 as a 3-bit state bus
+driven by the Mac, which is master throughout. 8.0 MHz clock, high bit of every
+byte always 1, net 428.38 kbps.
+
+**The state machine (PH0-PH2), states 0-7:**
+
+- **6, 7, 5 -- the ID states.** After startup the Mac transitions through 6, 7
+  and 5 to decide whether a drive is there and what type it is. A DCD that does
+  not support further chaining must return 1 for states 5, 6 and 7 once the
+  "next" DCD has been selected -- so-called **phantom states** -- which is how
+  the Mac learns it has reached the end of the chain.
+- **0-3 -- data transmission.** State 3 = Mac asserts it wants to transmit and
+  senses the drive's /HSHK; state 1 = Mac sends a sync byte; state 2 = idle;
+  **state 0 = HOFF (hold-off) asserted**.
+- Transitions are not necessarily adjacent -- the spec warns the Mac can go
+  straight from state 0 to state 3.
+- **Abort** = hold-off first (state 0), then de-assert HOST and HOFF together by
+  going straight to state 2.
+
+**7-for-8 framing.** Seven bytes of data for every eight transmitted. Sync bytes
+are NOT encoded into any group, so a sync byte always has the high bit set.
+
+**Sync and acknowledgement:**
+
+- `$AA` -- sync for read/status/diagnostic commands
+- `$96` -- sync for write and write-verify commands
+- **Fast-NAK is always `$D5`**
+- **Fast-ACK is the same value as the sync byte of the group just sent** (so an
+  ACK to an `$AA` command is `$AA`). ACK and NAK are themselves sync bytes.
+
+**Commands.** Reply opcodes are the command opcode with bit 7 set.
+
+| op | command | from Mac | from drive |
+|---|---|---|---|
+| `$00` | MultiBlock Read | `<$AA><$00><count><block# 3B><pad><CHK>` | fast-ACK `<$AA>`, then count x `<$AA><$80><seq><stat><532 data><pad><CHK>`, seq from 0 |
+| `$01` | MultiBlock Write | `<$96><$01><count><block# 3B><532 data><pad><CHK>` | fast-ACK `<$96>`, then count-1 x `<$96><$01><seq><3B pad><532 data><pad><CHK>`, seq from 1 |
+| `$02` | Write-verify | as `$01` | as `$01` |
+| `$03` | Status | `<$AA><$03><6 pad><CHK>` | `<$AA><$83><pad><stat><36-byte ID block><pad><pad><CHK>` = 42 bytes = 6 groups |
+| `$04` | Diagnostic | `<$AA><$04><5 pad><CHK>` | fast-ACK `<$AA>`; subsequent commands follow a special diagnostic protocol |
+
+Two deliberate design details the spec explains, both of which the RTL must
+honour rather than tidy away: the **first write block ships with the command**
+(to optimise one-block writes, "of which there seem to be a lot in the
+Macintosh"), and there are **three pad bytes between the sequence number and the
+data** on subsequent write blocks purely so the data lines up identically in
+every write transmission.
+
+**BLOCK SIZE IS 532 BYTES, NOT 512.** Stated in the command formats and again in
+the identity block. This answers the plan's open question about image format
+directly: **existing `.vhd` images are not reusable**, and an HD20 image is a
+different artefact. The obvious reading is 512 data + 20 tag bytes, which is the
+Apple tag convention -- but the documents do not say so in the extracted text,
+so treat the 512/20 split as INFERENCE until the ROM confirms it.
+
+**Identity block, 36 bytes**, returned by Status. Fields (OCR transposed the
+name/type column, so the pairing is reconstructed and should be checked against
+the page image before it is coded): 13-character device name; **device code
+`$000110`**; firmware revision; capacity in blocks; bytes per block = **532**;
+cylinders = **610**; heads = **2**; sectors per track = **32**; possible spares;
+number of spares; number of bad blocks.
+
+**Hold-off, which is the flow control and matters for us.** The Mac may assert
+HOFF anywhere within a group; that group is discarded and **excluded from the
+checksum**; the drive acknowledges the hold-off immediately after the last byte
+of the group; the drive then waits forever for HOFF to release, and resumes with
+**the group that was interrupted**. The point of doing it per group is that an
+SCC interrupt can be serviced at a group boundary without finishing the group.
+
+**Timings worth designing to:**
+
+- drive normally answers the Mac in ~14 us, **but may take up to 2 SECONDS while
+  self-testing** -- the same class of trap as the CD spin-up window in
+  [[macplus-cd-boot-scan-wedge]], and a reason not to treat a slow first
+  response as a fault
+- responds to HOFF release within 14-18 us; resumes transmission within 34 us
+- signals end of transmission within 3 us of the last byte
+- sends ACK/NAK 35-40 us after the handshake
+- the drive waits forever for the Mac at several points -- deliberate, not a bug
+
+**Two companion documents are referenced and are NOT in the bitsavers folder:**
+"DB19/IWM to Rigid Disk Interface Specification" (dated 2/13) and "Notes on IWM
+Rigid Disk Interface Meeting" (2/27). The March document says all three should be
+combined "as soon as possible", which never happened. `IWM_Interface_PAL.pdf`
+may cover some of the same ground -- not yet read.
+
 **`IWM_Interface_PAL.pdf` may matter as much as the protocol docs.** We
 implement the IWM and the external drive port, so the hardware side of how a DCD
 device hangs off that connector is directly ours, not the drive vendor's.
@@ -1367,9 +1477,12 @@ conversion (`dc2dsk`, `releases/bin2dsk.sh`).
 - Does an HD20 present a **bare HFS volume from block 0**, or a partitioned
   device? Our SCSI images carry a Driver Descriptor Map (`'ER'`) plus an Apple
   Partition Map, but both postdate the HD20 by a year, and HFS actually DEBUTED
-  on the HD20. Believed bare, **not confirmed** -- and if it is bare, existing
-  `.vhd` images are NOT reusable and an HD20 image is the simpler artefact (a
-  raw HFS volume from `hfsutils`, or formatted by the Mac itself).
+  on the HD20. Believed bare, **not confirmed**. **PARTLY ANSWERED 2026-09-04:
+  the conclusion holds for a better reason than the one guessed.** The blocks
+  are **532 bytes**, so existing `.vhd` images are not reusable regardless of
+  what the partition structure turns out to be -- the sector size alone settles
+  it. Still open: the layout inside those blocks, and whether the extra 20 bytes
+  are Apple tag bytes.
 - Which models can boot it. HD20 boot support is believed to live in the 128K
   ROM, i.e. Plus and 512Ke; the 64K-ROM machines would need the HD20 system
   software from floppy, if at all. Confirm from the ROM.
