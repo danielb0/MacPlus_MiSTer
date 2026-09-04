@@ -42,8 +42,15 @@ module tb_dcd_status;
 	reg        ca0, ca1, ca2, lstrb, _enable;
 	reg  [7:0] writeData;
 	reg        writeReq;
-	reg        present;
-	reg [23:0] blockCount;
+	// The mount state now comes from rtl/dcd_disk.v rather than being driven
+	// directly, so the capacity in the Status reply is the one a real mount
+	// would produce. Status touches no sector, so the slot needs no model.
+	reg         img_mounted;
+	reg  [63:0] img_size;
+	reg         img_readonly;
+	wire [31:0] sd_lba;
+	wire        sd_rd, sd_wr;
+	wire [15:0] sd_buff_din;
 
 	wire [7:0] readData;
 	wire       newByteReady;
@@ -57,8 +64,22 @@ module tb_dcd_status;
 		.ca0(ca0), .ca1(ca1), .ca2(ca2), .lstrb(lstrb), ._enable(_enable),
 		.writeData(writeData), .writeReq(writeReq),
 		.readData(readData), .newByteReady(newByteReady),
-		.present(present), .blockCount(blockCount)
+		.sd_lba(sd_lba), .sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack(1'b0),
+		.sd_buff_addr(8'd0), .sd_buff_dout(16'd0),
+		.sd_buff_din(sd_buff_din), .sd_buff_wr(1'b0),
+		.img_mounted(img_mounted), .img_size(img_size), .img_readonly(img_readonly)
 	);
+
+	task mount;
+		input [63:0] blocks;
+		begin
+			@(posedge clk); #1;
+			img_size = blocks * 64'd512; img_readonly = 1'b0; img_mounted = 1'b1;
+			@(posedge clk); #1;
+			img_mounted = 1'b0;
+			@(posedge clk);
+		end
+	endtask
 
 	always #10 clk = ~clk;
 
@@ -204,10 +225,10 @@ module tb_dcd_status;
 	initial begin
 		_reset = 0; ca0 = 0; ca1 = 1; ca2 = 0;
 		lstrb = 0; _enable = 0; writeData = 0; writeReq = 0;
-		present = 1;
-		blockCount = 24'd3850144;     // the 2 GB artefact: needs 22 bits
+		img_mounted = 0; img_size = 0; img_readonly = 0;
 		repeat (4) @(posedge clk); #1; _reset = 1;
 		repeat (4) @(posedge clk);
+		mount(64'd3850144);           // the 2 GB artefact: needs 22 bits
 
 		$display("tb_dcd_status");
 
@@ -354,7 +375,7 @@ module tb_dcd_status;
 		// The other side of the 16-bit capacity seam.
 		// ---------------------------------------------------------------
 		setState(3'd2);
-		#1; blockCount = 24'd38965;        // a real HD20, 20 MB
+		mount(64'd38965);                  // a real HD20, 20 MB
 		repeat (4) @(posedge clk);
 		runStatus;
 		check("a 20 MB capacity reports as 38964, the highest block",
