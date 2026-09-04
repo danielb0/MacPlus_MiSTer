@@ -1415,8 +1415,15 @@ thing that makes DCD a different engine rather than a floppy variant:
 | 16 | HDSel | **Write Data** (Mac -> drive) | VIA 6522 |
 
 So the data path is HDSel out and /WrReq in, with PH0-PH2 as a 3-bit state bus
-driven by the Mac, which is master throughout. 8.0 MHz clock, high bit of every
-byte always 1, net 428.38 kbps.
+driven by the Mac, which is master throughout. High bit of every byte always 1,
+net 428.38 kbps.
+
+**Correction, 2026-09-04: the clock is 7.8333 MHz, NOT 8.0, and the spec says so
+explicitly.** "WriteData ... provides serial data transmission at 489.58K bps
+(2.042 microsecond data cell). This is because the Macintosh clock is 7.8333
+instead of a full 8.0 MHz." So the raw cell rate is 489.58 kbps and 428.38 kbps
+is what survives 7-for-8. The distinction matters because the RTL must clock the
+link off the same 7.8333 MHz the core already derives, not off a round 8 MHz.
 
 **The state machine (PH0-PH2), states 0-7:**
 
@@ -1428,8 +1435,14 @@ byte always 1, net 428.38 kbps.
 - **0-3 -- data transmission.** State 3 = Mac asserts it wants to transmit and
   senses the drive's /HSHK; state 1 = Mac sends a sync byte; state 2 = idle;
   **state 0 = HOFF (hold-off) asserted**.
-- Transitions are not necessarily adjacent -- the spec warns the Mac can go
-  straight from state 0 to state 3.
+- **~~Transitions are not necessarily adjacent -- the spec warns the Mac can go
+  straight from state 0 to state 3.~~ EXACTLY BACKWARDS, corrected 2026-09-04.**
+  The spec says the opposite: "Note that the phase lines can only change one at
+  a time--one can't go instantly from state 0 to 3, for example." The Mac ROM
+  confirms it -- every transition in the driver is a single `phNL`/`phNH` touch,
+  and multi-step moves are spelled out one line at a time. So the DCD engine
+  WILL see intermediate states and must not act on them as commands; only the
+  settled value means anything.
 - **Abort** = hold-off first (state 0), then de-assert HOST and HOFF together by
   going straight to state 2.
 
@@ -1619,6 +1632,188 @@ The list matters for scope too. The 512Ke and Plus both have it, so both of this
 project's Plus-ROM machines can boot an HD20. The 128K and 512K are absent,
 which fits: they would need the HD20 system software from floppy, and software
 that loads after boot cannot boot you.
+
+### FOUND: the DCD driver in the Plus ROM, disassembled (2026-09-04)
+
+**The structural `.Sony` approach worked, first try.** No constant-hunting: the
+name string is a driver header's Pascal name field, so finding the string finds
+the header, and the header gives the entry points.
+
+**Locating it.** `.Sony` occurs three times in every 128K ROM and once in each
+64K ROM. The occurrence that is a driver name -- preceded by a `$05` length byte
+and a full 18-byte `DCE` header -- is:
+
+| ROM | driver base | Open | Prime | Ctl | Status | Close |
+|---|---|---|---|---|---|---|
+| Plus `4D1F8172` | `$417D30` | `$6E` | `$33A` | `$1E2` | `$2EC` | `$18` |
+| 64K `28BA4E50` | `$401690` | `$50` | `$18C` | `$DA` | `$144` | `$B4` |
+
+The other two Plus hits are name tables: `$40086F` next to `.Sound`, and
+`$417829` in the `.MPP`/`.ATP`/`.Sony`/`.Sound`/`.Print`/`Chicago` list.
+
+The Plus driver runs from `$417D30` to about `$419C60` -- **roughly 7.8 KB,
+which matches the 6.6-7.4 KB `.Sony` `PTCH` on the HD20 startup floppy.** Two
+independent artefacts agreeing on the size is good evidence that the ROM driver
+and the floppy patch are the same body of code.
+
+**The phase-line primitive, and it is SHARED with the 64K ROM.** `$4185C4` on
+the Plus, `$401B5C` on the 64K, same semantics: one nibble in `d0` drives all
+four lines.
+
+| `d0` bit | line | how |
+|---|---|---|
+| 0 | PH2 | IWM `ca2H`/`ca2L` (`$A00`/`$800`) |
+| 1 | **SEL** | **VIA port A bit 5** -- `bset`/`bclr #5, $1E00(a2)`, `a2` = VIABase (`$1D4`) |
+| 2 | PH0 | IWM `ca0H`/`ca0L` (`$200`/`$000`) |
+| 3 | PH1 | IWM `ca1H`/`ca1L` (`$600`/`$400`) |
+
+`a0` = IWMBase, read from low memory `$01E0`. This confirms from the Mac side
+what the pinout table says: **SEL/HDSel is a VIA line, not an IWM line**, and
+the driver treats it as a fourth phase bit. Our RTL must take it from the VIA,
+not the IWM.
+
+The sense read is `$418600`: touch `q6H` (`$1A00`), read `q7L` (`$1C00`) into
+`d0`, touch `q6L` (`$1800`), all inside `ori.w #$300,sr` so it cannot be
+interrupted. **Bit 7 of that byte is the ReadData line.**
+
+**THE ID PROBE, `$418630` -- and it matches both specifications exactly.**
+
+```
+418630  moveq  #$0D,d0        ; %1101 -> Ph2=1 Ph1=1 Ph0=1, SEL=0  = STATE 7
+418632  bsr    $4185FE        ; set phases, read sense
+418634  bpl    fail           ;   require bit7 = 1
+418636  tst.b  (a0)           ; ca0L -> Ph0=0                      = STATE 6
+418638  bsr    $418600        ; read sense
+41863A  bpl    fail           ;   require bit7 = 1
+41863C  tst.b  $200(a0)       ; ca0H -> Ph0=1
+418640  tst.b  $400(a0)       ; ca1L -> Ph1=0                      = STATE 5
+418644  bsr    $418600        ; read sense -> returned to the caller
+418648  fail:  moveq #$FF,d0
+```
+
+and the caller in Open (`$417E42`) takes the DCD path only when that final
+state-5 sense is **0**.
+
+So the required levels are **state 7 -> 1, state 6 -> 1, state 5 -> 0**. That is
+the third independent source to say so: the May protocol document's state table,
+the `IWM_Interface_PAL` phase-decode table, and now Apple's own driver. **This is
+the first thing the RTL has to get right and it is now beyond doubt.** The
+polarity is straight, not inverted -- worth stating, because the adjacent floppy
+probe at `$417E54` uses the opposite sense, since on a real Sony that address
+selects a different status line entirely.
+
+**State encoding settled: `state = {Ph2,Ph1,Ph0}` as a plain 3-bit binary
+number.** Every transition in the driver is consistent with it -- see the reset
+and end-of-transmission sequences below. This also means the plan's reading of
+the hand-drawn PAL table (HOFF at `101X`, HOST at `10X1`, with Ph3 leading) does
+not line up, and **the ROM wins**: it is the half we have to satisfy. The PAL
+table is the drive's decode of the same lines and can be revisited if a
+device-side question ever turns on it.
+
+**DCD units are drive 3 and up.** Open probes drives in a loop on `d2`, and
+`cmpi.w #$3,d2` splits it. Drives 1-2 get only a single state-7 "drive
+connected" check -- the floppies -- and **`$418630` is called only for
+`d2 >= 3`.** So an HD20 occupies drive-queue slots after the two floppies, which
+is a concrete constraint on how the core presents it.
+
+**THE 7-FOR-8 TRANSMIT ENGINE, `$419AC0`-`$419C3C`.** Unrolled across `d1`-`d4`
+with `swap` for the second half. The per-byte motif is four instructions:
+
+```
+419AFC  move.b (a1)+,d4      ; next data byte
+419AFE  add.b  d4,d5         ; running checksum
+419B00  roxr.b #1,d4         ; shift right; the LSB falls into X
+419B02  or.b   d0,d4         ; d0 = $80 -> set the MSB the IWM requires
+419B04  swap   d4
+419B06  roxr.b #2,d4         ; rotate that X into the LSB-accumulator byte
+        tst.b (a3) / bpl .-2 ; a3 = q6L: wait for the IWM to want a byte
+        move.b d4,(a0)       ; a0 = q6H/q7H: the IWM data register
+```
+
+**The checksum is a plain 8-bit sum of the DATA bytes, transmitted negated.**
+`d5` accumulates `add.b` per byte, and the group closes at `$419BF0` with
+`neg.b d5` before the same `roxr`/`or #$80` encoding. So `CHK = (-sum) & $FF`.
+Neither specification states this in the text we have; the ROM does.
+
+**Hold-off, and it is exactly what the spec describes.** `a5` is polled each
+group (`tst.b (a5)`); a pending interrupt sets bit 31 of `d6`, and `$419B5A`
+then does `tst.b -$1A00(a0)` = `ca0L`, i.e. **state 1 -> state 0, HOFF
+asserted**. Resumption at `$419BC8` is `subq.w #1,d6` -- **back up one group** --
+then `q7L`, `q6L`, `q6H`, `ca0H` (state 0 -> 1) and a fresh `$AA` sync. That is
+"resume with the group that was interrupted", implemented.
+
+**End of transmission, `$419C3E`:** `ca1H` takes state 1 -> 3, then it spins on
+the `q7L` sense up to `$FF` times waiting for `/HSHK` high (error `$13` on
+timeout), then `ca0L` takes state 3 -> 2, idle. That matches the spec sentence
+for sentence.
+
+**The reset sequence, `$419C6C`, and the long wait is real:**
+
+```
+ca2H, ca1L, ca0L      -> %100 = STATE 4 = RESET asserted
+delay($3E8 = 1000)
+ca1H                  -> %110 = state 6
+ca2L                  -> %010 = state 2, idle
+delay($4E20 = 20000)
+then poll up to $640 = 1600 times, with delay($64 = 100) between each
+```
+
+A second site (`$419D18`) uses an `$4650` = 18000 iteration budget. **So the ROM
+genuinely expects a drive that may take a very long time to answer after a
+reset** -- the 2-second worst case in the protocol document and the ~15-second
+power-on self-test in the Mac GUI article are both accommodated. This is the
+same shape as the CD spin-up window in [[macplus-cd-boot-scan-wedge]], and the
+lesson from there applies in reverse as well: a device that answers *too
+eagerly* is as unlike the real thing as one that never answers. Do not tune this
+by guesswork -- the budgets above are the numbers to design against.
+
+**532 = 512 + 20 CONFIRMED FIRST-HAND.** At `$4196D0`/`$4196D6` the byte count
+gets `addi.w #$14` -- **exactly 20 -- added**, and `$4196FA` then computes the
+group count as `addq.w #6; divu.w #7`, i.e. `ceil(n/7)`. So the driver counts 20
+tag bytes onto every 512-byte block and frames the result into 7-byte groups.
+That upgrades the "512 data + 20 tags" split from inference-plus-secondary-
+source to a fact read out of Apple's own driver, and it supports the 512-byte
+image recommendation: the tags are added by the link layer, not stored.
+
+**AND THE 64K ROMs HAVE NO DCD LINK LAYER -- the open question is closed, from
+the ROM instead of from a forum.** The `roxr.b #1` / `or.b d0` encoder motif
+occurs:
+
+| ROM | occurrences |
+|---|---|
+| Plus `4D1F8172` | **8** |
+| `28BA4E50` (512K) | **0** |
+| `28BA61CE` (128K) | **0** |
+
+Eight is the unrolled group. Zero is zero. The 64K ROMs do carry the *shared*
+phase primitive and sense read -- those are the Sony driver's own -- but nothing
+that frames a DCD group. **So HD20 boot support is 128K-ROM-only: the Plus and
+the 512Ke, not the 128K or 512K**, which is what the forum report said and what
+this plan assumed. It is now first-hand.
+
+That also means the negative constant searches recorded above were not merely
+"too weak" -- they were looking in the right ROM for the wrong kind of evidence.
+The lesson stands as written: on hand-written 68000, search for STRUCTURE (a
+driver header, an addressing idiom, an unrolled motif), never for constants.
+
+**What this does NOT yet settle**, so the next disassembly pass has targets:
+
+- the **receive** (8-to-7 decode) path -- in the same region, not yet read line
+  by line
+- how the driver builds and dispatches the command blocks (`$00` read, `$01`
+  write, `$03` status), and where the identity block lands
+- what the driver does with the 20 tag bytes on the read path: it clearly
+  *counts* them, and "the Mac discards them" is still Floppy-Emu evidence rather
+  than something read here
+- the `$19C(a1)` / `$1C0(a1)` / `$1C2(a1)` state block in SonyVars (`$134`),
+  which is where the per-unit DCD state lives
+
+**Reproducing this.** capstone `CS_ARCH_M68K`, `CS_MODE_BIG_ENDIAN`, linear
+sweep with `skipdata`, ROM base `$400000` -- the same technique as the Sad Mac
+decoder in Phase 3 and the boot search below. Note one foot-gun: do not name the
+driver script `dis.py`, because it shadows Python's own `dis` module and
+capstone fails to import with a circular-import error that says nothing about
+the real cause.
 
 ### Do we need the firmware?
 
