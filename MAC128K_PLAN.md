@@ -1426,12 +1426,27 @@ Macintosh"), and there are **three pad bytes between the sequence number and the
 data** on subsequent write blocks purely so the data lines up identically in
 every write transmission.
 
-**BLOCK SIZE IS 532 BYTES, NOT 512.** Stated in the command formats and again in
-the identity block. This answers the plan's open question about image format
-directly: **existing `.vhd` images are not reusable**, and an HD20 image is a
-different artefact. The obvious reading is 512 data + 20 tag bytes, which is the
-Apple tag convention -- but the documents do not say so in the extracted text,
-so treat the 512/20 split as INFERENCE until the ROM confirms it.
+**BLOCK SIZE IS 532 BYTES ON THE WIRE, NOT 512.** Stated in the command formats
+and again in the identity block.
+
+**But that does NOT mean images need 532-byte sectors -- I over-read this, and
+the correction matters because it makes the storage side easy.** The 532 bytes
+are 512 of data plus **20 tag bytes**: 12 of them the same tags floppies carry,
+plus two further longwords specific to the HD20. **The Mac discards the tags**
+and treats only the 512 as disk data, so an emulator need only fill 512 bytes
+per block from the image and can prepend 20 zero bytes for the tags. That is not
+theory -- it is what BMOW's Floppy Emu does, and it works: HD20 mode there takes
+a plain raw `.DSK`.
+
+So the earlier claim that "existing `.vhd` images are not reusable, the sector
+size alone settles it" is **withdrawn**. Ordinary 512-byte-per-sector raw images
+are fine, the existing HPS sector path can serve them unchanged, and the open
+question shrinks back to what it always was: the LAYOUT (bare HFS volume versus
+partitioned), not the sector size.
+
+Treat "the Mac ignores the tags" as strongly evidenced by a working
+implementation rather than as documented -- the ROM could still read them for
+something, and that is cheap to check once the driver is located.
 
 **Identity block, 36 bytes**, returned by Status. Fields (OCR transposed the
 name/type column, so the pairing is reconstructed and should be checked against
@@ -1551,6 +1566,58 @@ first, cheapest first:
    technique that found the boot search this morning.
 3. **Check a later ROM.** If the SE or II ROM contains obvious DCD code and the
    Plus ROM does not, that dates the feature and settles item 1 immediately.
+
+**ITEM 1 ANSWERED 2026-09-04 (Daniel, from 68kMLA): serial HD-20 support IS
+built into ROM**, on the Macintosh **512Ke, Plus, SE, Classic, IIci and
+Portable**. Forum-sourced, so not the standing of the Apple documents, but it
+agrees with what this plan assumed and it is decisive in one respect: **the
+driver is in the Plus ROM, so the negative searches above were simply too
+weak** -- which is exactly why they were recorded as inconclusive rather than
+written up as a finding. Drop the constant-hunting; use the structural `.Sony`
+approach.
+
+The list matters for scope too. The 512Ke and Plus both have it, so both of this
+project's Plus-ROM machines can boot an HD20. The 128K and 512K are absent,
+which fits: they would need the HD20 system software from floppy, and software
+that loads after boot cannot boot you.
+
+### Do we need the firmware?
+
+**No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
+dumps (`RENE_2.8E`, `RENE_2.8I`, `HD20_3371`, `342-0343-B`). Using those would
+mean writing a Z8 CPU core to run them: a great deal of work to arrive at
+behaviour the specifications already describe. We implement the drive
+behaviourally, exactly as the SCSI targets were done.
+
+**Two files in there are worth having anyway, as arbiters of last resort:**
+
+- **`hd20.lst` (208K) -- a disassembly listing of that firmware.** Where the two
+  specifications contradict each other and the ROM is silent, this is the
+  definitive statement of what the drive actually did. BMOW warns those
+  contradictions exist, so budget for needing it.
+- **`342-0414-A.jed` (51K) -- the PAL fuse map**, the exact equations. It
+  supersedes a reading of the hand-drawn table if the phase decode is ever in
+  doubt.
+
+### Test artefacts, and they are mountable TODAY
+
+`diag/` holds three **400K floppy images** in Disk Copy 4.2 format --
+`HD20_SEP_85.dc42`, `HD_20_Test.dc42`, `NISHA_HD_DIAG.dc42` -- plus
+`HD-20_Tests_2.0.dc42` in the parent directory. These are not HD20 disk images;
+they are Apple's HD20 diagnostic SOFTWARE, which makes them the natural bring-up
+harness: programs whose whole purpose is to talk to a DCD device, running on a
+machine whose ROM speaks the protocol. They mount in the existing floppy slots
+once converted from DC42 to raw (`dc2dsk`, `releases/bin2dsk.sh`, already
+documented in the README).
+
+**A candidate hard-disk image already exists locally.** `C:/temp/Mac/mac_20mb.vhd`
+is exactly 20,971,520 bytes -- 20 MB, HD20-sized -- and blocks 0 and 2 are both
+zero, so it is blank rather than formatted. That is the right starting artefact:
+mount it empty and let the Mac's own HD20 formatter write the volume, which is
+how BMOW brought Floppy Emu HD20 mode up. By contrast `20MB.vhd` carries `'ER'`
+at block 0 and `'PM'` at block 2 -- a Driver Descriptor Map and partition map,
+the SCSI-era layout that postdates the HD20 -- so it is the wrong shape to start
+from even though it is the right size.
 
 **`IWM_Interface_PAL.pdf` may matter as much as the protocol docs.** We
 implement the IWM and the external drive port, so the hardware side of how a DCD
