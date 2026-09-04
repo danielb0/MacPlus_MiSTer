@@ -1888,6 +1888,31 @@ conversion (`dc2dsk`, `releases/bin2dsk.sh`).
   `addrController_top.v` that had never once executed. A seam that only breaks
   past a power of two, with nothing crossing it. Cross it deliberately.
 
+  **SUPPLIED, 2026-09-04: `C:/temp/Mac/HD20/608_2GB_volume.dsk`.**
+  1,971,273,728 bytes = **3,850,144 blocks of 512, which needs 22 bits** -- so it
+  exercises block-number bits 16 through 21 properly rather than sitting just
+  over the line. Bare HFS again (`'LK'` at block 0, `'BD'` at block 2, no
+  Driver Descriptor Map), volume `6.0.8 2GB (P)`, 65,254 allocation blocks of
+  30,208 bytes.
+
+  **Two things it independently confirms.** Bare-HFS-from-block-0 is now seen on
+  two unrelated artefacts, so it is the HD20 convention rather than a quirk of
+  one file. And the allocation block size of 30,208 bytes -- an odd number,
+  chosen to keep the count under 65,535 -- is HFS visibly scaling to stay inside
+  its 16-bit allocation-block count, which is the ceiling analysis above
+  demonstrated rather than argued.
+
+  **It also shows the protocol was designed for this.** The identity block's
+  Capacity field is 24 bits (`0..$FFFFFF`, per the March document), so it can
+  express 3,850,144 blocks with room to spare -- capacity, block number and
+  addressing are consistently 24-bit across the design. Nothing here is being
+  stretched beyond what Apple specified.
+
+  **Caveat on what it can and cannot test:** it carries System 6.0.8, which
+  needs 1 MB and will not run on a 512K or 512Ke. So it is an ADDRESSING test on
+  any model, but a BOOT test only on a Plus or SE. Do not read a 512Ke failing
+  to boot it as a DCD fault.
+
   **Authenticity note, so the two do not get confused:** a real HD20 is ~20 MB,
   so large volumes are a CONVENIENCE feature, not accuracy -- the Floppy Emu
   offers them and nobody minds. Whether this core exposes them is a separate
