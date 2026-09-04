@@ -3004,6 +3004,72 @@ never reaches.
 3. The OSD greying already deferred, which can ride this phase's build.
 
 
+### Hardware bring-up: the artefacts, and the order to use them
+
+**Assembled 2026-09-04, before the first board test. Everything named here is on
+disk and verified; nothing below is a plan to go and find something.**
+
+**THE DIAGNOSTIC FLOPPIES ARE IN HAND.** `C:\temp\Mac\HD20\diag\`, fetched from
+bitsavers (**via `bitsavers.trailing-edge.com` -- `bitsavers.org` itself answers
+403 to a plain fetch**), each a 400K DiskCopy 4.2 image whose **data and tag
+checksums both verify**, all four distinct, each converted to a raw `.img`
+beside its `.dc42`:
+
+| image | volume | boots | carries |
+|---|---|---|---|
+| **`HD20_SEP_85.img`** | HD 20 STARTUP | yes | **`HD Diag`**, `HD 20 Test`, `Hard Disk 20` |
+| `HD_20_Test.img` | HD 20 test | yes | `HD Diag`, `HD 20 Test`, `DiskTimerII` |
+| `HD-20_Tests_2.0.img` | HD-20 Tests | yes | **`RenéDiag`** (creator `RODG`), `MacFormat`, `MacFinal`, `Manual Sparer`, `dcATP` |
+| `NISHA_HD_DIAG.img` | blank | **no** | `HD Diag` only -- a data disk, boot block is zeros |
+
+`RenéDiag`'s creator code `RODG` is Rodger Mohme, which is the corroboration
+that this plan had the right tool named: `HD 20 Test` is his too, and `HD Diag`
+is the same `HDTS` signature.
+
+**Start with `HD20_SEP_85.img`.** It is the genuine startup disk, it boots, and
+it carries `HD Diag` -- so one 400K floppy covers the whole first test without
+needing a mountable volume, a driver patch or a bootable HD20. Go to
+`HD-20_Tests_2.0.img` and RenéDiag second, once HD Diag has said something.
+
+**THE HD20 VOLUMES, both verified as HFS with `LK` boot blocks:**
+
+| image | volume name | blocks | why |
+|---|---|---|---|
+| `320_32MB_volume.dsk` | `3.2 32MB (P)` | 65535 | sits exactly ON the 16-bit boundary |
+| `608_2GB_volume.dsk` | `6.0.8 2GB (P)` | 3850144 | needs 22 bits -- the seam test |
+
+**Copy them to `.img` before use:** the mount slot declares `IMGVHD`, matching
+the SCSI slots, so a `.dsk` will not appear in the browser. That is deliberate
+-- adding `DSK` there would clutter the floppy browser with hard disk images.
+
+**PROCEDURE, and the model matters:**
+
+1. **Plus or 512Ke only.** The DCD engine is 128K-ROM-only. The menu item shows
+   on a 128K/512K too, but nothing there will ever talk to it -- **those need
+   `Hard Disk 20` from a startup floppy**, which is the later second test and a
+   genuinely independent one, since the `.Sony` `PTCH` reaches the same drive
+   through RAM rather than ROM.
+2. **Boot from Pri Floppy, never Sec.** With a DCD image mounted the DCD owns
+   the external drive port and the secondary floppy is gone.
+3. **Detection is the milestone.** If the Mac reacts to the drive at all -- an
+   icon, or a dialog naming it -- then framing, the 332-byte identity block, the
+   icon and the capacity are all right at once. That is the whole of Status
+   proven in one observation.
+4. Then reads; then booting from the volume.
+
+**WRITE IS REPORTED AS PROTECTED, DELIBERATELY, and know this before reading a
+result.** `Device_Character` is `$DE`, not TashTwenty's `$F6`. HFS writes the
+MDB back at mount time to mark a volume in use, and with opcode `$01` unanswered
+that write is a handshake timeout -- so an honest "writable" would make a
+working read path present as a broken drive at exactly the wrong moment. **A
+mount failure with `$DE` set therefore means a real bug, not the known gap.**
+
+**THERE ARE NO DCD PROBES IN THE DECK.** If it fails silently there is nothing
+on JTAG to separate "never selected" from "selected but Status rejected". Adding
+last-opcode / frame-count / last-error probes is the first move if the board
+says nothing, not more simulation.
+
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
