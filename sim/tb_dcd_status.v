@@ -433,6 +433,57 @@ module tb_dcd_status;
 		repeat (64) @(posedge clk); #1;
 		check("an unimplemented opcode is not answered", readData[7] === 1'b1);
 
+		// ---------------------------------------------------------------
+		// THE WEDGE HD DIAG FOUND ON HARDWARE, as error $28.
+		// ---------------------------------------------------------------
+		// A command is sent, the drive queues its reply and asserts /HSHK to
+		// ask for the bus -- and then the Mac RESETS instead of receiving. If
+		// the command layer carries on across that reset it re-raises txReq,
+		// the link asserts /HSHK in the idle state, and waits for a state 1
+		// that is never coming. The line stays low for ever and every later
+		// operation fails. HD Diag's reset routine reads that back as
+		// "asserted but never released":
+		//
+		//   00D932  moveq #$24,d0     error if /HSHK never goes LOW
+		//   00D942  moveq #$28,d0     error if it never goes HIGH again
+		//   00D96A  ror.l #$8,d0      which is why it prints as $28000000
+		// ---------------------------------------------------------------
+		setState(3'd2);
+		repeat (4) @(posedge clk);
+		sendCommand(8'h03, STATUS_LEN);
+		setState(3'd2);
+		hsWait = 0;
+		while (readData[7] !== 1'b0 && hsWait < 8000) begin
+			@(posedge clk); hsWait = hsWait + 1;
+		end
+		check("the drive asks for the bus after a command", readData[7] === 1'b0);
+
+		// Now reset instead of receiving, the way HD Diag does.
+		setState(3'd4);
+		repeat (8) @(posedge clk); #1;
+		setState(3'd2);
+		repeat (8) @(posedge clk); #1;
+		check("a reset releases /HSHK rather than wedging it low",
+		      readData[7] === 1'b1);
+
+		// ...and the drive is still usable afterwards.
+		sendCommand(8'h03, STATUS_LEN);
+		setState(3'd2);
+		hsWait = 0;
+		while (readData[7] !== 1'b0 && hsWait < 8000) begin
+			@(posedge clk); hsWait = hsWait + 1;
+		end
+		setState(3'd3); @(posedge clk); #1;
+		setState(3'd1);
+		getByte(sync);
+		recvGroups(49);
+		sum = 0;
+		for (i = 0; i < 343; i = i + 1) sum = sum + rsp[i];
+		check("and a command after the reset still answers correctly",
+		      (sum === 8'h00) && (rsp[0] === 8'h83));
+		setState(3'd3);
+		repeat (4) @(posedge clk);
+
 		$display("tb_dcd_status: %0d/%0d", pass, pass + fail);
 		if (fail != 0) $display("FAILED");
 		$finish;

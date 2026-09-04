@@ -174,6 +174,7 @@ module dcd
 		.buf_addr(bufAddr), .buf_q(bufQ), .buf_d(8'd0), .buf_we(1'b0)
 	);
 
+	wire        dcdReset;
 	wire [63:0] rxBuf;
 	wire [3:0]  rxLen;
 	wire        rxValid, rxBad;
@@ -196,6 +197,7 @@ module dcd
 		.present(present),
 		.rxBuf(rxBuf), .rxLen(rxLen), .rxValid(rxValid), .rxBad(rxBad),
 		.rxRspGroups(rxRspGroups),
+		.dcdReset(dcdReset),
 		.txReq(txReq), .txData(txData), .txAddr(txAddr), .txLen(txLen),
 		.txBusy(txBusy)
 	);
@@ -316,6 +318,19 @@ module dcd
 			replyStat <= 8'h00;
 			cstate    <= C_IDLE;
 			sending   <= 1'b0;
+		end
+		// A DCD reset abandons the command in flight. Without this the FSM
+		// carries on into its reply after the reset, and the link layer ends up
+		// holding /HSHK low in the idle state waiting for a transfer the Mac
+		// has long since given up on -- the wedge HD Diag reports as $28.
+		else if (dcdReset) begin
+			txReq     <= 1'b0;
+			diskRd    <= 1'b0;
+			blksLeft  <= 8'd0;
+			replyRead <= 1'b0;
+			replyStat <= 8'h00;
+			sending   <= 1'b0;
+			cstate    <= C_IDLE;
 		end
 		else begin
 			txReq  <= 1'b0;

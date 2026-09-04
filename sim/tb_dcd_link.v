@@ -520,6 +520,32 @@ module tb_dcd_link;
 		@(posedge clk); #1;
 		check("receiver still frames correctly after a RESET", sawValid === 1'b1);
 
+		// ---------------------------------------------------------------
+		// THE MAC ABANDONS US MID-REQUEST. The ROM's drive scan walks the
+		// chain, so after we have asked for the bus it can perfectly well go
+		// off and probe another device instead of coming to state 1. If the
+		// transmitter just waits, /HSHK stays low for ever and every later
+		// operation sees a drive holding the line. TashTwenty's Transmit calls
+		// XAbort on any state it cannot handle, for exactly this reason.
+		// ---------------------------------------------------------------
+		setState(3'd2);
+		@(posedge clk); #1;
+		txLen = 10'd6;
+		@(posedge clk); #1; txReq = 1'b1;
+		@(posedge clk); #1; txReq = 1'b0;
+		hsWait = 0;
+		while (readData[7] !== 1'b0 && hsWait < 4000) begin
+			@(posedge clk); hsWait = hsWait + 1;
+		end
+		check("drive asserts /HSHK asking for the bus", readData[7] === 1'b0);
+		setState(3'd5);                    // Mac goes off to probe the chain
+		repeat (8) @(posedge clk); #1;
+		check("an ID state abandons the request rather than holding the bus",
+		      txBusy === 1'b0);
+		setState(3'd2);
+		repeat (8) @(posedge clk); #1;
+		check("  ...and /HSHK is released, not stuck low", readData[7] === 1'b1);
+
 		$display("tb_dcd_link: %0d/%0d", pass, pass + fail);
 		if (fail != 0) $display("FAILED");
 		$finish;

@@ -131,6 +131,13 @@ module dcd_link
 	// anticipate.
 	output reg  [6:0] rxRspGroups,
 
+	// High while the Mac holds the RESET state. The command layer above must
+	// abandon whatever it was doing: a reply still queued across a reset
+	// re-raises txReq afterwards, and the link then asserts /HSHK in the idle
+	// state and waits forever for a state 1 that is never coming. HD Diag
+	// reports exactly that as error $28 -- "asserted but never released".
+	output            dcdReset,
+
 	// The command layer raises txReq with a payload; the link layer adds the
 	// sync, the group coding and the checksum. txBusy falls when it is done.
 	// txLen is the payload length EXCLUDING the checksum, and txLen+1 must be
@@ -167,6 +174,8 @@ module dcd_link
 
 	wire [2:0] state    = {ca2, ca1, ca0};
 	wire       selected = present & ~_enable;
+
+	assign dcdReset = selected & (state == 3'd4);
 
 	// Mac-initiated command handshake. Separate from the transmit FSM because
 	// the two are different conversations that happen to share one wire: here
@@ -462,10 +471,26 @@ module dcd_link
 					end
 				end
 
+				// Wait for the Mac to come round to state 1 -- but ONLY while
+				// it is plausibly on its way. TashTwenty's Transmit spins on
+				// states 2 and 3 and calls XAbort on anything else; without
+				// that escape a drive that has asserted /HSHK holds it low for
+				// ever if the Mac goes somewhere unexpected, which is a wedge
+				// with no recovery and the second half of error $28.
 				TX_WAIT:
 					if (state == 3'd1) begin
 						txState <= TX_SYNC;
 						txTick  <= BYTE_TICKS;
+					end
+					// States 0-3 are all legitimate here: 2 and 3 are the Mac
+					// on its way in, and 0 is a HOLD-OFF, which TX_DATA and
+					// TX_LSB rewind to this state to wait out. Only 4-7 mean
+					// the Mac has abandoned us - a reset, or the ID states as
+					// it moves on to probe another device in the chain.
+					else if (!selected || state >= 3'd4) begin
+						hshk_n  <= 1'b1;
+						txBusy  <= 1'b0;
+						txState <= TX_IDLE;
 					end
 
 				TX_SYNC:

@@ -392,6 +392,29 @@ module tb_dcd_read;
 		check("a zero-block read is not answered", readData[7] === 1'b1);
 		check("  ...and fetched nothing", fetches === 0);
 
+		// ---------------------------------------------------------------
+		// A RESET MID-TRANSFER MUST ABANDON THE REST OF THE READ. The Mac can
+		// reset a drive it thinks is misbehaving at any point; if the command
+		// layer carries on it will ask for the bus again and push a frame the
+		// Mac is no longer expecting.
+		// ---------------------------------------------------------------
+		setState(3'd2);
+		repeat (4) @(posedge clk);
+		serveDelay = 3;
+		fetches = 0;
+		sendRead(8'd3, 24'd80000);
+		recvFrame(77);
+		checkDataFrame(24'd80000, 8'd3, "block 1 of 3 arrives normally");
+
+		// Reset instead of taking block 2.
+		setState(3'd4);
+		repeat (16) @(posedge clk); #1;
+		setState(3'd2);
+		repeat (600) @(posedge clk); #1;
+		check("a reset abandons the rest of the read",
+		      readData[7] === 1'b1);
+		check("  ...and no further sector was fetched", fetches === 1);
+
 		$display("tb_dcd_read: %0d/%0d", pass, pass + fail);
 		if (fail != 0) $display("FAILED");
 		$finish;
