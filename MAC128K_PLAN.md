@@ -1591,10 +1591,26 @@ behaviourally, exactly as the SCSI targets were done.
 
 **Two files in there are worth having anyway, as arbiters of last resort:**
 
-- **`hd20.lst` (208K) -- a disassembly listing of that firmware.** Where the two
-  specifications contradict each other and the ROM is silent, this is the
-  definitive statement of what the drive actually did. BMOW warns those
-  contradictions exist, so budget for needing it.
+- **`hd20.lst` (208K) -- a disassembly of that firmware. DOWNLOADED 2026-09-04,
+  and it is much weaker than its name suggests.** It is a raw IDA auto-analysis
+  dump of `342-0343-B`: 8,207 lines in which every symbol is `sub_XXXX` or
+  `loc_XXXX`, and the only human annotation in the entire file is on the six
+  interrupt vectors (`DAV1, IRQ1`; `IRQ3, Serial in`; `T0, Serial out`). It adds
+  almost nothing over the raw `.bin`. Calling it "the definitive statement of
+  what the drive did" was fair about the FIRMWARE and wrong about the LISTING --
+  consulting it means doing the reverse engineering from scratch, in Z8
+  assembly, an architecture nobody on this project knows.
+
+  So treat it as a genuine last resort: worth opening only for a bounded,
+  specific question that nothing else can answer (for example "what does the
+  drive do with opcode `$04`?", which reduces to finding one dispatch table),
+  never as general reading. Saved at `C:/temp/Mac/HD20/hd20.lst`.
+
+- **`firmware/reassembly/FW3372_PS2013-10-02.zip` (1.0M) -- NOT yet downloaded,
+  and probably the file that matters.** A "reassembly" is normally annotated
+  source that rebuilds to the original binary, i.e. actual reverse-engineering
+  work with meaningful symbol names. If it is, it supersedes `hd20.lst`
+  entirely. Check this before ever investing time in the raw listing.
 - **`342-0414-A.jed` (51K) -- the PAL fuse map**, the exact equations. It
   supersedes a reading of the hand-drawn table if the phase decode is ever in
   doubt.
