@@ -1298,19 +1298,49 @@ floppy port using **DCD - Directly Connected Disk**, an Apple protocol that
 shares the DB-19 connector with the floppy drive but nothing else. It was the
 only drive ever to use it; SCSI arrived in 1986 and ended it.
 
-**The risk profile is the opposite of Phase 3's, and that is the thing to plan
-around.** DCD was **never publicly documented**, so unlike the spindle PWM
-there is no specification to read
-([[feedback-read-the-spec-for-historical-hardware]] does not protect us here).
-It is demonstrably reverse-engineerable -- BMOW's Floppy Emu speaks it -- but
-third-party accounts are the usual source.
+**~~The risk profile is the opposite of Phase 3's.~~ WRONG, corrected
+2026-09-04: APPLE'S OWN DCD SPECIFICATION IS PUBLIC.** This section used to say
+DCD was never publicly documented, that there was no specification to read, and
+that [[feedback-read-the-spec-for-historical-hardware]] "does not protect us
+here". All three are false. Two internal Apple documents surfaced and sit on
+Bitsavers at `bitsavers.org/pdf/apple/disk/hd20/`:
 
-**The best available authority is the ROM.** The 128K ROM (`boot0.rom`,
-`4D1F8172`) contains Apple's own DCD driver: the Mac's half of the protocol,
-first-hand. Disassembling it beats inferring from someone else's black-box
-implementation, and the workflow is proven -- it produced the Sad Mac decoder
-and the exception-vector mapping during Phase 3. **First task is that
-disassembly, not RTL.**
+| file | size |
+|---|---|
+| `Directly_Connected_Disks_Specification_1.2a_May85.pdf` | 556K |
+| `Software_Protocol_for_Directly_Connected_Disks_Mar85.pdf` | 234K |
+| `IWM_Interface_PAL.pdf` | 275K |
+| `HD-20_Tests_2.0.dc42` | 409K |
+| `RO552_Patent.pdf` | 1.4M |
+
+plus `firmware/` and `diag/` directories. The protocol is described as a
+state-based command-and-response system with data carried in groups of 7
+logical bytes encoded into 8 physical bytes -- which is a framing detail nobody
+would have guessed from behaviour, and exactly the class of thing the standing
+rule exists to stop us inferring.
+
+**So the standing rule held after all, and the mistake was mine: I asserted the
+absence of documentation without looking for it.** "Never publicly documented"
+was true for decades and is no longer true; the docs surfaced and BMOW's HD20
+work drew on them. Note the connection -- this core descends from Plus Too,
+which is BMOW, so our own upstream ancestor is the leading DCD implementer.
+
+**Revised first task: read the two PDFs, then use the ROM to confirm.** The 128K
+ROM (`boot0.rom`, `4D1F8172`) still contains Apple's own DCD driver -- the Mac's
+half of the protocol, first-hand -- and the disassembly workflow is proven (it
+produced the Sad Mac decoder and the exception-vector mapping in Phase 3, and
+the boot-search analysis above). But it is now the CORROBORATING source, not the
+primary one. Read the spec first; disassemble to check our reading and to see
+which parts the ROM actually implements.
+
+**`IWM_Interface_PAL.pdf` may matter as much as the protocol docs.** We
+implement the IWM and the external drive port, so the hardware side of how a DCD
+device hangs off that connector is directly ours, not the drive vendor's.
+
+**`HD-20_Tests_2.0.dc42` is Apple's own HD20 test disk** -- a ready-made
+hardware acceptance artefact for this phase. It is Disk Copy 4.2 format, which
+this core does not read directly, but the README already documents the
+conversion (`dc2dsk`, `releases/bin2dsk.sh`).
 
 **Open questions to settle from the ROM before any design:**
 - Does an HD20 present a **bare HFS volume from block 0**, or a partitioned
