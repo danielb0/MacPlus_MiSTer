@@ -3271,6 +3271,268 @@ answers whether boot-time identification happens at all, which is the question
 that has been open since the handshake fix.
 
 
+### Review 2026-09-05: the HD20 was never wired to the IWM -- three seam bugs, and the `$28` was not ours
+
+**Code review against the specifications, the Plus ROM, HD Diag's own code and
+`fx68k`, with no compile and no RTL change. The result is that nothing on the
+board has yet observed the DCD at all.** Every hardware symptom so far --
+"init driver failed", "Comm error", `$28000000` -- is produced by the EXTERNAL
+FLOPPY model answering in the DCD's place, and the three bugs that cause it
+all sit on the seam between `rtl/iwm.v` and the DCD modules, which is the one
+place the benches never look: all three DCD benches instantiate `dcd_link` or
+`dcd` directly with `cep = cen = 1` and hand-made single-clock `writeReq`
+pulses. [[macplus-core-conventions]]'s "test the seams" lesson, for the fourth
+time.
+
+**BUG 1 -- THE SENSE LINE NEVER REACHES THE CPU.** `rtl/iwm.v:136` defines
+`senseExt = readDataExt[7]`, and `readDataExt` is `floppyExt`'s output. The
+DCD's `readData` is only muxed into `readDataExtSel`, which feeds the DATA
+LATCH. The IWM status register -- Q7=0, Q6=1, which is what `$418600` (`q6H`,
+read `q7L`, `q6L`) and HD Diag's `tst.b $1c00(a2)` read -- takes its bit 7
+from `senseExt` (`rtl/iwm.v:405`), i.e. from the floppy, always. So:
+
+- **The ID probe cannot pass.** With `_enable` low, `floppy.v:449` returns
+  `driveRegsAsRead[{ca2,ca1,ca0,SEL}]`. State 7 with SEL=0 is register `1110`
+  = INSTALLED = 0. Both the ROM (`$418634 bpl fail`) and HD Diag (`$D9BC bpl`)
+  require 1 there. State 5 = `1010` SUPERDR = 0 happens to be what a DCD
+  answers, which is a coincidence that helps nobody. HD Diag's "init driver
+  failed" is this, and the ROM's Open takes the "not a DCD" branch at
+  `$417E46` on every boot.
+- **The `$28` is the floppy's MOTORON or TK0 register.** HD Diag's hard reset
+  (`$D8EC`, disassembled below) drives state 4 with /ENBL2, drops to state 2
+  and then reads the status register: it wants sense LOW first (`$24` if it
+  never happens) and then HIGH (`$28` if that never happens). In state 2 the
+  floppy answers register `0100` = MOTORON with SEL=0 (0 = motor on) or
+  `0101` = TK0 with SEL=1 (0 = head at track 0, where an unused drive sits).
+  Either reads 0 -> "asserted" at once -> never "released" -> `$28`. A `$24`
+  would only have meant the motor register was off. **So the inference in
+  `abd857c` -- "the handshake fix works; the drive now takes the line and does
+  not let go", and "`$28` proves the image is mounted and the device is
+  selected" -- is void.** The fix in `7e76cae` is still correct on the ROM
+  disassembly and TashTwenty, but it has not been observed on hardware, and
+  neither has the mount. `PDCD` bit 5 (`present`) is the first thing that will
+  say whether the image was ever mounted.
+
+```
+00D8FC  movea.l $1e0.w,a2      ; IWMBase
+00D900  tst.b $1000(a2)        ; mtrOff
+00D904  tst.b $a00(a2)         ; ca2=1
+00D908  tst.b $400(a2)         ; ca1=0
+00D90C  tst.b (a2)             ; ca0=0      -> state 4, RESET
+00D90E  tst.b $1600(a2)        ; select external
+00D912  tst.b $1200(a2)        ; mtrOn      -> /ENBL2 asserted
+00D916  move.w #$e5b0,d1 / dbra ; ~74 ms
+00D91E  tst.b $600(a2)         ; ca1=1      -> state 6
+00D922  tst.b $800(a2)         ; ca2=0      -> state 2, idle
+00D926  tst.b $1a00(a2)        ; q6H: status register from here on
+00D92A  ...delay $A0000...
+00D932  moveq #$24,d0
+00D938  subq.l #1,d1 / beq $d96a / tst.b $1c00(a2) / bmi $d938   ; wait LOW
+00D942  moveq #$28,d0
+00D944  subq.l #1,d1 / beq $d96a / tst.b $1c00(a2) / bpl $d944   ; wait HIGH
+00D94E  moveq #1,d0            ; success
+```
+
+**BUG 2 -- THE DRIVE'S BYTES NEVER REACH THE DATA LATCH.** `rtl/dcd_link.v`
+clears `newByteReady` unconditionally every clock and sets it only inside
+`if (cen)`, so it is high for exactly ONE `clk` -- the cycle after the `cen`
+tick, when `cen` (`busPhase == 01`) is necessarily low. `rtl/iwm.v:494`
+latches with `if (cen && newByteReady)`. The two never coincide. `floppy.v`
+sets and clears its `newByteReady` inside `if (cep)`, so its pulse spans a
+whole 8 MHz period and the `cen` in the middle catches it. With bug 1 fixed
+alone, the Mac would time out hunting the `$AA` (error `$21`) on every reply.
+
+**BUG 3 -- EVERY BYTE THE MAC SENDS ARRIVES THREE TIMES.** `rtl/iwm.v:141`
+builds `writeReqExt = cen && dataRegWrite && selectExternalDriveNext`, and
+`dataRegWrite` is a LEVEL on `_cpuLDS`. `fx68k.sv:2408-2424` asserts `rLDS`
+for a write at the S2 `enPhi1` edge and releases it at the S7 `enPhi2` edge,
+so `_cpuLDS` is low across three `cen` samples (`sim/tb_iwm_latch.v:148` says
+the same for a read: "holds `_cpuLDS` for 3 CPU clock periods"). `floppy.v`
+never noticed because `floppy.v:122` refuses a `writeReq` while
+`writeBusyReg` is set, and busy lasts 16 us. `dcd_link.v` takes every pulse
+as a new byte: `$AA $AA $AA $81 $81 $81 ...` -- the second `$AA` becomes the
+count byte, the framing is gone, no command ever checksums, no reply is ever
+requested. Invisible with bug 1 in place; the first thing that would break
+after it.
+
+**Lesser, recorded so they are not rediscovered:**
+
+- **`_iwmBusy` is the floppy's** (`rtl/iwm.v:129`), and `floppyExt` never
+  goes busy without a disk, so the Mac's `tst.b (a3) / bpl` at `$419AE8`
+  never waits and it sends at full CPU speed rather than one byte per 16 us.
+  The receive side is byte-driven and does not care. A deviation, not a fault.
+- **`floppyExt` stays enabled while the DCD is present.** It only loses the
+  `readData`/`newByteReady` mux. PH3 strobes still write its registers: the
+  ROM's chain walk at `$4189A4` pulses PH3 in state 7 with SEL=0, which is
+  `{ca1,ca0,SEL} = 110` = EJECT with `ca2 = 1`, so `diskEject[1]` fires at
+  the HPS. Harmless with no external floppy mounted; untidy.
+- **PH3 is decoded, and ignoring it costs nothing with one drive.** The ROM's
+  Open (`$417E0C`) first probes drive INDEX 7: `$41892A` -> `$4189BE` enables
+  the port and walks `index - 3 = 4` PH3 pulses while the state-7 sense reads
+  1, then runs the ID probe. A DCD still answering after four advances sets
+  `$fc(a1)` = `$FF`, which makes `$417E32` SKIP indices 4-6 and `$418972`
+  enable the port directly for index 3. So a drive that ignores PH3 is seen
+  once, as drive 3, which is exactly what we want. The authentic behaviour --
+  phantom states after a PH3 pulse until /ENBL2 is raised (the flip-flop in
+  the flow-through circuit, spec 1.2a Figure 2) -- is optional accuracy.
+- **HD Diag's reset wants /HSHK LOW then HIGH; the ROM wants only HIGH.**
+  `$419C6C` resets, idles, then polls `$418600` up to 1600 x 100 waiting for
+  sense = 1 and never requires a low. Our link deasserts on RESET, so after
+  bug 1 the ROM path passes and HD Diag's hard reset reports `$24` -- as it
+  would against TashTwenty ([[macplus-hd20-diag-oracle]]). A real drive holds
+  /HSHK low for its self-test after a reset (the "up to 2 seconds" in the
+  spec, the 1600-poll budget in the ROM). A short assertion after state 4 is
+  the authentic answer and would turn HD Diag's hard reset into a passing
+  oracle. Inferred from two programs, not read from a document -- say so in
+  the comment.
+
+**Everything else on the ROM's path checks out against the RTL** and is
+recorded so it need not be re-read: `$4185AC`/`$41892A` select the external
+port, drive state 7, clear SEL and enable for index 3; the transmit prologue
+writes the sync to `$1E00` and data to `$1A00` with Q7 high (both are
+`dataRegWrite`), polling `a3 = $1800` (q6L, the handshake register, not the
+status register -- so the drive holding /HSHK low during a receive does not
+stall it); the receive end at `$4199F8` goes 1 -> 3 and reads the sense ONCE,
+erroring `$25` unless it is already high, which `TX_END`'s immediate release
+satisfies; and the receive entry `$419820` requires sense low before it
+starts, so the caller polls, which `TX_IDLE`'s wait for state 2 satisfies.
+
+**THE FIX, in the order that keeps the floppy port bit-identical:**
+
+1. `rtl/iwm.v`: `senseExt` from the DCD when it is present --
+   `dcdPresent ? readDataDcd[7] : readDataExt[7]` -- so with nothing mounted
+   the wire reduces to what it is today. The status-register mux at `:405` is
+   otherwise untouched.
+2. `rtl/dcd_link.v`: hold `newByteReady` until the NEXT `cen` -- set it on the
+   tick that presents the byte, clear it on the following tick, both under
+   `cen` -- mirroring `floppy.v`. Check `dbg_link[13]` still reads as a pulse
+   in the deck's counter.
+3. `rtl/iwm.v`: a one-shot data-register strobe for the DCD only:
+   `writeReqDcd = cen && dataRegWrite && !dataRegWriteSeen &&
+   selectExternalDriveNext`, with `dataRegWriteSeen` tracking `dataRegWrite`
+   on `cen`. The floppy's `writeReqExt` stays as it is. Consecutive writes are
+   always separated by the `tst.b (a3)` read, so an edge is safe.
+4. Same build, optional: force `floppyExt`'s `_enable` high while
+   `dcdPresent`, and take `_iwmBusy` from a constant "ready" on that branch,
+   which is what it already evaluates to. Also optional: the post-RESET /HSHK
+   window, and phantom states after a PH3 pulse.
+5. **The seam bench, which is the actual deliverable:** `sim/tb_iwm_dcd.v`,
+   instantiating the REAL `iwm` (both floppies and the DCD inside it) with
+   `busPhase`-derived `cep`/`cen` and `tb_iwm_latch.v`'s `cpu_access` task
+   holding `_cpuLDS` for 3 CPU periods. Mount an image with `img_mounted`,
+   then drive exactly what the ROM drives, through the IWM's CPU port:
+   - the ID probe through the STATUS register: 1, 1, 0 for states 7, 6, 5,
+     and the floppy's own values with nothing mounted (that is the regression
+     that matters);
+   - HD Diag's reset sequence, then sense high;
+   - a Status command as `$419A98`-`$419AEC` sends it: state 3, poll sense
+     low, state 1, `$AA $81 $B1` and the group through the data register,
+     state 3, poll high, state 2;
+   - poll sense low, state 3 -> 1, read all 344 bytes through the data latch
+     with the ROM's `dbmi` idiom and the real latch clear, decode 7-for-8 and
+     check the checksum and the identity fields;
+   - then MultiBlock Read of block 0 the same way, against the mounted image.
+   Run it against the CURRENT RTL first: it must fail at the ID probe; with
+   fix 1 only, at the reply; with fixes 1 and 2, at the command. Each bug
+   caught by name, or the bench is not testing the seam.
+6. Then the compile that was already queued, with the `PDCD` probe still in
+   it, and the hardware order unchanged: `clear`, boot, read -- `present` and
+   states-seen 7/6/5 -- then HD Diag, which should now get past "init driver
+   failed". Its hard reset will say `$24` until item 4's window exists.
+
+**What changes in the record.** "Hardware-confirmed" on `7e76cae` is
+withdrawn; "the image IS mounted" is withdrawn; the `$28` needs no theory
+about our drive. What stands: the /HSHK design in `dcd_link.v` matches the
+ROM and TashTwenty, and the command layer is unchanged by any of this.
+
+### Fixes applied 2026-09-05: all three, plus two the bench found that the review did not
+
+**Items 1-3 and 5 of the fix above are DONE. The seam bench is
+`sim/tb_iwm_dcd.v` and it passes 29/29. Nothing has been compiled: the build
+gate came back the same day (see the memory note), so HEAD is ready for Quartus
+and has not been through it.**
+
+The bench was written FIRST and run against the unfixed RTL, which is the only
+way to know it tests anything. Its baseline and the ladder down:
+
+| RTL | tb_iwm_dcd | first failure |
+| --- | --- | --- |
+| before any fix | 6/27 | the ID probe -- bug 1 |
+| fix 1 only | 11/27 | the command frame -- bug 3 |
+| fixes 1+2+3 | 22/27 | the MultiBlock Read reply |
+| + TX_END (below) | 25/29 | duplicate bytes -- the arming defect |
+| + the arming fix | **29/29** | -- |
+
+It drives the REAL `iwm` -- both floppies and the DCD inside it -- through its
+CPU port and nothing else: `busPhase`-derived `cep`/`cen`, `_cpuLDS` held for
+three CPU periods, the sixteen one-bit registers, and the status/handshake/data
+registers selected by Q6 and Q7 exactly as `$418600`, `$419A98` and HD Diag's
+`$D8FC` select them. The three bugs are checked BY NAME -- the ID probe through
+the status register, `writeReq` pulses counted per CPU write at the DCD's own
+port, and `newByteReady` edges against the ones the `cen`-gated latch could see
+-- so a regression says which one came back rather than just "no reply". The
+first block is the regression that matters: with NO image mounted the sense line
+must still be `floppyExt`'s, bit for bit, and that is asserted against
+`readDataExt[7]` directly rather than against a written-down expectation.
+
+**The three fixes went in as planned.** `senseExt` now comes off
+`readDataExtSel[7]`, the same mux the data takes, so it reduces to
+`readDataExt[7]` with nothing mounted. `dcd_link` clears `newByteReady` under
+`cen` instead of unconditionally. `writeReqDcd` is a one-shot built from
+`dataRegWriteSeen`, and `writeReqExt` is untouched so the floppy path is
+bit-identical. Item 4's optional accuracy -- the post-RESET /HSHK window and the
+phantom states after a PH3 pulse -- is still NOT done, so HD Diag's hard reset
+will still report `$24`.
+
+**FOURTH: TX_END dropped the last byte of every frame.** `dcd_link`'s
+`readData` only presents `txByte` while `txBusy` is set, and with fix 2 the IWM
+latches a byte on the cen tick AFTER the one that offered it. `TX_END` ran on
+the very next clk, so `txBusy` fell inside that gap and the CPU latched
+`{senseBit, 7'b0}` = `$80` in place of the final group's LSB byte -- which
+silently cleared bit 0 of all seven bytes of the last group. Three data bytes
+wrong out of 512, at 506, 508 and 510, and a checksum that would not close.
+`TX_END` now waits for `cen`; nonblocking assignment means `txBusy` is still set
+at the instant the IWM samples. Cost: 125 ns before /HSHK is released, which the
+Mac spends spinning in state 3 anyway. **The Status reply passed this by luck**
+-- its last group is four pads and the checksum, whose bit 0 happened to be
+zero. A bench that only ran Status would have shipped it.
+
+**FIFTH, and it is NOT DCD-specific: the IWM never armed its latch-clear when
+the byte arrived during the read.** `rtl/iwm.v` had
+
+```
+if (iwmRead && readDataLatch[7]) readLatchClearTimer <= 4'hD;
+```
+
+which reads the latch PRE-EDGE. A drive byte landing on the last `cen` tick of a
+CPU read access finds that value still zero, so the countdown is never armed at
+all -- `readLatchClearTimer` stays 0, the latch never self-clears, and the next
+poll returns the same byte a second time. Measured directly rather than
+inferred: every good byte leaves the timer at 13, and the byte before a
+duplicate leaves it at 0. Over a 617-byte MultiBlock Read frame that was **68
+duplicate reads** and a frame that could not decode.
+
+The condition now also accepts `cen && newByteReady && readData[7]`. That is
+what the IWM manual quoted at the top of `iwm.v` already says -- a valid read is
+/DEV low with D7 outputting a one "for at least one fclk period", and that final
+tick is exactly one fclk period with /DEV still low, so the hardware arms it.
+
+**Why it survived this long, and why it is worth watching.** It is
+alignment-dependent in exactly the way `sim/tb_iwm_latch.v` documents: the
+393-byte Status frame lands on a safe phase and decodes perfectly while the
+617-byte read frame does not. `tb_iwm_latch` passes IDENTICALLY with and without
+the fix, so the bench that owns this latch could not see it -- it sweeps poll
+gap against bus phase, and this race is about where the byte lands inside the
+access, which is a different axis. Only two benches instantiate `iwm` at all, so
+simulation coverage of the change is complete, but the floppy read path is
+hardware-proven and simulation is not hardware: **if anything regresses in
+floppy reads after this build, this one-line change is the first suspect.**
+
+**Still open, unchanged by any of this:** the compile with the `PDCD` probe in
+it, and then the hardware order from item 6 -- `clear`, boot, read `present` and
+states-seen 7/6/5, then HD Diag. Everything above is simulation. Nothing here
+has been observed on the board.
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
