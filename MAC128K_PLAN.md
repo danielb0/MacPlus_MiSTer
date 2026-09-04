@@ -1198,7 +1198,31 @@ the 400K control image; Plus/SE unregressed, which after this phase means
 checking they still see their SCSI disks, because the changed decode branch is
 shared by every model even though only three of them alter behaviour.
 
-**Phase 4 status: DONE in simulation, `dcfbe62`. NOT yet hardware-confirmed.**
+**Phase 4 status: the 512Ke is HARDWARE-CONFIRMED, 2026-09-04, build
+`d7df117e` (`output_files/MacPlus_d7df117e_phase4-512ke.rbf`).** Daniel:
+boots from both 400K and 800K disks, reports 512K, **totally ignores a
+mounted SCSI disk, and an attempted CD-ROM mount did not flash the yellow
+disk LED at all** -- i.e. the core issued no sector request whatsoever, which
+is the predicted behaviour: the ROM decides at `$4003E4` and never reaches
+`$58xxxx`. Timing closed with room (worst setup +0.741 ns, worst hold
++0.201 ns, no negative slack), 19,872/41,910 ALMs.
+
+**What that result does NOT isolate, and it is worth being straight about
+it:** gating `selectSCSI` alone would produce the same observation, because
+an undecoded controller has nothing to answer a probe with either way. The
+hardware shows the MACHINE is authentic; the bench is what shows the MIRROR
+specifically works, by asserting both probes resolve to the same ROM word.
+Distinguishing the two halves on hardware would need `$0B22` read back over
+JTAG, and it is not worth a probe deck change: the outcome is what the model
+is for, and the Plus keeping its SCSI proves the strap is not simply stuck.
+
+**STILL OUTSTANDING: the Plus/SE regression check and the 128K.** The changed
+decode branch is shared by every model, so Plus and SE must be confirmed to
+still SEE their SCSI volumes -- booting is not sufficient -- and a 128K must
+still boot the 400K control image. Until those run, Phase 4 is confirmed for
+the model it adds but not cleared for the models it could break.
+
+**Simulation status, `dcfbe62`.**
 Items 9 and 5 landed together as one strap. `sim/tb_scsi_absence.v` gates it
 end-to-end (24/24, written red first: 7 failures, exactly the three SCSI-less
 models, with Plus and SE passing throughout), and `sim/tb_mac_model.v` grew the
