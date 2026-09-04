@@ -1200,16 +1200,36 @@ shared by every model even though only three of them alter behaviour.
 
 **Phase 4 status: the 512Ke is HARDWARE-CONFIRMED, 2026-09-04, build
 `d7df117e` (`output_files/MacPlus_d7df117e_phase4-512ke.rbf`).** Daniel:
-boots from both 400K and 800K disks, reports 512K, **totally ignores a
-mounted SCSI disk, and an attempted CD-ROM mount did not flash the yellow
-disk LED at all** -- i.e. the core issued no sector request whatsoever, which
-is the predicted behaviour: the ROM decides at `$4003E4` and never reaches
-`$58xxxx`. Timing closed with room (worst setup +0.741 ns, worst hold
-+0.201 ns, no negative slack), 19,872/41,910 ALMs.
+boots from both 400K and 800K disks, reports 512K, and **totally ignores a
+mounted SCSI disk**. Timing closed with room (worst setup +0.741 ns, worst
+hold +0.201 ns, no negative slack), 19,872/41,910 ALMs.
 
-**What that result does NOT isolate, and it is worth being straight about
-it:** gating `selectSCSI` alone would produce the same observation, because
-an undecoded controller has nothing to answer a probe with either way. The
+**RETRACTED, same day: the yellow disk LED is NOT a SCSI indicator, and I
+read it wrongly.** The 512Ke showed no LED flash on a CD mount attempt and
+that was recorded here as "no sector request, exactly as predicted". Then a
+128K DID flash a couple of times on the same action, which looked like an
+inconsistency and is not one: `rtl/cd_audio.sv:36` documents `img_mounted`
+as "mount pulse: (re)acquire the TOC", so every mount makes the CD audio
+engine fetch the TOC over the HPS sector path (`ca_io_rd` -> `io_rd` ->
+`sd_rd[4]`) with the 68000 not involved at all. That is SD activity, hence
+yellow, on ANY model with SCSI fully gated -- `scsiPresent` is 0 for the
+512K, 128K and 512Ke alike.
+
+So the LED conflates Mac-driven SCSI with an autonomous TOC fetch and cannot
+answer this question either way. Worse, the expected result on a SUCCESSFUL
+mount is a couple of flashes, so the 512Ke's silence more likely means the
+mount did not take (or the disc was already mounted, so no fresh pulse) than
+that anything was demonstrated. **The CD half of the 512Ke result is
+withdrawn; the SCSI-disk half stands, because that was observed as a volume
+not appearing, not as an LED.**
+
+Lesson worth keeping: an LED that several subsystems can light is not an
+instrument. This is the second time this LED has misled --
+[[mister-yellow-disk-led-monostable]] was the first.
+
+**What the remaining result does NOT isolate:** gating `selectSCSI` alone
+would produce the same observation, because an undecoded controller has
+nothing to answer a probe with either way. The
 hardware shows the MACHINE is authentic; the bench is what shows the MIRROR
 specifically works, by asserting both probes resolve to the same ROM word.
 Distinguishing the two halves on hardware would need `$0B22` read back over
