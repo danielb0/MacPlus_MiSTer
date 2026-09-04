@@ -1678,6 +1678,80 @@ behaviourally, exactly as the SCSI targets were done.
   supersedes a reading of the hand-drawn table if the phase decode is ever in
   doubt.
 
+### Mac GUI / Mac 512K Blog, "Macintosh Hard Disk 20" (Dog Cow, 24 Oct 2017)
+
+Found by Daniel: `applefool.com/se30/sites/Mac GUI HD20.html`. Note the host
+serves it under `mcdermond.net`'s certificate, so an https fetch fails on a name
+mismatch -- open it in a browser. Secondary source, but a careful one working
+from the same Apple documents plus real hardware, and it settles several things.
+("Rene" below is spelled with an acute accent in the sources.)
+
+**THE ROM DRIVER IS CALLED `SonyDCD`.** The 128K ROM carries it, which is what
+lets a Plus and a 512Ke boot an HD20 directly rather than loading a driver from
+floppy, and it was kept in ROM for years afterwards. That is a name to search
+for, and it confirms the structural guess: DCD lives with `.Sony`, not in a
+driver of its own.
+
+**Better still, the pre-128K-ROM driver is literally a `.Sony` PATCH.** The
+"Hard Disk 20" file on the startup floppy is not an INIT -- it is type
+`ZSYS/MACS` containing three `PTCH` resources: **TFS** (RAM-based HFS, ~24 KB),
+a **Dispatch Kernel** (290 bytes), and **`.Sony`** (6.6-7.4 KB depending on
+version). So on a 512K, DCD support arrives as a patch to the floppy driver --
+strong corroboration that in ROM it sits inside `.Sony` too.
+
+**CONFIRMS the 512 + 20 split, which this plan recorded as inference.** Each
+sector is 532 bytes: 512 of data plus 20 tag bytes holding file number,
+modification timestamp and type/creator code. Crucially the tags were meant for
+disk-recovery software and **Apple later deprecated them** -- which is why the
+Floppy Emu can synthesise zeroes and nothing notices. That makes the 512-byte
+image recommendation above safe rather than merely convenient.
+
+**CONFIRMS what the About-the-Finder period means**, also recorded here as
+inference: the dot after the RAM size indicates the machine has the **128K
+ROM**. Not "is a 512Ke". The reading was right and so was the narrowing.
+
+**Corrects the geometry.** Nisha (610 cylinders, 2 surfaces) is the
+Apple-designed mechanism the specifications describe -- but it is not clear the
+HD20 ever SHIPPED with one. Production units used a **Rodime RO552: 305
+cylinders, 4 surfaces**, same 20 MB, same 32 sectors per track, same 532-byte
+sectors, and the firmware detects which is fitted from the servo response. So
+the identity block extracted above describes the Nisha variant, and we must
+choose which geometry to report. Since capacity, sector size and sectors/track
+agree, it probably does not matter to the host -- but it is a deliberate choice,
+not an oversight.
+
+**Names, finally straight:** *Nisha* = the drive assembly. *Rene* = the
+interface between the Mac and Nisha, i.e. the controller board carrying the Z8
+(the author notes even he cannot tell whether Rene means the board or the HDA).
+Both appear in our documents; neither is an IWM.
+
+**Behaviour to design to:**
+
+- The drive self-tests for about **15 seconds** after power-on, green light
+  blinking. Independent of, and far longer than, the 2-second worst case the
+  protocol document gives for answering a command during self-test.
+- Boot flow on a 512K: insert the HD20 startup floppy; the screen shows "Hard
+  Disk 20 Startup." beneath "Welcome to Macintosh."; after ~14 s the Mac
+  **ejects the floppy** and continues from the hard disk. Holding the mouse
+  button at the Welcome screen keeps it on the floppy. (System 3.0 showed "Using
+  External Drive." instead.)
+- **Daisy chain:** at most two hard disks followed by a floppy, and a second
+  unit is not recognised unless the first is powered on at startup.
+- **The HD20's icon lives in the controller's firmware**, so the driver fetches
+  it from the device rather than supplying it.
+
+**The best bring-up tool is named here: `HD Diag` (ReneDiag)** -- low-level block
+access over the Rene interface -- and the author reports **it works even on a
+128K**, where the ROM patch will not load. That is exactly what we want first: a
+tool that exercises the DCD link without needing the file system, the driver
+patch, or a bootable volume. `HD 20 Test` (by Rodger Mohme, ancestor of HD SC
+Setup) is the other. Both correspond to the `diag/` floppies on bitsavers.
+
+**Machines the author tested with a real HD20:** 512Ke, Plus, Classic and
+Classic II worked; an SE/30 did not. A 128K with a Plus ROM fitted -- a "128Ke"
+-- fully supports it, which is a configuration this core could trivially offer
+and which real hardware apparently supported too.
+
 ### Borrowing from the Lisa core (Daniel's suggestion, 2026-09-04)
 
 `MiSTer-devel/Apple-Lisa_MiSTer` (default branch `main`, a port of
