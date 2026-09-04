@@ -1192,15 +1192,28 @@ is a 512K, `512K.` is a 512Ke. That is worth having because it is independent of
 the SCSI test -- it asks whether SOFTWARE believes it is running on a 512Ke,
 where everything else in Phase 4 only establishes that the SCSI bus is absent.
 
-**Not yet checked on our build.** The 2026-09-04 hardware run reported "512K"
-but did not record whether a period was present.
+**CONFIRMED ON OUR BUILD, 2026-09-04 (Daniel), under System 3: the 512Ke shows
+the period and the 512K does not.** Our two models are correctly distinguishable
+to software.
 
-**Do not read a missing period as a defect without first establishing what
-generates it.** The About box belongs to the Finder, not the ROM, so the period
-is presumably chosen by System software and may well depend on the System
-version booted as much as on the machine. Find the mechanism before drawing a
-conclusion -- this is the same trap as the yellow LED, where an indicator was
-read as evidence of something it did not actually measure.
+**It is SYSTEM-VERSION DEPENDENT: the distinction does not work under System
+6.0.5.** Harmless here, since System 6 wants 1 MB and will not run on a 512K
+anyway, but record it so that nobody re-running this test on a newer System sees
+no period and concludes something has regressed. Use System 3.
+
+**What it actually witnesses, stated precisely, because I over-claimed it when I
+first wrote this down.** I called it "independent of the SCSI test -- it asks
+whether SOFTWARE believes it is running on a 512Ke". That is too strong. The
+512K runs the 64K ROM and the 512Ke runs the 128K ROM, so what the Finder is
+almost certainly keying on is **ROM VERSION** (inference -- the About box is the
+Finder's, and nobody has disassembled it to check). That makes it an excellent
+discriminator for these two machines, because ROM version is precisely what
+separates a real 512K from a real 512Ke -- but it is NOT independent evidence
+about SCSI absence. What it confirms is that the model straps deliver the right
+ROM to the right machine.
+
+Same lesson as the yellow LED, applied rather than repeated: an indicator
+witnesses what it witnesses, not what you hoped to test with it.
 
 Hardware pass criteria: **a 512Ke boots from an 800K floppy** (System 3.x/4.x,
 which is what the machine shipped with and has the RAM for -- System 6 wants
