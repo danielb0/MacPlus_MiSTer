@@ -147,7 +147,17 @@ module dcd
 	// A DCD image is mounted. rtl/iwm.v uses this to decide whether the
 	// external drive port is a Sony or a DCD; with nothing mounted the port
 	// behaves exactly as it always has.
-	output        present
+	output        present,
+
+	// ---- JTAG telemetry, decoded by rtl/dbg_probes.sv as PDCD/PDC2 --------
+	// rtl/dcd_link.v's own 16 bits sit in the low half; the command layer adds
+	// its state above them. Live values only -- see the note on `dbg_link`.
+	//
+	//   [15:0]  dbg_link, bit assignments in rtl/dcd_link.v
+	//   [18:16] cstate                  [19]    present
+	//   [27:20] opcode of the frame in rxBuf
+	//   [28]    txReq   [29] disk busy   [30] disk err   [31] dcdReset
+	output [31:0] dbg_dcd
 );
 
 `include "dcd_icon.vh"
@@ -186,6 +196,7 @@ module dcd
 	reg  [7:0]  txData;
 
 	wire [7:0]  opcode = rxBuf[7:0];
+	wire [15:0] dbg_link;
 
 	dcd_link link
 	(
@@ -199,7 +210,8 @@ module dcd
 		.rxRspGroups(rxRspGroups),
 		.dcdReset(dcdReset),
 		.txReq(txReq), .txData(txData), .txAddr(txAddr), .txLen(txLen),
-		.txBusy(txBusy)
+		.txBusy(txBusy),
+		.dbg_link(dbg_link)
 	);
 
 	// ------------------------------------------------------------------
@@ -410,5 +422,11 @@ module dcd
 			endcase
 		end
 	end
+
+	// Assembled here rather than beside the link instance because `cstate` is
+	// declared below it, and a forward reference from a continuous assignment
+	// is not portable between iverilog and Quartus.
+	assign dbg_dcd = {dcdReset, diskErr, diskBusy, txReq,
+	                  opcode, present, cstate, dbg_link};
 
 endmodule

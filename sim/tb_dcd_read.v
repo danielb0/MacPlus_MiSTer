@@ -53,6 +53,11 @@ module tb_dcd_read;
 
 	integer pass = 0, fail = 0;
 
+	wire [31:0] dbg_dcd;
+	reg  [2:0]  dbgCstateSeen = 0;
+	always @(posedge clk)
+		if (dbg_dcd[18:16] > dbgCstateSeen) dbgCstateSeen <= dbg_dcd[18:16];
+
 	dcd dut (
 		.clk(clk), .cep(1'b1), .cen(1'b1),
 		._reset(_reset),
@@ -62,7 +67,8 @@ module tb_dcd_read;
 		.sd_lba(sd_lba), .sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack(sd_ack),
 		.sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout),
 		.sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr),
-		.img_mounted(img_mounted), .img_size(img_size), .img_readonly(img_readonly)
+		.img_mounted(img_mounted), .img_size(img_size), .img_readonly(img_readonly),
+		.dbg_dcd(dbg_dcd)
 	);
 
 	always #10 clk = ~clk;
@@ -414,6 +420,13 @@ module tb_dcd_read;
 		check("a reset abandons the rest of the read",
 		      readData[7] === 1'b1);
 		check("  ...and no further sector was fetched", fetches === 1);
+
+		// The command FSM only leaves C_IDLE for a READ, so this bench is the
+		// only place the cstate field of the telemetry word is ever non-zero --
+		// and a field that is only ever zero cannot be told from one that is
+		// mis-indexed. C_SENDING is 5, the highest state it reaches.
+		check("telemetry: the command FSM field reaches C_SENDING during a read",
+		      dbgCstateSeen === 3'd5);
 
 		$display("tb_dcd_read: %0d/%0d", pass, pass + fail);
 		if (fail != 0) $display("FAILED");

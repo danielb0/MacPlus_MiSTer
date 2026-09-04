@@ -30,11 +30,21 @@
 //   PIO3  {wr_stuck, d0_io_lba} -- the WRITE-side twin of PIOS
 //   PIO4  disk write/ack counts + live write handshake bits
 //   PHLD  CPU hold-off engagements + longest stall + frontier breaches
-//   PRG0-3  ring of the last 8 SCSI register accesses -- the CONVERSATION,
+//   PRG0-1  ring of the last 4 SCSI register accesses -- the CONVERSATION,
 //           not just its last line
 //   PDMA  the discriminating word: DACK reads since the arm, watchdog fire
 //         counts, phase-visit mask -- see "the discriminators" below
 //   PDM2  sticky evidence bits + a ring of the last 8 target phases
+//   PDCD  the DCD (HD20) link: states the Mac drove, /HSHK, both handshake
+//         FSMs, the last opcode -- see "the DCD probe" below
+//   PDC2  DCD byte counts, how far a reply got, and the rxHs sequence
+//
+// THE DECK IS AT THE ~20 HUB-NODE CEILING MacLC MEASURED, above which the name
+// table reads back corrupted. PDCD and PDC2 came in, so PRG2 and PRG3 went
+// out: the SCSI access ring is now 4 entries rather than 8. That is the
+// cheapest thing here to halve -- the SCSI wedge it was built for is closed
+// (see [[macplus-scsi-release-blocker-no-dtack]]), and a 4-entry ring still
+// carries a CDB handover. Nothing else in the deck degrades gracefully.
 // ---------------------------------------------------------------------------
 module dbg_probes (
 	input  wire        clk,
@@ -78,7 +88,12 @@ module dbg_probes (
 	// maxTrack says whether it dies at the CLV zone boundary (track 16), and
 	// the PWM min/max bracket the range the ROM's speed loop actually drove,
 	// which is what an invented PWM->period map must be calibrated against.
-	input  wire [31:0] dbg_floppy
+	input  wire [31:0] dbg_floppy,
+
+	// DCD (Apple HD20) link telemetry from rtl/dcd.v. Raw live state only; all
+	// the counting and the sticky bits are below, which is why the clear
+	// source can live here and does not have to be threaded back down.
+	input  wire [31:0] dbg_dcd
 );
 
 	wire dbg_bsy    = scsi_dbg[0];
@@ -195,22 +210,25 @@ module dbg_probes (
 	reg [31:0] pscw_r;
 	always @(posedge clk) pscw_r <= {wr_cnt, wr_val, wr_sel, 4'd0, rd_cnt};
 
-	// ---- PRG0..PRG3: a ring of the last 8 SCSI register accesses -----------
+	// ---- PRG0..PRG1: a ring of the last 4 SCSI register accesses -----------
 	// PSCS/PSCW hold only the LAST access, which shows the poll but not the
-	// conversation that led to it. This keeps the last eight, newest first, so
+	// conversation that led to it. This keeps the last four, newest first, so
 	// the CDB handover, the arming writes and any status read can be read back
 	// as a sequence. Each entry is {rw, dack, reg[2:0], 3'b0, value[7:0]}.
 	// A wedged driver polls CSR/BSR thousands of times a second, so recording
-	// every access flooded the ring with eight identical poll entries and threw
-	// away the history that mattered. Filter plain CSR/BSR reads out: what is
-	// left is the CDB handover, the arming writes, and any CDR/DACK read -- the
+	// every access flooded the ring with identical poll entries and threw away
+	// the history that mattered. Filter plain CSR/BSR reads out: what is left
+	// is the CDB handover, the arming writes, and any CDR/DACK read -- the
 	// events that say how far the transaction actually got.
+	//
+	// Halved from eight entries to four to make hub-node room for PDCD/PDC2;
+	// see the ceiling note in the header.
 	wire acc_is_poll = rw_lat & ~dack_lat &
 	                   ((reg_lat == 3'd4) | (reg_lat == 3'd5));
-	reg [127:0] acc_hist;
+	reg [63:0] acc_hist;
 	always @(posedge clk)
 		if (as_rise & sel_lat & ~acc_is_poll)
-			acc_hist <= {acc_hist[111:0],
+			acc_hist <= {acc_hist[47:0],
 			             rw_lat, dack_lat, reg_lat, 3'd0,
 			             rw_lat ? din_d[15:8] : dout_d[15:8]};
 
@@ -534,6 +552,133 @@ module dbg_probes (
 		phld_r <= {hold_events, max_hold, breach_cnt};
 	end
 
+	// ---- the DCD probe (PDCD / PDC2) --------------------------------------
+	// MAC128K_PLAN.md Phase 5. HD Diag reports error $28 -- "the drive
+	// asserted /HSHK and never released it" -- and nothing in the deck could
+	// see the DCD at all, so the only tool left was the instruction-fetch
+	// sampler, which can only reach code the CPU is ALREADY wedged in. That
+	// missed the whole question of whether identification even happens: a
+	// FAILED identification is microseconds of work and is invisible at 2.5
+	// samples/sec, so the sampler's silence could never distinguish "the ROM
+	// never found us" from "it found us and the command stalled".
+	//
+	// Everything sticky here, because those events are sub-millisecond and
+	// JTAG samples land 0.4 s apart. Sticky state that is never cleared is
+	// only readable once, so PDCD's SOURCE bit is the clear: hold it high to
+	// zero the block, drop it to arm, then provoke the failure and read.
+	wire  [2:0] dcd_state   = dbg_dcd[2:0];
+	wire        dcd_sel     = dbg_dcd[3];
+	wire        dcd_hshk_n  = dbg_dcd[4];
+	wire  [2:0] dcd_rxhs    = dbg_dcd[7:5];
+	wire  [2:0] dcd_txstate = dbg_dcd[10:8];
+	wire        dcd_rxbyte  = dbg_dcd[12];
+	wire        dcd_txbyte  = dbg_dcd[13];
+	wire        dcd_rxvalid = dbg_dcd[14];
+	wire        dcd_rxbad   = dbg_dcd[15];
+	wire  [2:0] dcd_cstate  = dbg_dcd[18:16];
+	wire        dcd_present = dbg_dcd[19];
+	wire  [7:0] dcd_opcode  = dbg_dcd[27:20];
+
+	// The clear arrives from the JTAG hub, which has no defined phase relation
+	// to clk even with source_clk tied to it; two flops before anything fans
+	// out from it.
+	wire dcd_clr_src;
+	reg  dcd_clr_m = 0, dcd_clr = 0;
+	always @(posedge clk) begin
+		dcd_clr_m <= dcd_clr_src;
+		dcd_clr   <= dcd_clr_m;
+	end
+
+	reg  [7:0] dcd_states_seen = 0;   // bit n: the Mac drove state n while selected
+	reg  [7:0] dcd_last_op     = 0;
+	reg  [1:0] dcd_frames_in   = 0;   // rxValid, saturating
+	reg        dcd_st_bad      = 0;   // a frame failed its checksum
+	reg        dcd_st_abort    = 0;   // TX_WAIT gave up on an abandoned transfer
+	reg  [5:0] dcd_bytes_in    = 0;   // saturating
+	reg  [7:0] dcd_bytes_out   = 0;   // saturating
+	reg  [2:0] dcd_txmax       = 0;   // highest txState reached
+	reg  [2:0] dcd_rxhs_max    = 0;   // highest rxHs reached
+	reg [11:0] dcd_rxhs_ring   = 0;   // last 4 rxHs values, newest in [2:0]
+	reg  [2:0] dcd_rxhs_d      = 0;
+	reg  [2:0] dcd_txstate_d   = 0;
+
+	always @(posedge clk) begin
+		dcd_rxhs_d    <= dcd_rxhs;
+		dcd_txstate_d <= dcd_txstate;
+
+		if (dcd_clr) begin
+			dcd_states_seen <= 8'd0;
+			dcd_last_op     <= 8'd0;
+			dcd_frames_in   <= 2'd0;
+			dcd_st_bad      <= 1'b0;
+			dcd_st_abort    <= 1'b0;
+			dcd_bytes_in    <= 6'd0;
+			dcd_bytes_out   <= 8'd0;
+			dcd_txmax       <= 3'd0;
+			dcd_rxhs_max    <= 3'd0;
+			dcd_rxhs_ring   <= 12'd0;
+		end
+		else begin
+			// State 5 is the discriminator that says a DCD and not a Sony
+			// answered, so "did the Mac ever drive it" is the identification
+			// question stated as one bit. The intermediate values it passes
+			// through on the way are recorded too and are not noise -- the Mac
+			// changes one phase line at a time, so their presence is what says
+			// it was walking the ID states rather than sitting still.
+			if (dcd_sel) dcd_states_seen[dcd_state] <= 1'b1;
+
+			if (dcd_rxvalid) begin
+				dcd_last_op <= dcd_opcode;
+				if (~&dcd_frames_in) dcd_frames_in <= dcd_frames_in + 2'd1;
+			end
+			if (dcd_rxbad) dcd_st_bad <= 1'b1;
+
+			// TX_WAIT (1) falling back to TX_IDLE (0) is the escape added in
+			// abd857c for a transfer the Mac walked away from; it is the one
+			// path in the link layer that has never run on hardware, so it
+			// gets its own bit rather than being inferred from txmax.
+			if (dcd_txstate == 3'd0 && dcd_txstate_d == 3'd1) dcd_st_abort <= 1'b1;
+
+			if (dcd_rxbyte && ~&dcd_bytes_in)  dcd_bytes_in  <= dcd_bytes_in  + 6'd1;
+			if (dcd_txbyte && ~&dcd_bytes_out) dcd_bytes_out <= dcd_bytes_out + 8'd1;
+
+			// Both FSMs advance monotonically through one exchange, so the
+			// high-water mark says how far it got without needing a ring:
+			// txState 1 = asked for the bus and waited, 2 = sent the sync,
+			// 3 = sent data, 5 = finished. rxHs 2 = /HSHK asserted for a
+			// receive, 3 = the Mac reached data mode, 4 = it took the reply.
+			if (dcd_txstate > dcd_txmax)  dcd_txmax    <= dcd_txstate;
+			if (dcd_rxhs    > dcd_rxhs_max) dcd_rxhs_max <= dcd_rxhs;
+
+			// rxHs rather than the raw phase lines, because rxHs is already
+			// the debounced reading of them: a ring of raw states would fill
+			// with the one-line-at-a-time intermediates and show nothing.
+			if (dcd_rxhs != dcd_rxhs_d) dcd_rxhs_ring <= {dcd_rxhs_ring[8:0], dcd_rxhs};
+		end
+	end
+
+	// PDCD packing, mirrored in scripts/read_probes.tcl and sim/tb_dbg_probes.v:
+	//   [31:24] states the Mac drove (bit n = state n)   [23:16] last opcode
+	//   [15:13] rxHs now    [12:10] txState now    [9:7] command FSM now
+	//   [6]     /HSHK now (1 = de-asserted)
+	//   [5]     present     [4]     selected now
+	//   [3:2]   commands decoded (saturating at 3)
+	//   [1]     a bad checksum was seen   [0] a reply was abandoned in TX_WAIT
+	reg [31:0] pdcd_r, pdc2_r;
+	always @(posedge clk) begin
+		pdcd_r <= {dcd_states_seen, dcd_last_op,
+		           dcd_rxhs, dcd_txstate, dcd_cstate,
+		           dcd_hshk_n, dcd_present, dcd_sel,
+		           dcd_frames_in, dcd_st_bad, dcd_st_abort};
+		// PDC2:
+		//   [31:24] bytes sent to the Mac (sat 255)
+		//   [23:18] bytes taken from the Mac (sat 63 -- a command frame is 11)
+		//   [17:15] highest txState reached  [14:12] highest rxHs reached
+		//   [11:0]  the last 4 rxHs values, newest in [2:0]
+		pdc2_r <= {dcd_bytes_out, dcd_bytes_in,
+		           dcd_txmax, dcd_rxhs_max, dcd_rxhs_ring};
+	end
+
 	// ---- which bitstream is this? -----------------------------------------
 	// rtl/build_tag.v is regenerated from the git SHA before every compile, so
 	// a capture names the build it came from. Two RTL fixes once produced
@@ -581,14 +726,6 @@ module dbg_probes (
 		.instance_id ("PRG1"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
 	) cp_prg1 (.probe(acc_hist[63:32]),  .source(), .source_clk(clk), .source_ena(1'b1));
-	altsource_probe #(
-		.instance_id ("PRG2"), .probe_width (32), .source_width (1),
-		.sld_auto_instance_index ("YES")
-	) cp_prg2 (.probe(acc_hist[95:64]),  .source(), .source_clk(clk), .source_ena(1'b1));
-	altsource_probe #(
-		.instance_id ("PRG3"), .probe_width (32), .source_width (1),
-		.sld_auto_instance_index ("YES")
-	) cp_prg3 (.probe(acc_hist[127:96]), .source(), .source_clk(clk), .source_ena(1'b1));
 
 	altsource_probe #(
 		.instance_id ("PIOS"), .probe_width (32), .source_width (1),
@@ -633,12 +770,27 @@ module dbg_probes (
 		.sld_auto_instance_index ("YES")
 	) cp_pdm3 (.probe(pdm3_r), .source(), .source_clk(clk), .source_ena(1'b1));
 
-	// 20th instance, which is the ceiling noted above -- nothing further can
-	// be added without pruning one of the SCSI probes first.
 	altsource_probe #(
 		.instance_id ("PFLP"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
 	) cp_pflp (.probe(dbg_floppy), .source(), .source_clk(clk), .source_ena(1'b1));
+
+	// The only probe in the deck whose SOURCE is connected: PDCD's clear. Hold
+	// it high to zero every sticky bit and counter in the DCD block, drop it to
+	// arm, then provoke the failure. Without it the deck is readable once per
+	// power cycle, which is no use at all for a fault that has to be triggered
+	// deliberately from HD Diag.
+	altsource_probe #(
+		.instance_id ("PDCD"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_pdcd (.probe(pdcd_r), .source(dcd_clr_src), .source_clk(clk), .source_ena(1'b1));
+
+	// 20th instance, which is the ceiling noted at the top -- nothing further
+	// can be added without pruning something else first.
+	altsource_probe #(
+		.instance_id ("PDC2"), .probe_width (32), .source_width (1),
+		.sld_auto_instance_index ("YES")
+	) cp_pdc2 (.probe(pdc2_r), .source(), .source_clk(clk), .source_ena(1'b1));
 
 	altsource_probe #(
 		.instance_id ("PBLD"), .probe_width (32), .source_width (1),

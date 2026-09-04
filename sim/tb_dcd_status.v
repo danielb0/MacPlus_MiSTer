@@ -58,6 +58,8 @@ module tb_dcd_status;
 	integer pass = 0;
 	integer fail = 0;
 
+	wire [31:0] dbg_dcd;
+
 	dcd dut (
 		.clk(clk), .cep(1'b1), .cen(1'b1),
 		._reset(_reset),
@@ -67,7 +69,8 @@ module tb_dcd_status;
 		.sd_lba(sd_lba), .sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack(1'b0),
 		.sd_buff_addr(8'd0), .sd_buff_dout(16'd0),
 		.sd_buff_din(sd_buff_din), .sd_buff_wr(1'b0),
-		.img_mounted(img_mounted), .img_size(img_size), .img_readonly(img_readonly)
+		.img_mounted(img_mounted), .img_size(img_size), .img_readonly(img_readonly),
+		.dbg_dcd(dbg_dcd)
 	);
 
 	task mount;
@@ -481,6 +484,78 @@ module tb_dcd_status;
 		for (i = 0; i < 343; i = i + 1) sum = sum + rsp[i];
 		check("and a command after the reset still answers correctly",
 		      (sum === 8'h00) && (rsp[0] === 8'h83));
+		setState(3'd3);
+		repeat (4) @(posedge clk);
+
+		// ---- the JTAG telemetry word ---------------------------------------
+		// sim/tb_dbg_probes.v proves the probe deck COUNTS correctly. This
+		// proves rtl/dcd.v packs the word the way the deck unpacks it, which is
+		// a separate claim: the deck reads the fields by hard-coded index and
+		// this module writes them as one concatenation, so a slip on either
+		// side is invisible to both benches on its own.
+		//
+		// The indices below are copied from dbg_probes.sv's wire aliases, NOT
+		// from the concatenation in rtl/dcd.v. Sampled mid-reply, because at
+		// rest every field is zero and any offset passes.
+		//
+		// TWO sample points, and the second is not redundant. Mid-reply the
+		// drive has cleared rxHs to IDLE and pulled /HSHK low, so those two
+		// fields read 0 and 0 -- swap them in the packing and every assertion
+		// below still passes. A mutation sweep found exactly that. So walk the
+		// RECEIVE handshake first, where rxHs is non-zero and /HSHK moves.
+		setState(3'd2); repeat (4) @(posedge clk); #1;
+		setState(3'd3);
+		hsWait = 0;
+		while (readData[7] !== 1'b0 && hsWait < 8000) begin
+			@(posedge clk); hsWait = hsWait + 1;
+		end
+		#1;
+		check("telemetry: rxHs reads READY while the drive is ready to receive",
+		      dbg_dcd[7:5] === dut.link.rxHs && dbg_dcd[7:5] === 3'd2);
+		check("telemetry: /HSHK reads asserted beside a non-zero rxHs",
+		      dbg_dcd[4] === 1'b0);
+		setState(3'd1); repeat (4) @(posedge clk); #1;
+		setState(3'd3);
+		hsWait = 0;
+		while (readData[7] !== 1'b1 && hsWait < 8000) begin
+			@(posedge clk); hsWait = hsWait + 1;
+		end
+		#1;
+		check("telemetry: rxHs reads DONE once the Mac has finished sending",
+		      dbg_dcd[7:5] === dut.link.rxHs && dbg_dcd[7:5] === 3'd4);
+		check("telemetry: /HSHK reads released beside rxHs = DONE",
+		      dbg_dcd[4] === 1'b1);
+		setState(3'd2); repeat (4) @(posedge clk); #1;
+
+		sendCommand(8'h03, STATUS_LEN);
+		setState(3'd2);
+		hsWait = 0;
+		while (readData[7] !== 1'b0 && hsWait < 8000) begin
+			@(posedge clk); hsWait = hsWait + 1;
+		end
+		setState(3'd3); @(posedge clk); #1;
+		setState(3'd1);
+		getByte(sync);
+		#1;
+		check("telemetry: the phase field is the state the Mac is driving",
+		      dbg_dcd[2:0] === {ca2, ca1, ca0});
+		check("telemetry: selected",  dbg_dcd[3]  === 1'b1);
+		check("telemetry: /HSHK",     dbg_dcd[4]  === dut.link.hshk_n);
+		check("telemetry: rxHs",      dbg_dcd[7:5]   === dut.link.rxHs);
+		check("telemetry: txState",   dbg_dcd[10:8]  === dut.link.txState);
+		check("telemetry: txBusy",    dbg_dcd[11]    === dut.link.txBusy);
+		check("telemetry: command FSM state",
+		      dbg_dcd[18:16] === dut.cstate);
+		check("telemetry: present",   dbg_dcd[19]    === dut.present);
+		check("telemetry: the opcode of the frame in rxBuf",
+		      dbg_dcd[27:20] === 8'h03);
+		// The offset guard. Three fields that happen to hold the same value
+		// would let an index slip through every check above.
+		check("telemetry: fields differ here, so an index slip cannot pass",
+		      (dbg_dcd[10:8] !== dbg_dcd[7:5]) &&
+		      (dbg_dcd[18:16] !== dbg_dcd[10:8]) &&
+		      (dbg_dcd[2:0] !== dbg_dcd[7:5]));
+		recvGroups(49);
 		setState(3'd3);
 		repeat (4) @(posedge clk);
 

@@ -2,6 +2,14 @@
 #
 #   quartus_stp -t scripts/read_probes.tcl          one sample, decoded
 #   quartus_stp -t scripts/read_probes.tcl 20 0.5   20 samples, 0.5 s apart
+#   quartus_stp -t scripts/read_probes.tcl 20 0.5 clear
+#                                                   zero PDCD's sticky fields
+#                                                   first, then sample
+#
+# `clear` matters for the DCD probe and nothing else. PDCD/PDC2 are sticky by
+# design -- the events they record are sub-millisecond and JTAG samples land
+# 0.4 s apart -- and sticky state that cannot be zeroed is readable once per
+# power cycle. Clear, then provoke the fault from HD Diag, then read.
 #
 # Sample REPEATEDLY while the Mac is wedged. A single sample says where the CPU
 # is; a series says whether it is looping (PIFA fetch count advancing, address
@@ -14,8 +22,13 @@ array set ipairs {}
 array set absent {}
 set samples 1
 set delay   0.5
-if {$argc >= 1} { set samples [lindex $argv 0] }
-if {$argc >= 2} { set delay   [lindex $argv 1] }
+set do_clear 0
+set posargs {}
+foreach a $argv {
+	if {[string equal -nocase $a "clear"]} { set do_clear 1 } else { lappend posargs $a }
+}
+if {[llength $posargs] >= 1} { set samples [lindex $posargs 0] }
+if {[llength $posargs] >= 2} { set delay   [lindex $posargs 1] }
 
 # ---- find the board -------------------------------------------------------
 # The DE10-Nano's on-board blaster enumerates as "DE-SoC [USB-n]", NOT as
@@ -74,6 +87,21 @@ puts ""
 
 # One session for the whole run, rather than one per probe read.
 start_insystem_source_probe -hardware_name $hw -device_name $dev
+
+# PDCD's source is the only one connected anywhere in the deck: hold it high to
+# zero every sticky field and counter in the DCD block, then drop it to arm.
+if {$do_clear} {
+	if {[info exists idx(PDCD)]} {
+		write_source_data -instance_index $idx(PDCD) -value 1
+		after 100
+		write_source_data -instance_index $idx(PDCD) -value 0
+		puts "PDCD cleared and armed -- provoke the fault NOW, then read."
+		puts ""
+	} else {
+		puts "WARNING: `clear` was asked for, but this bitstream carries no PDCD."
+		puts ""
+	}
+}
 
 # A probe that is NOT in the running bitstream must never be reported as data.
 # It used to return 0, and every field derived from it printed as a confident
@@ -184,6 +212,86 @@ for {set n 0} {$n < $samples} {incr n} {
 		set absent(PFLP) 1
 		puts "  PFLP  ABSENT from this bitstream -- predates the floppy telemetry probe."
 	}
+	# PDCD/PDC2: the DCD (Apple HD20) link. Packing mirrors rtl/dbg_probes.sv;
+	# keep the two in step. Every field but the four marked "now" is sticky and
+	# survives until the next `clear`.
+	if {[have PDCD]} {
+		set pdcd [b2i [rd PDCD]]
+		set pdc2 [b2i [rd PDC2]]
+		set d_seen  [expr {($pdcd >> 24) & 0xFF}]
+		set d_op    [expr {($pdcd >> 16) & 0xFF}]
+		set d_rxhs  [expr {($pdcd >> 13) & 0x7}]
+		set d_txst  [expr {($pdcd >> 10) & 0x7}]
+		set d_cst   [expr {($pdcd >>  7) & 0x7}]
+		set d_hshk  [expr {($pdcd >>  6) & 0x1}]
+		set d_pres  [expr {($pdcd >>  5) & 0x1}]
+		set d_sel   [expr {($pdcd >>  4) & 0x1}]
+		set d_cmds  [expr {($pdcd >>  2) & 0x3}]
+		set d_bad   [expr {($pdcd >>  1) & 0x1}]
+		set d_abort [expr { $pdcd        & 0x1}]
+		set d_txout [expr {($pdc2 >> 24) & 0xFF}]
+		set d_rxin  [expr {($pdc2 >> 18) & 0x3F}]
+		set d_txmax [expr {($pdc2 >> 15) & 0x7}]
+		set d_hsmax [expr {($pdc2 >> 12) & 0x7}]
+		set d_ring  [expr { $pdc2        & 0xFFF}]
+
+		set rxhsname {IDLE ARMED READY DATA DONE ?5 ?6 ?7}
+		set txstname {TX_IDLE TX_WAIT TX_SYNC TX_DATA TX_LSB TX_END ?6 ?7}
+		set cstname  {C_IDLE C_FETCH C_FETCH_GO C_WAIT C_SEND C_SENDING ?6 ?7}
+
+		set states ""
+		for {set b 0} {$b < 8} {incr b} {
+			if {($d_seen >> $b) & 1} { append states "$b " }
+		}
+		if {$states eq ""} { set states "NONE" }
+
+		puts [format "  PDCD  DCD: present=%d selected=%d /HSHK=%s  commands=%s  last op=\$%02X" \
+		             $d_pres $d_sel [expr {$d_hshk ? "released" : "ASSERTED"}] \
+		             [expr {$d_cmds >= 3 ? "3+" : $d_cmds}] $d_op]
+		puts [format "  PDCD  phase states the Mac drove: %s" $states]
+		puts [format "  PDCD  now: rxHs=%-6s txState=%-8s cmdFSM=%s" \
+		             [lindex $rxhsname $d_rxhs] [lindex $txstname $d_txst] \
+		             [lindex $cstname $d_cst]]
+		puts [format "  PDCD  sticky: bad-checksum=%d  reply-abandoned-in-TX_WAIT=%d" \
+		             $d_bad $d_abort]
+		puts [format "  PDC2  bytes: Mac->drive %s   drive->Mac %s" \
+		             [expr {$d_rxin  >= 63  ? "63+ (SAT)"  : $d_rxin}] \
+		             [expr {$d_txout >= 255 ? "255+ (SAT)" : $d_txout}]]
+		puts [format "  PDC2  furthest reached: txState=%s  rxHs=%s" \
+		             [lindex $txstname $d_txmax] [lindex $rxhsname $d_hsmax]]
+		set ringstr ""
+		for {set s 0} {$s < 4} {incr s} {
+			append ringstr "[lindex $rxhsname [expr {($d_ring >> (3 * $s)) & 0x7}]] "
+		}
+		puts [format "  PDC2  handshake ring (newest first): %s" $ringstr]
+
+		# The verdict. Each line rules out one of the readings that the
+		# instruction-fetch sampler could not separate -- see MAC128K_PLAN.md,
+		# "the /HSHK bug", on why a boot capture's silence proved nothing.
+		if {!$d_pres} {
+			puts "  PDCD  >> no DCD image is MOUNTED. Nothing below this line means anything."
+		} elseif {!(($d_seen >> 5) & 1)} {
+			puts "  PDCD  >> the Mac NEVER drove state 5, so it has not tried to identify a DCD at all."
+		} elseif {$d_cmds == 0 && $d_rxin == 0} {
+			puts "  PDCD  >> identification was probed, but NO command ever arrived: the ROM looked and moved on."
+		} elseif {$d_cmds == 0 && $d_rxin > 0} {
+			puts "  PDCD  >> bytes arrived but no frame ever decoded -- framing or checksum, not identification."
+		} elseif {!$d_hshk && $d_txst == 1} {
+			puts "  PDCD  >> THE \$28 WEDGE: /HSHK is ASSERTED with a reply parked in TX_WAIT."
+			puts "  PDCD     The drive asked for the bus and the Mac never came round to state 1."
+		} elseif {!$d_hshk && $d_rxhs == 2} {
+			puts "  PDCD  >> /HSHK is ASSERTED waiting to RECEIVE: the Mac reached state 3 and stopped."
+		} elseif {$d_abort} {
+			puts "  PDCD  >> a reply was abandoned in TX_WAIT. The escape fired, so the drive did NOT wedge --"
+			puts "  PDCD     but the Mac walked away mid-exchange and the reason for that is upstream."
+		} else {
+			puts [format "  PDCD  >> %d command(s) decoded and %s bytes sent back; no wedge visible in this capture." \
+			             $d_cmds [expr {$d_txout >= 255 ? "255+" : $d_txout}]]
+		}
+	} else {
+		set absent(PDCD) 1
+		puts "  PDCD  ABSENT from this bitstream -- predates the DCD probe."
+	}
 	puts [format "  PACT  bus cycles %d" $pact]
 	puts [format "  PSCS  last READ  reg=%-12s val=%02X  (reads:%d)" \
 	             [selstr $rd_sel r] $rd_val $rd_cnt]
@@ -230,8 +338,8 @@ for {set n 0} {$n < $samples} {incr n} {
 	if {$phld_breach != 0} { set s_breach "$phld_breach <<< FRONTIER BREACHED" }
 	puts [format "  PHLD  cpu hold-off: holds=%-12s longest=%-18s breaches=%s" $s_holds $s_max $s_breach]
 	# The access ring, newest first. Entry = {rw,dack,reg,3'b0,val}.
-	puts [format "  PRG   recent non-poll SCSI accesses (newest first); DACK reads so far: %d" [expr {($pscs >> 8) & 0xf}]]
-	foreach pr {PRG0 PRG1 PRG2 PRG3} {
+	puts [format "  PRG   last 4 non-poll SCSI accesses (newest first); DACK reads so far: %d" [expr {($pscs >> 8) & 0xf}]]
+	foreach pr {PRG0 PRG1} {
 		set w [b2i [rd $pr]]
 		foreach half {0 16} {
 			set e [expr {($w >> $half) & 0xffff}]

@@ -3148,6 +3148,129 @@ every command: link 42/42, status 46/46, read 34/34, and the handshake mutation
 sweep kills 8 of 8.
 
 
+### The `PDCD` probe, built and gated (2026-09-04)
+
+**The escalation above is now in the tree. Nothing is compiled: the RTL,
+the reader and all six benches are green under iverilog and tclsh, and the
+Quartus compile is the next step and has not been taken.**
+
+**WHY A PROBE AND NOT MORE SAMPLING.** The instruction-fetch sampler can only
+reach code the CPU is already wedged in, so it can say "HD Diag is spinning on
+the IWM sense register" and nothing whatever about whether the ROM ever
+identified a DCD in the first place. That question -- did the Mac drive state
+5, and did a command follow -- is microseconds of work at boot and invisible at
+2.5 samples/sec. **Probe the device, not the CPU.**
+
+**THE SHAPE.** `rtl/dcd_link.v` and `rtl/dcd.v` export one 32-bit word of
+LIVE RAW STATE, `dbg_dcd`, threaded up through `iwm.v` ->
+`dataController_top.sv` -> `MacPlus.sv` to the deck. Every counter, sticky bit
+and epoch lives in `rtl/dbg_probes.sv`. That is the same division `scsi_dbg`
+already uses and it is not decoration: a module under observation that grows
+logic only an instrument reads has to be maintained and proven twice, and the
+clear can then stay in the deck instead of being threaded back down.
+
+```
+  dbg_link (rtl/dcd_link.v)          dbg_dcd (rtl/dcd.v)
+  [2:0]  {ca2,ca1,ca0}, raw          [15:0]  dbg_link
+  [3]    selected                    [18:16] cstate
+  [4]    /HSHK  1 = de-asserted      [19]    present
+  [7:5]  rxHs                        [27:20] opcode of the frame in rxBuf
+  [10:8] txState                     [28]    txReq
+  [11]   txBusy                      [29]    disk busy
+  [12]   byte taken from the Mac     [30]    disk err
+  [13]   newByteReady                [31]    dcdReset
+  [14]   rxValid   [15] rxBad
+```
+
+```
+  PDCD                                PDC2
+  [31:24] phase states seen (sticky)  [31:24] bytes out, saturating
+  [23:16] last DECODED opcode         [23:18] bytes in, saturating
+  [15:13] rxHs now                    [17:15] txState high-water
+  [12:10] txState now                 [14:12] rxHs high-water
+  [9:7]   command FSM now             [11:0]  last 4 rxHs, newest in [2:0]
+  [6]     /HSHK now
+  [5]     present    [4] selected
+  [3:2]   commands decoded, sat 3
+  [1]     bad checksum (sticky)
+  [0]     reply abandoned in TX_WAIT
+```
+
+**THE CLEAR, and why it is not optional.** Every interesting field is sticky,
+because the events are sub-millisecond and JTAG samples land 0.4 s apart. Sticky
+state that cannot be zeroed is readable ONCE PER POWER CYCLE, which is useless
+for a fault you have to provoke deliberately from HD Diag. So `PDCD`'s SOURCE is
+wired -- the only connected source anywhere in the deck -- and
+`scripts/read_probes.tcl` takes a `clear` argument:
+
+```
+quartus_stp -t scripts/read_probes.tcl 20 0.5 clear
+```
+
+Hold high to zero the block, drop to arm, provoke the fault, read.
+
+**THE VERDICT LINES, which are the point.** Each rules out one reading that the
+sampler could not separate, in order: no image mounted / the Mac never drove
+state 5 / identified but no command arrived / bytes arrived but nothing decoded
+/ **the $28 wedge: /HSHK asserted with a reply parked in TX_WAIT** / /HSHK
+asserted waiting to receive / a reply abandoned by `abd857c`'s escape / no wedge
+visible. A verdict that fires on the wrong capture is worse than no verdict at
+all, because it reads as an answer -- so each branch has its own test.
+
+**THE PRUNE.** The deck was AT the ~20 hub-node ceiling MacLC measured, above
+which the name table reads back corrupted. Two came in, so `PRG2` and `PRG3`
+went out and the SCSI access ring is 4 entries rather than 8. That is the only
+thing here that degrades gracefully, and the SCSI wedge it was built for is
+closed. `read_probes.tcl` and the reader tests follow.
+
+**GATES.** `tb_dcd_link` 45/45, `tb_dcd_status` 69/69, `tb_dcd_read` 40/40,
+`tb_dcd_disk` 37/37, `tb_dbg_probes` 66/66, `test_read_probes` 45/45. Three
+mutation sweeps, 26 mutants, all caught:
+
+| sweep | what it mutates | mutants |
+|---|---|---|
+| deck logic | the counting, stickies and clear in `dbg_probes.sv` | 12 |
+| packing | the concatenations in `dcd.v` / `dcd_link.v` | 6 |
+| reader | the field slices and verdict branches in the Tcl | 8 |
+
+**AND THE BENCH GAP, FOR THE FOURTH, FIFTH AND SIXTH TIME IN THIS PHASE.** All
+three sweeps found holes that inspection had not, and every one is the same
+shape -- **a test whose distinguishing values happen to be equal**:
+
+- Mid-reply the drive clears `rxHs` to IDLE and pulls `/HSHK` low, so both read
+  0. **Swap them in the packing and every assertion still passed.** Fixed by
+  sampling the RECEIVE handshake as well, where `rxHs` is 2 or 4 and `/HSHK`
+  moves.
+- `present` and `selected` moved together everywhere, in BOTH the RTL bench and
+  the reader test. A mounted-but-idle drive is the resting state of a real
+  machine and neither bench had one.
+- The opcode never changed without an accompanying `rxValid`, so latching it
+  continuously passed. It must not: `rxBuf` fills byte by byte, so between
+  frames that field is part of a command that has not been checksummed, and a
+  capture would report it as "the last command" -- a plausible number that is
+  pure fiction, which is the exact failure this deck exists to prevent.
+- The `$28` verdict fired on any non-idle `txState` and nothing caught it: a
+  reply IN FLIGHT also holds `/HSHK` low and is perfectly healthy, and no
+  capture in the test had one. A 392-byte Status frame is most of a millisecond
+  and samples land 0.4 s apart, so that is not a corner case.
+- Neither byte counter was ever pushed past its width, so wrapping passed. The
+  outbound one is 8 bits against a 392-byte reply, so it saturates in ORDINARY
+  use -- which makes a wrap there more misleading than on the inbound side, not
+  less.
+
+**ONE PRE-EXISTING BREAK FOUND AND FIXED.** `sim/test_read_probes.tcl` was
+already failing 1 of 26 before any of this work: `PFLP` and `PHLD` had been
+added to the deck without being added to the test's "complete bitstream" list,
+so the no-banner assertion failed against a correct reader. **A broken gate
+reads exactly like a broken script**, and this one had been red long enough to
+stop being noticed.
+
+**NEXT: the compile, then hardware.** The order is unchanged -- `clear`, boot
+with the HD20 mounted, read; then `clear`, run HD Diag, read. The first capture
+answers whether boot-time identification happens at all, which is the question
+that has been open since the handshake fix.
+
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`

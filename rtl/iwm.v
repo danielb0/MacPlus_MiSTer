@@ -92,6 +92,9 @@ module iwm
 	input         dcd_img_mounted,
 	input  [63:0] dcd_img_size,
 	input         dcd_img_readonly,
+	// JTAG telemetry from the DCD, decoded by rtl/dbg_probes.sv as PDCD/PDC2.
+	// Bit assignments live in rtl/dcd.v and rtl/dcd_link.v.
+	output [31:0] dbg_dcd,
 
 	// SD persistence tap (Phase 4), per drive - see floppy.v's dskCommit* ports
 	output        dskCommitDoneInt,
@@ -286,7 +289,8 @@ module iwm
 		.img_mounted(dcd_img_mounted),
 		.img_size(dcd_img_size),
 		.img_readonly(dcd_img_readonly),
-		.present(dcdPresent)
+		.present(dcdPresent),
+		.dbg_dcd(dbg_dcd)
 	);
 
 	wire [7:0] readDataExtSel      = dcdPresent ? readDataDcd     : readDataExt;

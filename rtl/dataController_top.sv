@@ -149,7 +149,8 @@ module dataController_top(
 	input                   dcd_sd_buff_wr,
 	input                   dcd_img_mounted,
 	input            [63:0] dcd_img_size,
-	input                   dcd_img_readonly
+	input                   dcd_img_readonly,
+	output           [31:0] dbg_dcd  // JTAG telemetry: see rtl/dcd.v
 );
 	
 	parameter SCSI_DEVS = 2;
@@ -574,7 +575,8 @@ module dataController_top(
 		.dcd_sd_buff_wr(dcd_sd_buff_wr),
 		.dcd_img_mounted(dcd_img_mounted),
 		.dcd_img_size(dcd_img_size),
-		.dcd_img_readonly(dcd_img_readonly)
+		.dcd_img_readonly(dcd_img_readonly),
+		.dbg_dcd(dbg_dcd)
 	);
 
 	// SCC

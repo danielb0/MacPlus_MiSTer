@@ -155,7 +155,23 @@ module dcd_link
 	input       [7:0] txData,    // payload byte selected by txAddr
 	output reg  [9:0] txAddr,
 	input       [9:0] txLen,
-	output reg        txBusy
+	output reg        txBusy,
+
+	// ---- JTAG telemetry, decoded by rtl/dbg_probes.sv as PDCD/PDC2 --------
+	// LIVE RAW STATE ONLY. Every counter, sticky bit and epoch lives in the
+	// probe deck, which is the same division `scsi_dbg` already uses: a module
+	// under observation must not grow logic that only an instrument reads,
+	// because that logic then has to be maintained and proven twice.
+	//
+	//   [2:0]  {ca2,ca1,ca0} exactly as the Mac is driving it -- INCLUDING the
+	//          intermediate values, since it changes one line at a time
+	//   [3]    selected                [4]    /HSHK  (1 = de-asserted, idle)
+	//   [7:5]  rxHs                    [10:8] txState
+	//   [11]   txBusy
+	//   [12]   a byte taken from the Mac in data mode        (pulse)
+	//   [13]   newByteReady -- a byte handed to the IWM       (pulse)
+	//   [14]   rxValid                 [15]   rxBad           (pulses)
+	output     [15:0] dbg_link
 );
 
 	// The DCD sync byte. $AA in BOTH directions: the specification says writes
@@ -577,5 +593,13 @@ module dcd_link
 			end
 		end
 	end
+
+	// The one derived value the deck cannot reconstruct from the outside: a
+	// byte is only a RECEIVED byte if it arrives while we are selected and in
+	// data mode. writeReq alone also fires for the internal drive.
+	wire rxByteEvt = writeReq & selected & (state == 3'd1);
+
+	assign dbg_link = {rxBad, rxValid, newByteReady, rxByteEvt,
+	                   txBusy, txState, rxHs, hshk_n, selected, state};
 
 endmodule

@@ -100,10 +100,53 @@ module tb_dbg_probes;
 		.d1_io_wr(1'b0),
 		.scsi_dbg(scsi_dbg),
 		.scsi_hold(dut.bus_hold),
-		.scsi_breach(dut.frontier_evt)
+		.scsi_breach(dut.frontier_evt),
+		.dbg_dcd(dcd_stim)
 	);
 
 	integer fails = 0, tests = 0;
+	// ---- DCD stimulus ------------------------------------------------------
+	// rtl/dcd.v's telemetry word, driven synthetically. This bench proves the
+	// DECK -- that PDCD/PDC2 count, latch and clear what they claim -- exactly
+	// as the PHLD leg forces bus_hold rather than staging a late fill. The
+	// other half, that rtl/dcd.v packs the word the way the deck unpacks it, is
+	// asserted in sim/tb_dcd_status.v against a real exchange.
+	reg [31:0] dcd_stim = 0;
+
+	// The persistent fields. Pulses are cleared, so every level change starts
+	// from a clean word and a stale pulse cannot leak into the next step.
+	task dcd_lvl(input [2:0] st, input sel, input hshkn, input [2:0] rxhs,
+	             input [2:0] txst, input [2:0] cst, input pres, input [7:0] op);
+		begin
+			@(negedge clk);
+			dcd_stim         = 32'd0;
+			dcd_stim[2:0]    = st;
+			dcd_stim[3]      = sel;
+			dcd_stim[4]      = hshkn;
+			dcd_stim[7:5]    = rxhs;
+			dcd_stim[10:8]   = txst;
+			dcd_stim[18:16]  = cst;
+			dcd_stim[19]     = pres;
+			dcd_stim[27:20]  = op;
+			@(posedge clk);
+		end
+	endtask
+
+	// One clock of a pulse bit on top of whatever level is currently set.
+	// Driven from negedge to negedge so it spans exactly one posedge -- the
+	// same rule the frontier-breach force below follows, and for the same
+	// reason.
+	task dcd_pulse(input integer b);
+		begin
+			@(negedge clk); dcd_stim[b] = 1'b1;
+			@(negedge clk); dcd_stim[b] = 1'b0;
+		end
+	endtask
+
+	// The deck registers its stickies on one clock and pdcd_r/pdc2_r on the
+	// next, so a capture needs two edges to be true. Three, to be sure.
+	task dcd_settle; begin repeat (3) @(posedge clk); end endtask
+
 	task ok(input [800:0] name, input cond);
 		begin
 			tests = tests + 1;
@@ -455,6 +498,154 @@ module tb_dbg_probes;
 		// how a stalled disk write used to look identical to no disk IO.
 		ok("probe - and that LBA is NOT the CD probe's, which stayed put",
 		   probes.pios_r[23:0] != 24'h001234);
+
+
+		// ---- PDCD / PDC2: the DCD (HD20) link ------------------------------
+		// The deck could not see the DCD at all, so the HD20 bring-up had only
+		// the instruction-fetch sampler, which reaches code the CPU is ALREADY
+		// wedged in and nothing else. What that could never answer is whether
+		// identification happens at all: a FAILED identification is
+		// microseconds of work and invisible at 2.5 samples/sec.
+
+		// Nothing mounted. Every other field must stay still, or "no DCD" and
+		// "a DCD that did nothing" read alike -- the same trap the absent-probe
+		// handling in read_probes.tcl exists to close.
+		dcd_lvl(3'd2, 1'b0, 1'b1, 3'd0, 3'd0, 3'd0, 1'b0, 8'h00); dcd_settle;
+		ok("probe - PDCD reports no DCD present, and records no state for one",
+		   probes.pdcd_r[5] == 1'b0 && probes.pdcd_r[31:24] == 8'h00);
+
+		// Mounted but not selected -- the external port is enabled per access,
+		// so this is the ordinary resting state of a machine with an HD20
+		// attached. It is also the ONLY step that tells `present` and
+		// `selected` apart: everywhere else in this leg they move together, so
+		// without it the two bits could be swapped and every other assertion
+		// would still pass.
+		dcd_lvl(3'd2, 1'b0, 1'b1, 3'd0, 3'd0, 3'd0, 1'b1, 8'h00); dcd_settle;
+		ok("probe - PDCD tells `present` from `selected`",
+		   probes.pdcd_r[5] == 1'b1 && probes.pdcd_r[4] == 1'b0);
+		ok("probe - and a mounted-but-idle drive still records no phase state",
+		   probes.pdcd_r[31:24] == 8'h00);
+
+		// A whole healthy Status exchange, as rtl/dcd.v drives the word.
+		// Identification first: the ROM walks the ID states 7, 6, 5.
+		dcd_lvl(3'd7, 1'b1, 1'b1, 3'd0, 3'd0, 3'd0, 1'b1, 8'h00); dcd_settle;
+		dcd_lvl(3'd6, 1'b1, 1'b1, 3'd0, 3'd0, 3'd0, 1'b1, 8'h00); dcd_settle;
+		dcd_lvl(3'd5, 1'b1, 1'b1, 3'd0, 3'd0, 3'd0, 1'b1, 8'h00); dcd_settle;
+		// Then the command handshake, 2 -> 3 -> 1, with /HSHK pulled low at 3.
+		dcd_lvl(3'd2, 1'b1, 1'b1, 3'd1, 3'd0, 3'd0, 1'b1, 8'h00); dcd_settle;
+		dcd_lvl(3'd3, 1'b1, 1'b0, 3'd2, 3'd0, 3'd0, 1'b1, 8'h00); dcd_settle;
+		dcd_lvl(3'd1, 1'b1, 1'b0, 3'd3, 3'd0, 3'd0, 1'b1, 8'h03); dcd_settle;
+		repeat (11) dcd_pulse(12);          // the command frame, 11 bytes
+		dcd_pulse(14);                      // rxValid: it checksummed
+		dcd_lvl(3'd3, 1'b1, 1'b1, 3'd4, 3'd0, 3'd0, 1'b1, 8'h03); dcd_settle;
+		dcd_lvl(3'd2, 1'b1, 1'b1, 3'd0, 3'd0, 3'd0, 1'b1, 8'h03); dcd_settle;
+		// The reply: ask for the bus, sync, data, done.
+		dcd_lvl(3'd2, 1'b1, 1'b0, 3'd0, 3'd1, 3'd1, 1'b1, 8'h03); dcd_settle;
+		dcd_lvl(3'd1, 1'b1, 1'b0, 3'd0, 3'd2, 3'd1, 1'b1, 8'h03); dcd_settle;
+		dcd_lvl(3'd1, 1'b1, 1'b0, 3'd0, 3'd3, 3'd1, 1'b1, 8'h03); dcd_settle;
+		repeat (40) dcd_pulse(13);
+		dcd_lvl(3'd1, 1'b1, 1'b0, 3'd0, 3'd5, 3'd1, 1'b1, 8'h03); dcd_settle;
+		dcd_lvl(3'd2, 1'b1, 1'b1, 3'd0, 3'd0, 3'd0, 1'b1, 8'h03); dcd_settle;
+
+		// THE question the sampler could not reach. State 5 is the phase-line
+		// value a Sony answers 1 to and a DCD answers 0 to, so the Mac driving
+		// it is identification happening, stated as one bit.
+		ok("probe - PDCD saw the Mac drive state 5, the DCD discriminator",
+		   probes.pdcd_r[29] == 1'b1);
+		ok("probe - PDCD recorded every phase state the Mac drove, and no other",
+		   probes.pdcd_r[31:24] == 8'hEE);
+		ok("probe - PDCD names the opcode of the last command decoded",
+		   probes.pdcd_r[23:16] == 8'h03);
+		ok("probe - PDCD counted exactly one command",
+		   probes.pdcd_r[3:2] == 2'd1);
+		ok("probe - PDCD shows /HSHK released and both FSMs idle afterwards",
+		   probes.pdcd_r[6] == 1'b1 && probes.pdcd_r[15:13] == 3'd0
+		   && probes.pdcd_r[12:10] == 3'd0);
+		ok("probe - PDCD reports the drive present and selected",
+		   probes.pdcd_r[5] == 1'b1 && probes.pdcd_r[4] == 1'b1);
+		ok("probe - PDCD flags neither a bad frame nor an abandoned reply",
+		   probes.pdcd_r[1:0] == 2'd0);
+		ok("probe - PDC2 counted the bytes the drive sent",
+		   probes.pdc2_r[31:24] == 8'd40);
+		ok("probe - PDC2 counted the bytes the Mac sent",
+		   probes.pdc2_r[23:18] == 6'd11);
+		ok("probe - PDC2 says the reply ran all the way to TX_END",
+		   probes.pdc2_r[17:15] == 3'd5);
+		ok("probe - PDC2 says the receive handshake completed",
+		   probes.pdc2_r[14:12] == 3'd4);
+		// rxHs rather than the raw phase lines: the Mac moves one line at a
+		// time, so a ring of raw states would be full of intermediates.
+		ok("probe - PDC2's ring holds the last four handshake steps in order",
+		   probes.pdc2_r[11:0] == 12'h4E0);
+
+		// rxBuf fills byte by byte as a frame arrives, so between frames the
+		// opcode field carries part of a command that has not been checksummed
+		// yet. A deck that latched it continuously would report one of those as
+		// "the last command" -- a plausible number that is pure fiction, which
+		// is the exact failure this deck exists to avoid. Caught by mutation:
+		// every earlier step changed the opcode and pulsed rxValid together.
+		dcd_lvl(3'd1, 1'b1, 1'b0, 3'd3, 3'd0, 3'd0, 1'b1, 8'hC7); dcd_settle;
+		ok("probe - PDCD keeps the last DECODED opcode, not a part-received one",
+		   probes.pdcd_r[23:16] == 8'h03);
+
+		// The clear. Sticky state that cannot be zeroed is readable once per
+		// power cycle, which is useless for a fault that has to be provoked
+		// from HD Diag. The bench stub ties every source low, so force the net
+		// the deck reads rather than the stub's output.
+		dcd_lvl(3'd2, 1'b0, 1'b1, 3'd0, 3'd0, 3'd0, 1'b0, 8'h00); dcd_settle;
+		force probes.dcd_clr_src = 1'b1;
+		repeat (6) @(posedge clk);
+		release probes.dcd_clr_src;
+		dcd_settle;
+		ok("probe - PDCD's JTAG clear empties every sticky field",
+		   probes.pdcd_r[31:16] == 16'd0 && probes.pdcd_r[3:0] == 4'd0);
+		ok("probe - and PDC2 clears with it",
+		   probes.pdc2_r == 32'd0);
+
+		// The failure this probe was built for: HD Diag error $28, the drive
+		// asserting /HSHK and never releasing it. A reply asks for the bus and
+		// the Mac never comes round to state 1.
+		dcd_lvl(3'd2, 1'b1, 1'b1, 3'd0, 3'd0, 3'd1, 1'b1, 8'h00); dcd_settle;
+		dcd_lvl(3'd2, 1'b1, 1'b0, 3'd0, 3'd1, 3'd1, 1'b1, 8'h00); dcd_settle;
+		repeat (20) @(posedge clk);
+		ok("probe - PDCD names the $28 wedge: /HSHK low, reply parked in TX_WAIT",
+		   probes.pdcd_r[6] == 1'b0 && probes.pdcd_r[12:10] == 3'd1);
+		ok("probe - PDC2 says that reply never got past asking for the bus",
+		   probes.pdc2_r[17:15] == 3'd1 && probes.pdc2_r[31:24] == 8'd0);
+
+		// abd857c's escape out of TX_WAIT is the one path in the link layer
+		// that has never run on hardware, so it gets its own bit rather than
+		// being inferred from the high-water mark.
+		dcd_lvl(3'd7, 1'b1, 1'b1, 3'd0, 3'd0, 3'd0, 1'b1, 8'h00); dcd_settle;
+		ok("probe - PDCD flags a reply the drive abandoned in TX_WAIT",
+		   probes.pdcd_r[0] == 1'b1);
+
+		// A frame that arrives and fails its checksum is a different fault
+		// from a frame that never arrives, and must not be counted as one.
+		dcd_lvl(3'd1, 1'b1, 1'b0, 3'd3, 3'd0, 3'd0, 1'b1, 8'h00); dcd_settle;
+		dcd_pulse(15);
+		dcd_settle;
+		ok("probe - PDCD flags a frame that failed its checksum",
+		   probes.pdcd_r[1] == 1'b1);
+		ok("probe - and does NOT count that frame as a decoded command",
+		   probes.pdcd_r[3:2] == 2'd0);
+
+		// The deck's founding lesson, applied to its newest counter: a wrapping
+		// counter that reads 6 is indistinguishable from a real 6.
+		force probes.dcd_clr_src = 1'b1;
+		repeat (6) @(posedge clk);
+		release probes.dcd_clr_src;
+		dcd_lvl(3'd1, 1'b1, 1'b0, 3'd3, 3'd0, 3'd0, 1'b1, 8'h00); dcd_settle;
+		repeat (70) dcd_pulse(12);
+		repeat (300) dcd_pulse(13);
+		dcd_settle;
+		ok("probe - PDC2's inbound byte counter SATURATES rather than wrapping to 6",
+		   probes.pdc2_r[23:18] == 6'd63);
+		// The outbound one is eight bits and a Status reply is 392 bytes, so it
+		// saturates in ordinary use -- which makes wrapping there MORE likely to
+		// mislead than on the inbound side, not less.
+		ok("probe - and the outbound one saturates too, rather than wrapping to 44",
+		   probes.pdc2_r[31:24] == 8'd255);
 
 		$display("");
 		$display("PROBES: %0d of %0d failing", fails, tests);

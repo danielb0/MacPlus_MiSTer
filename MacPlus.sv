@@ -379,6 +379,7 @@ wire       machineType;
 wire [1:0] romSlot;
 wire       drive800k;
 wire [31:0] dbg_floppy;   // JTAG telemetry, see rtl/floppy.v
+wire [31:0] dbg_dcd;      // JTAG telemetry, see rtl/dcd.v
 
 mac_model mac_model
 (
@@ -854,7 +855,8 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.dcd_sd_buff_wr(sd_buff_wr),
 	.dcd_img_mounted(img_mounted[5]),
 	.dcd_img_size(img_size),
-	.dcd_img_readonly(img_readonly)
+	.dcd_img_readonly(img_readonly),
+	.dbg_dcd(dbg_dcd)
 );
 
 // sd_rd/sd_wr are consumer OUTPUTS -> hps_io INPUTS, so the SCSI 2-bit view
@@ -1215,7 +1217,8 @@ dbg_probes dbg_probes_inst
 	.scsi_dbg   ( scsi_dbg                ),
 	.scsi_hold  ( scsi_bus_hold           ),
 	.scsi_breach( scsi_frontier_evt       ),
-	.dbg_floppy ( dbg_floppy              )
+	.dbg_floppy ( dbg_floppy              ),
+	.dbg_dcd    ( dbg_dcd                 )
 );
 `endif
 

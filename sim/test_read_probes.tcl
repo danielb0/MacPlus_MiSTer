@@ -30,6 +30,7 @@ proc tobin {v} {
 proc get_hardware_names {} { return {DE-SoC [USB-1]} }
 proc get_device_names {args} { return {@1: SOCVHPS @2: 5CSEBA6(.|ES)/5CSEMA6/..} }
 proc start_insystem_source_probe {args} {}
+proc write_source_data {args} { lappend ::sourcewrites $args }
 proc end_insystem_source_probe {args} {}
 
 proc get_insystem_source_probe_instance_info {args} {
@@ -48,7 +49,7 @@ proc read_probe_data {args} {
 	return [tobin 0]
 }
 
-set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PIO3 PIO4 PDMA PDM2 PDM3 PBLD}
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PIOS PIO2 PIO3 PIO4 PHLD PDMA PDM2 PDM3 PFLP PDCD PDC2 PBLD}
 
 # ---- the capture the invisible-completion reading predicts -----------------
 # Field positions match the PDMA packing in rtl/dbg_probes.sv:
@@ -127,7 +128,7 @@ ok "armed with zero DACK reads reads back as FALSIFIED" \
 # target driving data out to the initiator, i.e. a READ, and PHASE_DATA_IN(3)
 # is a WRITE. Printing those raw names told a reader the exact opposite of what
 # the transfer was doing. Lock the direction so it cannot invert again.
-set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PIO3 PIO4 PDMA PDM2 PDM3 PBLD}
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PIOS PIO2 PIO3 PIO4 PHLD PDMA PDM2 PDM3 PFLP PDCD PDC2 PBLD}
 set probeval(PDM3) [expr {(0 << 24) | (1 << 20) | (1 << 16) | (2 << 13) | \
                           (1 << 12) | (3 << 9) | (1 << 8) | (0 << 7) | (1 << 6)}]
 set out [capture]
@@ -144,7 +145,7 @@ ok "reader calls target phase code 3 a WRITE, not DATA-IN" \
 # from a real build whose tag was never stamped. Observed on hardware
 # 2026-08-22: the board had only 14 ISSP instances (no PDM3, no PBLD) and the
 # capture claimed the driver armed in IDLE and never pumped.
-set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PDMA PDM2}
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PIOS PIO2 PDMA PDM2}
 set out [capture]
 
 ok "reader refuses to invent a PDM3 block the bitstream cannot provide" \
@@ -161,7 +162,7 @@ ok "reader still decodes the probes that ARE present" \
    [string match "*DACK reads since the DMA arm:*" $out]
 
 # ...and a complete bitstream must NOT raise the banner.
-set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PIO3 PIO4 PDMA PDM2 PDM3 PBLD}
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PIOS PIO2 PIO3 PIO4 PHLD PDMA PDM2 PDM3 PFLP PDCD PDC2 PBLD}
 set out [capture]
 ok "reader stays quiet when every probe is present" \
    [expr {![string match "*INCOMPLETE CAPTURE*" $out] &&
@@ -172,7 +173,7 @@ ok "reader stays quiet when every probe is present" \
 # observe, so every capture taken before that build lacks them. The reader must
 # say so rather than print "disk write stuck=0 lba=0" -- which reads exactly
 # like a healthy write path and would exonerate the very thing under suspicion.
-set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PDMA PDM2 PDM3 PBLD}
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PIOS PIO2 PDMA PDM2 PDM3 PBLD}
 set out [capture]
 ok "reader flags a bitstream with no write-side probes" \
    [expr {[string match "*INCOMPLETE CAPTURE*" $out] &&
@@ -181,7 +182,7 @@ ok "reader still decodes the read-side probes that ARE present" \
    [string match "*PIOS  cd fetch stuck=*" $out]
 
 # ...and with them present, the write-side line is real and the banner is quiet.
-set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PRG2 PRG3 PIOS PIO2 PIO3 PIO4 PDMA PDM2 PDM3 PBLD}
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PIOS PIO2 PIO3 PIO4 PHLD PDMA PDM2 PDM3 PFLP PDCD PDC2 PBLD}
 set probeval(PIO3) [expr {(7 << 24) | 4242}]
 set probeval(PIO4) [expr {(9 << 24) | (5 << 16) | (2 << 8) | (1 << 2) | (0 << 1) | 0}]
 set out [capture]
@@ -193,6 +194,149 @@ ok "reader shows the live write handshake bit" \
    [string match "*d0_wr=1 d0_ack=0 d1_wr=0*" $out]
 ok "reader warns that the disk ack count covers both directions" \
    [string match "*ack covers rd+wr*" $out]
+
+
+# ---- PDCD / PDC2: the DCD (HD20) link -------------------------------------
+# The deck's newest probe, and the one with a VERDICT attached, so the decode
+# has to be checked case by case: each branch rules out one of the readings the
+# instruction-fetch sampler could not separate. A verdict that fires on the
+# wrong capture is worse than none, because it reads as an answer.
+#
+# Field positions match the PDCD/PDC2 packing in rtl/dbg_probes.sv:
+#   PDCD [31:24] states seen  [23:16] last opcode  [15:13] rxHs  [12:10] txState
+#        [9:7] cmdFSM  [6] /HSHK  [5] present  [4] selected  [3:2] commands
+#        [1] bad checksum  [0] reply abandoned in TX_WAIT
+#   PDC2 [31:24] bytes out  [23:18] bytes in  [17:15] txState high-water
+#        [14:12] rxHs high-water  [11:0] rxHs ring, newest in [2:0]
+proc mkpdcd {seen op rxhs txst cst hshk pres sel cmds bad abort} {
+	return [expr {($seen << 24) | ($op << 16) | ($rxhs << 13) | ($txst << 10) | \
+	              ($cst << 7) | ($hshk << 6) | ($pres << 5) | ($sel << 4) | \
+	              ($cmds << 2) | ($bad << 1) | $abort}]
+}
+proc mkpdc2 {out in txmax hsmax ring} {
+	return [expr {($out << 24) | ($in << 18) | ($txmax << 15) | ($hsmax << 12) | $ring}]
+}
+
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PIOS PIO2 PIO3 PIO4 PHLD PDMA PDM2 PDM3 PFLP PDCD PDC2 PBLD}
+
+# A whole healthy Status exchange: the ID states walked, one command decoded,
+# 40 bytes back, /HSHK released, both FSMs home. This is the capture that must
+# NOT produce a wedge verdict.
+set probeval(PDCD) [mkpdcd 0xEE 0x03 0 0 0 1 1 1 1 0 0]
+set probeval(PDC2) [mkpdc2 40 11 5 4 0x4E0]
+set out [capture]
+ok "reader decodes the PDCD summary line" \
+   [string match {*present=1 selected=1 /HSHK=released  commands=1  last op=$03*} $out]
+ok "reader lists the phase states the Mac drove, state 5 among them" \
+   [string match "*phase states the Mac drove: 1 2 3 5 6 7*" $out]
+ok "reader decodes both byte counters, in the right direction" \
+   [string match "*bytes: Mac->drive 11   drive->Mac 40*" $out]
+ok "reader names the high-water marks of both handshake FSMs" \
+   [string match "*furthest reached: txState=TX_END  rxHs=DONE*" $out]
+ok "reader decodes the handshake ring newest-first" \
+   [string match "*handshake ring (newest first): IDLE DONE DATA READY*" $out]
+ok "a healthy capture produces NO wedge verdict" \
+   [expr {[string match "*no wedge visible in this capture*" $out] &&
+          ![string match {*THE $28 WEDGE*} $out]}]
+
+# The failure this probe was built for: /HSHK asserted with a reply parked in
+# TX_WAIT, which is what HD Diag reports as error $28.
+set probeval(PDCD) [mkpdcd 0xEE 0x03 0 1 1 0 1 1 1 0 0]
+set probeval(PDC2) [mkpdc2 0 11 1 4 0x4E0]
+set out [capture]
+ok "reader names the \$28 wedge from the capture alone" \
+   [string match {*THE $28 WEDGE: /HSHK is ASSERTED with a reply parked in TX_WAIT*} $out]
+
+# A reply IN PROGRESS also holds /HSHK low, and is perfectly healthy. Without
+# this case the verdict could fire on any non-idle txState and every other test
+# here would still pass -- which is what a mutation sweep found. Sampling
+# mid-reply is not a corner case either: a 392-byte Status frame at 2 us a bit
+# is most of a millisecond, and JTAG samples land 0.4 s apart.
+set probeval(PDCD) [mkpdcd 0xEE 0x03 0 3 0 0 1 1 1 0 0]
+set probeval(PDC2) [mkpdc2 20 11 3 4 0x4E0]
+set out [capture]
+ok "a reply in flight is NOT reported as the \$28 wedge" \
+   [expr {![string match {*THE $28 WEDGE*} $out] &&
+          [string match "*no wedge visible in this capture*" $out]}]
+
+# Mounted but not selected -- the resting state of a machine with an HD20
+# attached, and the ONLY capture that tells `present` from `selected`. Swap the
+# two slices and everything else here still passes.
+set probeval(PDCD) [mkpdcd 0x00 0x00 0 0 0 1 1 0 0 0 0]
+set probeval(PDC2) [mkpdc2 0 0 0 0 0]
+set out [capture]
+ok "reader tells `present` from `selected`" \
+   [string match "*present=1 selected=0*" $out]
+
+# The rival wedge: /HSHK asserted waiting to RECEIVE. Same stuck line, entirely
+# different cause, and the two must not print the same verdict.
+set probeval(PDCD) [mkpdcd 0x0E 0x00 2 0 0 0 1 1 0 0 0]
+set probeval(PDC2) [mkpdc2 0 0 0 2 0x010]
+set out [capture]
+ok "a receive-side stall is NOT reported as the \$28 wedge" \
+   [expr {![string match {*THE $28 WEDGE*} $out]}]
+
+# Identification never attempted. This is the question the instruction-fetch
+# sampler could not reach at all, and the whole reason PDCD exists.
+set probeval(PDCD) [mkpdcd 0x0E 0x00 0 0 0 1 1 1 0 0 0]
+set probeval(PDC2) [mkpdc2 0 0 0 0 0]
+set out [capture]
+ok "reader says so when the Mac never drove state 5" \
+   [string match "*NEVER drove state 5*" $out]
+
+# Probed, but no command followed: the ROM looked and moved on.
+set probeval(PDCD) [mkpdcd 0xEE 0x00 0 0 0 1 1 1 0 0 0]
+set out [capture]
+ok "reader separates 'identified, no command' from 'never identified'" \
+   [expr {[string match "*NO command ever arrived*" $out] &&
+          ![string match "*NEVER drove state 5*" $out]}]
+
+# Bytes arrived and nothing decoded: framing or checksum, not identification.
+set probeval(PDCD) [mkpdcd 0xEE 0x00 0 0 0 1 1 1 0 1 0]
+set probeval(PDC2) [mkpdc2 0 11 0 4 0x4E0]
+set out [capture]
+ok "reader separates a framing failure from a silent bus" \
+   [string match "*bytes arrived but no frame ever decoded*" $out]
+
+# Nothing mounted. Every other field is meaningless and the reader must say so
+# rather than narrate zeros -- the failure mode the absent-probe handling above
+# exists to close, one level in.
+set probeval(PDCD) [mkpdcd 0x00 0x00 0 0 0 1 0 0 0 0 0]
+set probeval(PDC2) [mkpdc2 0 0 0 0 0]
+set out [capture]
+ok "reader refuses to interpret a capture with no DCD mounted" \
+   [string match "*no DCD image is MOUNTED*" $out]
+
+# Saturation must read as saturation, not as a number.
+set probeval(PDCD) [mkpdcd 0xEE 0x03 0 0 0 1 1 1 3 0 0]
+set probeval(PDC2) [mkpdc2 255 63 5 4 0x4E0]
+set out [capture]
+ok "reader marks both saturated byte counters rather than printing a total" \
+   [string match "*Mac->drive 63+ (SAT)   drive->Mac 255+ (SAT)*" $out]
+
+# `clear` must actually write the source, and must say so when it cannot.
+set ::sourcewrites {}
+set argv {clear}
+set out [capture]
+set argv {}
+ok "`clear` drives PDCD's source high then low" \
+   [expr {[llength $::sourcewrites] == 2}]
+ok "and says the capture was armed" \
+   [string match "*cleared and armed*" $out]
+
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PIOS PIO2 PIO3 PIO4 PHLD PDMA PDM2 PDM3 PFLP PBLD}
+set ::sourcewrites {}
+set argv {clear}
+set out [capture]
+set argv {}
+ok "a bitstream without PDCD is declared absent, not decoded as zeros" \
+   [expr {[string match "*PDCD  ABSENT*" $out] &&
+          ![string match "*no DCD image is MOUNTED*" $out]}]
+ok "and `clear` on such a bitstream warns instead of writing a source" \
+   [expr {[llength $::sourcewrites] == 0 &&
+          [string match "*carries no PDCD*" $out]}]
+
+set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PIOS PIO2 PIO3 PIO4 PHLD PDMA PDM2 PDM3 PFLP PDCD PDC2 PBLD}
 
 puts ""
 puts "READER: $fails of $tests failing"
