@@ -2481,6 +2481,85 @@ above. **Every frame being one group was the same blindness as every volume
 being under 32 MB.** Cross the boundary deliberately, in the bench, before the
 hardware does it for you.
 
+### RTL stage 2: `rtl/dcd.v`, the Status command, 19/19 (2026-09-04)
+
+The command layer over the link layer. Status (`$03`) is implemented; MultiBlock
+Read, Write and Write-Verify need the HPS sector path and are next. Still not
+instantiated anywhere -- `MacPlus.sv`, `iwm.v`, `files.qip` and the `.qsf` are
+untouched, so no compile is implied.
+
+**THE IDENTITY BLOCK IS TAKEN FROM A REAL HD20's FIRMWARE, not reconstructed
+from the prose.** `342-0343-B.bin` holds it as a template at `$00B7`, and the
+first five fields decode exactly:
+
+| offset | field | value |
+|---|---|---|
+| 0..12 | NameString | **`'Rene-1 RM MH '`** -- 13 chars, no terminator, trailing space included |
+| 13..15 | Device_Type | **`$000210`** |
+| 16..17 | Firmware_Rev | **`$3372`** |
+| 18..20 | Capacity | `$009835` = 38,965 blocks = 20.0 MB |
+| 21..22 | Bytes_per_block | **532** |
+
+**`$3372` is what proves this is the ID block**, because the reassembly's own
+header calls itself "Rev. 3372" -- an independent label on the same number. And
+`$009835` is exactly one more than `DefsHD20.inc`'s
+`HiMaxLogical/MidMaxLogical/LoMaxLogical` = `$009834`, "highest user block", so
+capacity is a count and the block numbering is zero-based.
+
+**From byte 23 the template decodes to nonsense -- 36,657 cylinders, 16 heads,
+230 sectors -- and that is the finding, not a decode failure.** The stored
+template ENDS after `Bytes_per_block`. It has to: the firmware detects Nisha or
+Rodime from the servo response at run time, so it cannot hold fixed geometry.
+Everything from `Num_cylinders` on is filled in live.
+
+**One discrepancy, recorded not resolved:** the March document's comment says
+`{ Device code = $000110 }`; the drive sends **`$000210`**. The firmware is the
+device, so it wins here, but if a host is ever seen to reject us this is the
+first constant to try flipping.
+
+**Two deliberate choices, both stated in the module rather than defaulted into:**
+
+1. **Geometry is Rodime RO552 -- 305 cylinders, 4 heads, 32 sectors.** The
+   protocol document's example describes Nisha (610/2/32), but it is not clear
+   the HD20 ever shipped with one and production units were Rodime. Both work
+   out to 305*4*32 = 610*2*32 = **39,040** blocks, which is why the capacity
+   reconciles either way and why the host almost certainly does not care.
+   `DefsHD20.inc` carries both mechanisms' constants, which is what let this be
+   a choice rather than a guess.
+2. **Capacity is the mounted image, not the 20 MB a real unit had.** Large
+   volumes are convenience rather than accuracy, but the protocol was built for
+   them -- capacity and block number are both 24-bit -- and the ceiling is HFS,
+   not DCD.
+
+**`sim/tb_dcd_status.v`: 19/19, twelve mutants all caught.** It drives a real
+Status command onto the wire, frames it exactly as the Mac does (sync, two
+count bytes, one group with the LSB byte first), then decodes the six-group
+reply the way the ROM's receive path does and checks every field.
+
+**And the mutation sweep caught another bench gap, of exactly the kind that
+keeps recurring here.** Shortening the payload by one byte -- `txLen` 41 to 40 --
+scored a clean 19/19 at first. The reason is worth keeping: **summing to zero
+does not pin where the checksum SITS.** With the payload one short, the
+checksum lands at offset 40 and a zero pad at 41, the frame is still six whole
+groups, and the sum still closes, so every existing assertion held. The bench
+now pins all three trailing bytes -- `<pad> <pad> <CHK>` -- and the mutant
+scores 18/19.
+
+That is the third bench gap this phase found by mutation rather than by
+inspection, and all three have the same shape: **an assertion that is true for
+the right reason and also true for the wrong one.**
+
+**One mutant fails by TIMEOUT rather than assertion** -- lengthening the payload
+by a byte, which makes the reply seven groups while the bench reads six and
+then waits. Detection, but poor; the same note applies as in the link bench.
+
+**Not answered, and not answerable from this test:** whether the Mac accepts
+this identity block. Everything above is what a real drive sends, so there is
+good reason to expect it, but the only real gate is the ROM itself -- and per
+the note above, the command layer's control flow goes through runtime-installed
+dispatch vectors, so that gate is simulation against the real ROM or hardware,
+not more static reading.
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
