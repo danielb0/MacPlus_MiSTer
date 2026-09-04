@@ -1186,6 +1186,22 @@ not. This core does not emulate the floppy-port HD20, so:
 changes what "useful" means for the model -- Phase 4 removes the only mass
 storage it currently has.
 
+**A cheap second witness for the 512Ke (Daniel, 2026-09-04).** In "About the
+Finder", a 512K and a 512Ke are distinguished by a **trailing period**: `512K`
+is a 512K, `512K.` is a 512Ke. That is worth having because it is independent of
+the SCSI test -- it asks whether SOFTWARE believes it is running on a 512Ke,
+where everything else in Phase 4 only establishes that the SCSI bus is absent.
+
+**Not yet checked on our build.** The 2026-09-04 hardware run reported "512K"
+but did not record whether a period was present.
+
+**Do not read a missing period as a defect without first establishing what
+generates it.** The About box belongs to the Finder, not the ROM, so the period
+is presumably chosen by System software and may well depend on the System
+version booted as much as on the machine. Find the mechanism before drawing a
+conclusion -- this is the same trap as the yellow LED, where an indicator was
+read as evidence of something it did not actually measure.
+
 Hardware pass criteria: **a 512Ke boots from an 800K floppy** (System 3.x/4.x,
 which is what the machine shipped with and has the RAM for -- System 6 wants
 1 MB and is marginal at best on 512K), reports **512K** in "About the Finder",
