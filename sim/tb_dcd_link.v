@@ -196,8 +196,8 @@ module tb_dcd_link;
 		armRx;
 		setState(3'd1);
 		macByte(8'hAA);        // sync
-		macByte(8'h82);        // $80 | (1 group + 1)  -> 1 group from the Mac
-		macByte(8'h82);        // groups expected back
+		macByte(8'h81);        // $80 | 1 group total
+		macByte(8'h81);        // groups expected back
 		macByte(8'hD5);        // LSB byte FIRST on this direction
 		macByte(8'h98); macByte(8'h99); macByte(8'h99);
 		macByte(8'h9A); macByte(8'h9A); macByte(8'h9B); macByte(8'h9B);
@@ -229,8 +229,8 @@ module tb_dcd_link;
 		armRx;
 		setState(3'd1);
 		macByte(8'hAA);
-		macByte(8'h82);
-		macByte(8'h82);
+		macByte(8'h81);
+		macByte(8'h81);
 		// LSB byte first: bit 6 belongs to payload[0], bit 0 to payload[6].
 		macByte(8'h80 | (payload[0][0] << 6) | (payload[1][0] << 5) |
 		                (payload[2][0] << 4) | (payload[3][0] << 3) |
@@ -250,13 +250,56 @@ module tb_dcd_link;
 		// A single corrupted byte must be caught.
 		armRx;
 		setState(3'd1);
-		macByte(8'hAA); macByte(8'h82); macByte(8'h82);
+		macByte(8'hAA); macByte(8'h81); macByte(8'h81);
 		macByte(8'h80);
 		for (i = 0; i < 7; i = i + 1)
 			macByte((i == 3) ? 8'h80 | ((payload[i] ^ 8'h02) >> 1)
 			                 : 8'h80 | (payload[i] >> 1));
 		@(posedge clk); #1;
 		check("corrupted byte is rejected", sawBad === 1'b1);
+
+		// ---------------------------------------------------------------
+		// 3b. A TWO-GROUP frame
+		// ---------------------------------------------------------------
+		// Every frame above is a single group, and a single group hides an
+		// off-by-one in the group counter completely - which is exactly the
+		// bug this test was written to catch. The count byte is
+		// $80 | TOTAL groups in the transmission (the drive firmware masks it
+		// with $7F and uses it directly as a `djnz` loop count), so two
+		// groups is $82. On a real command the Mac computes it as
+		// dataGroups + $81, the +1 being the group the command itself rides
+		// in - which is why a read, carrying no data, sends $81.
+		sum = 0;
+		for (i = 0; i < 13; i = i + 1) begin
+			payload[i] = 8'h60 + i[7:0];
+			sum = sum + payload[i];
+		end
+		payload[13] = -sum;              // 14 bytes = exactly two groups
+
+		armRx;
+		setState(3'd1);
+		macByte(8'hAA);
+		macByte(8'h82);                  // $80 | 2 groups
+		macByte(8'h82);
+		for (i = 0; i < 14; i = i + 7) begin
+			macByte(8'h80 | (payload[i+0][0] << 6) | (payload[i+1][0] << 5) |
+			                (payload[i+2][0] << 4) | (payload[i+3][0] << 3) |
+			                (payload[i+4][0] << 2) | (payload[i+5][0] << 1) |
+			                 payload[i+6][0]);
+			macByte(8'h80 | (payload[i+0] >> 1)); macByte(8'h80 | (payload[i+1] >> 1));
+			macByte(8'h80 | (payload[i+2] >> 1)); macByte(8'h80 | (payload[i+3] >> 1));
+			macByte(8'h80 | (payload[i+4] >> 1)); macByte(8'h80 | (payload[i+5] >> 1));
+			macByte(8'h80 | (payload[i+6] >> 1));
+		end
+		@(posedge clk); #1;
+		check("two-group frame reports valid", sawValid === 1'b1);
+		check("two-group frame does not report bad", sawBad !== 1'b1);
+		// rxBuf only holds the first 8 bytes; that is enough to prove the
+		// second group was not dropped or the first re-decoded.
+		ok = 1;
+		for (i = 0; i < 8; i = i + 1)
+			if (rxBuf[i*8 +: 8] !== payload[i]) ok = 0;
+		check("two-group frame decodes both groups in order", ok);
 
 		// ---------------------------------------------------------------
 		// 4. Transmit: sync, then 7 data and the LSB byte LAST
@@ -371,7 +414,7 @@ module tb_dcd_link;
 		// through a group: the next command has to be decoded from scratch.
 		armRx;
 		setState(3'd1);
-		macByte(8'hAA); macByte(8'h82); macByte(8'h82);
+		macByte(8'hAA); macByte(8'h81); macByte(8'h81);
 		macByte(8'h80 | (payload[0][0] << 6) | (payload[1][0] << 5) |
 		                (payload[2][0] << 4) | (payload[3][0] << 3) |
 		                (payload[4][0] << 2) | (payload[5][0] << 1) | chk[0]);

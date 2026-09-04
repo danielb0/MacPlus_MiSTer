@@ -164,7 +164,7 @@ module dcd_link
 	reg  [2:0] rxIdx;      // position within the group, 0..7
 	reg  [7:0] rxLsb;
 	reg  [7:0] rxSum;
-	reg  [6:0] rxGroups;   // groups still to come after this one
+	reg  [6:0] rxGroups;   // groups still to come, including the current one
 	reg  [3:0] rxCount;
 
 	// LSB byte first on this direction, so index 0 is the LSB byte and
@@ -257,12 +257,19 @@ module dcd_link
 						if (writeData == SYNC) rxState <= RX_CNT1;
 
 					RX_CNT1: begin
-						// $80 | (groups + 1), recovered by masking - which is
-						// literally what the drive firmware does with $7F.
-						// rxGroups counts groups still to come INCLUDING the
-						// one about to start, so a single-group command
-						// ($82) leaves it at 1.
-						rxGroups <= writeData[6:0] - 7'd1;
+						// The count byte is $80 | TOTAL groups, where the
+						// total INCLUDES the command's own group - so a
+						// command with no data rides in one group and sends
+						// $81. That is settled from the drive firmware, which
+						// masks this byte with $7F, loads it into R10 and
+						// uses `djnz R10` directly as its group loop: the
+						// masked value IS the number of groups it receives.
+						//
+						// It was `- 7'd1` here, which is right for a
+						// single-group command and one group short for every
+						// other - invisible until the bench grew a two-group
+						// frame.
+						rxGroups <= writeData[6:0];
 						rxState  <= RX_CNT2;
 					end
 

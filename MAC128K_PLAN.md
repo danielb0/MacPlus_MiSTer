@@ -2390,6 +2390,97 @@ computes exactly 76 groups = 532. **The ROM arbitrates, per this plan's source
 hierarchy** -- but neither has been resolved yet, and the read path should not
 be built until they are.
 
+### Both length questions settled -- and the count byte finally has semantics (2026-09-04)
+
+**The answer came from the DRIVE FIRMWARE, not the ROM**, and it is exact.
+`342-0343-B.asm` masks the first count byte with `$7F` into `$52`, then:
+
+```
+ld   R10, >52h        ; the masked count byte
+...
+djnz R10, L1e53       ; ... used DIRECTLY as the group loop counter
+```
+
+**So the count byte is `$80 | the TOTAL number of groups in the transmission`,
+and the receiver simply loops that many times.** The Mac builds it as
+`dataGroups + $81`, where the `+1` is the group the command itself rides in.
+Checks out both ways: a MultiBlock Read carries no outbound data, so the Mac's
+`d6` is 0 and the byte is `$81` = one group = the command; a MultiBlock Write
+has `d6` = 532 -> 76 data groups and the byte is `$CD`, masked `$4D` = 77 = the
+command group plus 76 of data.
+
+This is the third time the firmware has answered something the Mac side could
+only hint at. It keeps earning its place as an arbiter for bounded questions.
+
+**QUESTION 1 -- the Status command is 7 BYTES, ONE GROUP.** For a Status the
+outbound data count is zero, so the count byte is `$81` and exactly one group
+goes out. The March document draws Status with **six** pad bytes, which makes 8
+and is not a whole group; Diagnostic is drawn `<$04><5-byte pad><CHK>` = 7 and
+MultiBlock Read `<$00><count><block# 3B><pad><CHK>` = 7, and the ROM's own
+command block at SonyVars+`$19C` is 6 bytes plus the checksum = 7. **Four
+converging reasons: the Status drawing has one pad too many.** Build it as
+`<$03><5 pad><CHK>`.
+
+**QUESTION 2 -- there is NO CONTRADICTION, and the error was mine.** I had set
+"the spec draws 537" against "the ROM computes 532" as if they were the same
+quantity. They are not. The ROM's 76 is the number of groups needed for the
+**532 data bytes**; the count byte then adds one for the group carrying the
+response header, giving **77 groups = 539 byte-slots**, into which the
+specification's 537-byte response (`<$80><seq><stat><532 data><pad><CHK>`) fits
+with two slots of padding. Both sources agree and neither needs correcting.
+
+That leaves the framing for the read path fully determined: **the drive replies
+with a sync and 77 groups.**
+
+**What did NOT settle, and it is flagged rather than guessed.** At `$419D2C`
+the Status path loads `move.l #$14C,d7` -- 332 -- which reconciles with a
+42-byte response under no reading I tried. Two reasons not to force it: `$19C`
+also takes the values `$19` and `$1A`, which are not DCD opcodes at all, so
+that byte is not purely an opcode; and the routine dispatches through
+`$4196AC`, which is `move.l $b44.w,-(a7); rts`.
+
+**Which is the real ceiling here: the driver dispatches through vectors
+installed in low memory at runtime** -- `$B44`, `$B48`, and `$198(a1)` -- so
+static disassembly cannot follow the command layer's control flow the way it
+followed the link layer's. The link layer was tractable because it is a
+straight-line unrolled loop; the command layer is not. **Further command-layer
+questions should be answered by simulating against the real ROM, or from the
+firmware, not by more static reading.** Note this before spending another
+session on the disassembly.
+
+### The bug this immediately found in `rtl/dcd_link.v`
+
+`rxGroups <= writeData[6:0] - 7'd1` was **one group short on every multi-group
+frame**. It is exactly right for a single-group command, which is why 30/30
+passed: every frame in the bench was one group. A write, or any read response,
+would have lost its last group and failed the checksum.
+
+Fixed to `rxGroups <= writeData[6:0]`, and the bench grew a **two-group frame**
+that catches it (the old code now scores 30/33). **33/33, ten mutants all
+caught**, including the original bug and both directions of the adjacent
+off-by-one:
+
+| mutation | score |
+|---|---|
+| the original bug (`count - 1`) | 30 |
+| `count + 1` | 23 |
+| end-of-frame test off by one | 23 |
+| ID state 5 senses 1 | 32 |
+| LSB bit order reversed | 31 |
+| checksum never rejects | 30 |
+| checksum not negated | 30 |
+| TX shift direction wrong | 28 |
+| RESET state ignored | 31 |
+| hold-off does not rewind | 31 |
+
+**The lesson is the one this project keeps relearning, in a new costume.** A
+seam that only breaks past a boundary, with nothing in the test set crossing
+it -- the same shape as the SDRAM region alias, the A17 forcing that had never
+executed, and the 16-bit block-number ceiling this plan already warns about
+above. **Every frame being one group was the same blindness as every volume
+being under 32 MB.** Cross the boundary deliberately, in the bench, before the
+hardware does it for you.
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
