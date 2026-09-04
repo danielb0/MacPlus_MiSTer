@@ -1075,6 +1075,53 @@ ROM probes. A 128K still boots System 1/2/3 from the 400K control image with
 SCSI now gated; Plus/SE unregressed, which after this phase means checking they
 still see their SCSI disks, because the bus error touches every model.
 
+## Phase 5 - HD20 / DCD, and it gates the release
+
+**Daniel's decision, 2026-09-03: "there is no point releasing a core that
+doesn't support it."** So floppy-port hard disk support is a **prerequisite for
+releasing this branch**, not an optional extra, and Phase 4's floppy-only 512Ke
+is an intermediate state rather than a shippable one.
+
+The reasoning is sound: Phase 4 gates SCSI off to make the 512Ke authentic, and
+in doing so removes the only mass storage that model has in this core. A 512Ke
+that can only use floppies is accurate to the bare machine but not to how
+anybody actually used one -- the HD20 was its hard disk.
+
+**What it is.** The Apple HD20 (Sept 1985, 20 MB) connects to the external
+floppy port using **DCD - Directly Connected Disk**, an Apple protocol that
+shares the DB-19 connector with the floppy drive but nothing else. It was the
+only drive ever to use it; SCSI arrived in 1986 and ended it.
+
+**The risk profile is the opposite of Phase 3's, and that is the thing to plan
+around.** DCD was **never publicly documented**, so unlike the spindle PWM
+there is no specification to read
+([[feedback-read-the-spec-for-historical-hardware]] does not protect us here).
+It is demonstrably reverse-engineerable -- BMOW's Floppy Emu speaks it -- but
+third-party accounts are the usual source.
+
+**The best available authority is the ROM.** The 128K ROM (`boot0.rom`,
+`4D1F8172`) contains Apple's own DCD driver: the Mac's half of the protocol,
+first-hand. Disassembling it beats inferring from someone else's black-box
+implementation, and the workflow is proven -- it produced the Sad Mac decoder
+and the exception-vector mapping during Phase 3. **First task is that
+disassembly, not RTL.**
+
+**Open questions to settle from the ROM before any design:**
+- Does an HD20 present a **bare HFS volume from block 0**, or a partitioned
+  device? Our SCSI images carry a Driver Descriptor Map (`'ER'`) plus an Apple
+  Partition Map, but both postdate the HD20 by a year, and HFS actually DEBUTED
+  on the HD20. Believed bare, **not confirmed** -- and if it is bare, existing
+  `.vhd` images are NOT reusable and an HD20 image is the simpler artefact (a
+  raw HFS volume from `hfsutils`, or formatted by the Mac itself).
+- Which models can boot it. HD20 boot support is believed to live in the 128K
+  ROM, i.e. Plus and 512Ke; the 64K-ROM machines would need the HD20 system
+  software from floppy, if at all. Confirm from the ROM.
+
+**Shape.** A new protocol engine on the external floppy port -- different
+framing and command set, sharing only the physical lines -- plus a storage
+backend and hardware bring-up. Comparable in size to the SCSI work, and it
+occupies the external drive slot alongside the internal floppy.
+
 ## Verification
 
 House ladder applies unchanged: a failing test before the fix, iverilog
