@@ -1236,11 +1236,26 @@ Distinguishing the two halves on hardware would need `$0B22` read back over
 JTAG, and it is not worth a probe deck change: the outcome is what the model
 is for, and the Plus keeping its SCSI proves the strap is not simply stuck.
 
-**STILL OUTSTANDING: the Plus/SE regression check and the 128K.** The changed
-decode branch is shared by every model, so Plus and SE must be confirmed to
-still SEE their SCSI volumes -- booting is not sufficient -- and a 128K must
-still boot the 400K control image. Until those run, Phase 4 is confirmed for
-the model it adds but not cleared for the models it could break.
+**PLUS REGRESSION PASSED 2026-09-04: the Plus still recognises its SCSI
+disks.** And the retraction above is confirmed by the same session --
+unmounting and REMOUNTING the CD in 512Ke mode does flash the yellow LED, so
+the fresh mount pulse produces the TOC fetch on the 512Ke exactly as on the
+128K. No model difference, which is what the RTL says.
+
+**The Plus/SE check was over-billed as a risk, and the algebra says why.**
+For any model with `scsiPresent = 1` the two changed conditions reduce to
+their originals: `configROMSize[1] || address[17]==0 || !scsiPresent` becomes
+`configROMSize[1] || address[17]==0`, and `address[19] && scsiPresent` becomes
+`address[19]`. The Plus and SE decode paths are BIT-IDENTICAL to before the
+change, so this test could not have failed on decode. It was still worth
+running -- it confirms the STRAP is really 1 for the Plus, i.e. that
+`mac_model` and the wiring are right -- but the phrase used at the time ("the
+one that could actually invalidate the change") was wrong. Read the changed
+expression before assigning risk to a regression test.
+
+Not separately run, and low value for the same reason: the SE (identical
+algebra to the Plus) and a fresh 128K boot of the 400K control image (the
+128K was demonstrably running during the CD tests).
 
 **Simulation status, `dcfbe62`.**
 Items 9 and 5 landed together as one strap. `sim/tb_scsi_absence.v` gates it
