@@ -1476,6 +1476,63 @@ Not release-blocking, and not the cause of the two-floppy observation. But it
 is the same class of problem as Phase 4 -- reporting a device that is not there
 -- so it should be fixed alongside the SCSI gate rather than separately.
 
+## Deferred: grey out the menu items a model cannot use
+
+**Daniel's idea, 2026-09-04, and DEFERRED ON HIS INSTRUCTION: do not spend a
+compile on this alone -- fold it into the next stage's build.** Recorded in full
+here so the OSD research is not repeated.
+
+A 128K offers Mount CD-ROM, two SCSI slots, CD Volume and a Memory option, and
+every one of them is inert on that machine. They should be greyed out.
+
+**The mechanism, confirmed from Main_MiSTer rather than inferred**
+(`menu.cpp:1958-1968`):
+
+```c
+int flg = (hdmask & (1 << user_io_hd_mask(p + 1))) ? 1 : 0;
+if (p[0] == 'H') h |= flg;         // hide when the mask bit is 1
+if (p[0] == 'h') h |= (flg ^ 1);   // hide when the mask bit is 0
+if (p[0] == 'D') d |= flg;         // GREY when the mask bit is 1
+if (p[0] == 'd') d |= (flg ^ 1);   // grey when the mask bit is 0
+```
+
+Prefixes chain (`p += 2` in a loop), the bit index is spelled like a status bit
+(`user_io_hd_mask` calls `user_io_status_bits`), and the mask arrives from the
+core on `status_menumask`, a 16-bit input on `sys/hps_io.sv:122`.
+
+**This also explains a landmine already recorded in our own CONF_STR.** The
+comment on the CD-ROM slot says an `h` prefix "hid the item outright". It would:
+lowercase `h` hides when the mask bit is ZERO, and `MacPlus.sv` does not drive
+`status_menumask` at all, so every bit is zero. The convention was never wrong;
+the mask was simply unconnected. Delete that comment when this lands.
+
+**Design:**
+
+| mask bit | meaning | greys |
+|---|---|---|
+| 0 | `~scsiPresent` | `SC0`, `SC1`, `SC4`, `OI` CD-ROM Drive, `OFG` CD Volume |
+| 1 | `ramSoldered` | `O4,Memory,1MB,4MB` |
+
+Uppercase `D0`/`D1`, so a set bit reads as "unavailable".
+
+Three decisions already taken:
+
+- **Derive the mask from `mac_model`, never from a second table in MacPlus.sv.**
+  Bit 0 is `scsiPresent` inverted; bit 1 wants one new output (`ramSoldered` --
+  the SIMM-socket fact that currently exists only as prose in that file). Two
+  independently written encodings of one fact drift apart silently, which is the
+  whole reason `rtl/rom_word_addr.v` exists.
+- **Feed it from the LIVE `status[3:1]`, not the latched `status_model`.**
+  Greying is a menu affordance, not a hardware strap, so it should follow what
+  the user just picked rather than waiting for Reset & Apply. That means a
+  second `mac_model` instance for the mask -- a five-entry combinational case,
+  a handful of LEs, and it reuses the table instead of copying it.
+- **No `v` bump.** `D` prefixes move no status bit and change no saved config.
+
+**Limit worth stating:** greying is cosmetic. It prevents a new mistake; it does
+not unmount an image a saved config already carries. The core ignores it either
+way, which is what the hardware tests showed.
+
 ## Verification
 
 House ladder applies unchanged: a failing test before the fix, iverilog
