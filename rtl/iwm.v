@@ -79,6 +79,20 @@ module iwm
 	output        dskWriteReqExt,
 	input         dskWriteAckExt,
 
+	// DCD (Apple HD20) on the external drive port - MAC128K_PLAN.md Phase 5.
+	// One hps_io block-device slot, passed straight through to rtl/dcd.v.
+	output [31:0] dcd_sd_lba,
+	output        dcd_sd_rd,
+	output        dcd_sd_wr,
+	input         dcd_sd_ack,
+	input   [7:0] dcd_sd_buff_addr,
+	input  [15:0] dcd_sd_buff_dout,
+	output [15:0] dcd_sd_buff_din,
+	input         dcd_sd_buff_wr,
+	input         dcd_img_mounted,
+	input  [63:0] dcd_img_size,
+	input         dcd_img_readonly,
+
 	// SD persistence tap (Phase 4), per drive - see floppy.v's dskCommit* ports
 	output        dskCommitDoneInt,
 	output [21:0] dskCommitAddrInt,
@@ -226,8 +240,60 @@ module iwm
 		.dskCommitBufData(dskCommitBufDataExt)
 	);
 
-	wire [7:0] readData = selectExternalDrive ? readDataExt : readDataInt;
-	wire newByteReady = selectExternalDrive ? newByteReadyExt : newByteReadyInt;
+	// ------------------------------------------------------------------
+	// DCD (Apple HD20) - MAC128K_PLAN.md Phase 5
+	// ------------------------------------------------------------------
+	// A DCD device is a PEER of floppy.v on this same byte interface: the
+	// corrected DB-19 pinout puts it on the ordinary RD/WR pins with /ENBL2 as
+	// its enable, so it hangs off the EXTERNAL drive port and only PH0-PH2 are
+	// repurposed, from a drive-register address into a handshake state bus.
+	//
+	// IT REPLACES THE EXTERNAL FLOPPY RATHER THAN CHAINING WITH IT, and only
+	// while a DCD image is mounted. A real HD20 daisy-chains a floppy behind
+	// itself (PH3 selects down the chain, which is why rtl/dcd_link.v takes
+	// lstrb at all), and we do not: mounting an HD20 here costs you the
+	// external floppy. That is the plan's stated shape - the DCD "occupies the
+	// external drive slot" - and it keeps the far more important property that
+	// with NO DCD image mounted the external port is bit-identical to what it
+	// has always been, so nothing that works today can regress.
+	wire        dcdPresent;
+	wire  [7:0] readDataDcd;
+	wire        newByteReadyDcd;
+
+	dcd dcd0
+	(
+		.clk(clk),
+		.cep(cep),
+		.cen(cen),
+		._reset(_reset),
+		.ca0(ca0),
+		.ca1(ca1),
+		.ca2(ca2),
+		.lstrb(lstrb),
+		._enable(~diskEnableExt),
+		.writeData(dataIn[7:0]),
+		.writeReq(writeReqExt),
+		.readData(readDataDcd),
+		.newByteReady(newByteReadyDcd),
+		.sd_lba(dcd_sd_lba),
+		.sd_rd(dcd_sd_rd),
+		.sd_wr(dcd_sd_wr),
+		.sd_ack(dcd_sd_ack),
+		.sd_buff_addr(dcd_sd_buff_addr),
+		.sd_buff_dout(dcd_sd_buff_dout),
+		.sd_buff_din(dcd_sd_buff_din),
+		.sd_buff_wr(dcd_sd_buff_wr),
+		.img_mounted(dcd_img_mounted),
+		.img_size(dcd_img_size),
+		.img_readonly(dcd_img_readonly),
+		.present(dcdPresent)
+	);
+
+	wire [7:0] readDataExtSel      = dcdPresent ? readDataDcd     : readDataExt;
+	wire       newByteReadyExtSel  = dcdPresent ? newByteReadyDcd : newByteReadyExt;
+
+	wire [7:0] readData = selectExternalDrive ? readDataExtSel : readDataInt;
+	wire newByteReady = selectExternalDrive ? newByteReadyExtSel : newByteReadyInt;
 	
 	// NOTE: iwmMode is DEAD - it is written below and read back in the status
 	// register, but no bit of it affects behaviour anywhere. In particular

@@ -18,6 +18,9 @@ set_global_assignment -name VERILOG_FILE rtl/scc.v
 set_global_assignment -name VERILOG_FILE rtl/uart/txuart.v
 set_global_assignment -name VERILOG_FILE rtl/uart/rxuart.v
 set_global_assignment -name VERILOG_FILE rtl/iwm.v
+set_global_assignment -name VERILOG_FILE rtl/dcd.v
+set_global_assignment -name VERILOG_FILE rtl/dcd_link.v
+set_global_assignment -name VERILOG_FILE rtl/dcd_disk.v
 set_global_assignment -name VHDL_FILE rtl/via6522.vhd
 set_global_assignment -name VERILOG_FILE rtl/mac_model.v
 set_global_assignment -name VERILOG_FILE rtl/disk_pwm_duty.v

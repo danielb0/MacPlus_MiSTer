@@ -132,13 +132,18 @@ module dcd
 
 	input         img_mounted,
 	input  [63:0] img_size,
-	input         img_readonly
+	input         img_readonly,
+
+	// A DCD image is mounted. rtl/iwm.v uses this to decide whether the
+	// external drive port is a Sony or a DCD; with nothing mounted the port
+	// behaves exactly as it always has.
+	output        present
 );
 
 `include "dcd_icon.vh"
 
 	// ---- the sector path and the mount state it publishes ----
-	wire        present, readonly;
+	wire        readonly;
 	wire [23:0] blockCount;
 	wire        diskBusy, diskErr;
 	reg  [23:0] diskLba;

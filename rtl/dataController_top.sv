@@ -134,7 +134,22 @@ module dataController_top(
 	input             [4:0] sd_buff_addr_hi,  // hps_io addr[12:8], CD-DA frames
 	input            [15:0] sd_buff_dout,
 	output           [15:0] sd_buff_din[SCSI_DEVS],
-	input                   sd_buff_wr
+	input                   sd_buff_wr,
+
+	// DCD (Apple HD20) on the external drive port - MAC128K_PLAN.md Phase 5.
+	// Its own hps_io slot, kept out of the SCSI arrays above because it is not
+	// a SCSI device and does not share their indexing.
+	output           [31:0] dcd_sd_lba,
+	output                  dcd_sd_rd,
+	output                  dcd_sd_wr,
+	input                   dcd_sd_ack,
+	input             [7:0] dcd_sd_buff_addr,
+	input            [15:0] dcd_sd_buff_dout,
+	output           [15:0] dcd_sd_buff_din,
+	input                   dcd_sd_buff_wr,
+	input                   dcd_img_mounted,
+	input            [63:0] dcd_img_size,
+	input                   dcd_img_readonly
 );
 	
 	parameter SCSI_DEVS = 2;
@@ -547,7 +562,19 @@ module dataController_top(
 		.dskCommitAddrExt(dskCommitAddrExt),
 		.dskCommitBufWrExt(dskCommitBufWrExt),
 		.dskCommitBufAddrExt(dskCommitBufAddrExt),
-		.dskCommitBufDataExt(dskCommitBufDataExt)
+		.dskCommitBufDataExt(dskCommitBufDataExt),
+
+		.dcd_sd_lba(dcd_sd_lba),
+		.dcd_sd_rd(dcd_sd_rd),
+		.dcd_sd_wr(dcd_sd_wr),
+		.dcd_sd_ack(dcd_sd_ack),
+		.dcd_sd_buff_addr(dcd_sd_buff_addr),
+		.dcd_sd_buff_dout(dcd_sd_buff_dout),
+		.dcd_sd_buff_din(dcd_sd_buff_din),
+		.dcd_sd_buff_wr(dcd_sd_buff_wr),
+		.dcd_img_mounted(dcd_img_mounted),
+		.dcd_img_size(dcd_img_size),
+		.dcd_img_readonly(dcd_img_readonly)
 	);
 
 	// SCC

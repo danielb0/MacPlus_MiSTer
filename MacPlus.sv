@@ -80,6 +80,15 @@ localparam CONF_STR = {
 	// No conditional-visibility prefix here - MacLC_MiSTer declares its
 	// equivalent slot plainly, and an `h` prefix hid the item outright.
 	"SC4,ISOTO*CUEBINCHD,Mount CD-ROM;",
+	// Apple HD20 on the external floppy port (MAC128K_PLAN.md Phase 5). A hard
+	// disk image like the SCSI slots above, so it takes their SC form and their
+	// extension list rather than the floppies' S/DSK.
+	//
+	// Mounting one REPLACES the external floppy for as long as it is mounted -
+	// see rtl/iwm.v. It is also only useful on a Plus or a 512Ke, the 128K-ROM
+	// machines: the 64K ROMs carry no DCD engine at all, so on a 128K or 512K
+	// the slot mounts and nothing ever talks to it.
+	"SC5,IMGVHD,Mount HD20;",
 	"OI,CD-ROM Drive,Enabled,Disabled;",
 	// Index 0 MUST be Full: `status` defaults to zero and unity is the wanted
 	// default. Independent of the Mac's volume control on purpose -- on real
@@ -164,10 +173,11 @@ localparam SCSI_DEVS   = 3;
 localparam SCSI_CD_DEV = 2;
 // VDNUM: slots 0/1 = SCSI disks (unchanged), slots 2/3 = the two floppies
 // (Phase 1: converted from ioctl_download F1/F2 to real S-type block-device
-// mounts - see FLOPPY_WRITE_PLAN.md section 3), slot 4 = CD-ROM. The per-slot
-// latch-at-own-mount-pulse pattern below mirrors the UK101 core's
+// mounts - see FLOPPY_WRITE_PLAN.md section 3), slot 4 = CD-ROM, slot 5 = the
+// Apple HD20 on the external drive port (MAC128K_PLAN.md Phase 5). The
+// per-slot latch-at-own-mount-pulse pattern below mirrors the UK101 core's
 // four-drive support (VDNUM=5 there).
-localparam VDNUM = 5;
+localparam VDNUM = 6;
 
 // the status register is controlled by the on screen display (OSD)
 wire [31:0] status;
@@ -209,6 +219,15 @@ assign sd_lba[4] = scsi_sd_lba[SCSI_CD_DEV];
 assign sd_buff_din[0] = scsi_sd_buff_din[0];
 assign sd_buff_din[1] = scsi_sd_buff_din[1];
 assign sd_buff_din[4] = scsi_sd_buff_din[SCSI_CD_DEV];
+
+// Slot 5, the HD20. rtl/dcd.v owns this slot outright - unlike the floppies it
+// shares its lba/din with nothing, because reads and writes come from the same
+// state machine rather than from a separate loader and writer.
+wire [31:0] dcd_sd_lba;
+wire        dcd_sd_rd, dcd_sd_wr;
+wire [15:0] dcd_sd_buff_din;
+assign sd_lba[5]      = dcd_sd_lba;
+assign sd_buff_din[5] = dcd_sd_buff_din;
 
 // CD-ROM drive present on the bus. Disabled (status[18] set) makes the CD
 // target never answer selection, so the SCSI bus is bit-identical to a
@@ -822,17 +841,30 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	// now would half-wave clip every track against the +127 disabled-sound
 	// pedestal - see SCSI_UPGRADE_PLAN.md Phase 3C.
 	.cd_snd_l(cd_snd_l),
-	.cd_snd_r(cd_snd_r)
+	.cd_snd_r(cd_snd_r),
+
+	// block device interface for the HD20 (slot 5)
+	.dcd_sd_lba(dcd_sd_lba),
+	.dcd_sd_rd(dcd_sd_rd),
+	.dcd_sd_wr(dcd_sd_wr),
+	.dcd_sd_ack(sd_ack[5]),
+	.dcd_sd_buff_addr(sd_buff_addr[7:0]),
+	.dcd_sd_buff_dout(sd_buff_dout),
+	.dcd_sd_buff_din(dcd_sd_buff_din),
+	.dcd_sd_buff_wr(sd_buff_wr),
+	.dcd_img_mounted(img_mounted[5]),
+	.dcd_img_size(img_size),
+	.dcd_img_readonly(img_readonly)
 );
 
 // sd_rd/sd_wr are consumer OUTPUTS -> hps_io INPUTS, so the SCSI 2-bit view
-// above, each floppy_loader's own scalar sd_rd request (Phase 1), and each
-// floppy_sd_writer's own scalar sd_wr request (Phase 4) must be combined
-// into the full VDNUM=4 vectors here.
+// above, each floppy_loader's own scalar sd_rd request (Phase 1), each
+// floppy_sd_writer's own scalar sd_wr request (Phase 4) and the HD20's pair
+// (Phase 5) must be combined into the full VDNUM vectors here.
 wire ldr_int_sd_rd, ldr_ext_sd_rd;
 wire wr_int_sd_wr,  wr_ext_sd_wr;
-assign sd_rd = {scsi_sd_rd[SCSI_CD_DEV], ldr_ext_sd_rd, ldr_int_sd_rd, scsi_sd_rd[1:0]};
-assign sd_wr = {scsi_sd_wr[SCSI_CD_DEV], wr_ext_sd_wr, wr_int_sd_wr, scsi_sd_wr[1:0]};
+assign sd_rd = {dcd_sd_rd, scsi_sd_rd[SCSI_CD_DEV], ldr_ext_sd_rd, ldr_int_sd_rd, scsi_sd_rd[1:0]};
+assign sd_wr = {dcd_sd_wr, scsi_sd_wr[SCSI_CD_DEV], wr_ext_sd_wr, wr_int_sd_wr, scsi_sd_wr[1:0]};
 
 // sd_lba is likewise shared per slot between the loader (valid while it is
 // busy) and the writer (valid the rest of the time) - the writer itself
