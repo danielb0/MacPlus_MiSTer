@@ -34,13 +34,17 @@
 // established way to leave a numbered gap. MODEL_512KE originally sat at
 // value 2 (Plus, SE, 512Ke, 512K, 128K), matching a comment written in Phase
 // 1 before this was thought through. It moved to 4 in Phase 3 because the
-// 512Ke is not exposed yet -- it still has SCSI, which is not an authentic
-// 512Ke (Phase 4 fixes that) -- and leaving its label out of the OSD string
-// while its numeric value sat in the MIDDLE of the exposed range would have
-// meant either a confusing blank OSD row (untested; Main_MiSTer's menu
-// parser was not available to check) or renumbering 512K/128K later, which
-// would silently change what a saved config boots. Moving the unexposed one
-// instead costs nothing, since nothing yet depends on its value.
+// 512Ke was not exposed then -- it still had SCSI, which is not an authentic
+// 512Ke -- and leaving its label out of the OSD string while its numeric value
+// sat in the MIDDLE of the exposed range would have meant either a confusing
+// blank OSD row (untested; Main_MiSTer's menu parser was not available to
+// check) or renumbering 512K/128K later, which would silently change what a
+// saved config boots. Moving the unexposed one instead cost nothing.
+//
+// Phase 4 then gave the 512Ke its missing SCSI absence (`scsiPresent` below)
+// and exposed it, so it is now the fifth and last entry in the CONF_STR list
+// -- which is why value 4 was the right place to park it. Anything added next
+// takes value 5 and appends to the list.
 //
 module mac_model
 (
@@ -52,7 +56,25 @@ module mac_model
 	output reg [1:0] configRAMSize, // 0 = 128K, 1 = 512K, 2 = 1MB, 3 = 4MB
 	output reg       machineType,   // 0 = Plus-like, 1 = SE
 	output reg [1:0] romSlot,       // which bootN.rom to read: MacPlus.sv:1050
-	output reg       drive800k      // 1 = drive can use 800K double-sided media
+	output reg       drive800k,     // 1 = drive can use 800K double-sided media
+	// 1 = this machine has a SCSI bus. Consumed by rtl/addrDecoder.v, which
+	// uses it TWICE, and the first use is the one that matters:
+	//
+	//   - When clear, the ROM window MIRRORS at A17 = 1. The Plus ROM decides
+	//     whether it has SCSI by reading $420000 and $440000 and comparing them
+	//     ($4003E4); equal means no SCSI, and it records that in $0B22 bit 7,
+	//     which then gates every later SCSI access including the boot search's
+	//     drive-queue walk ($407D40). Mirroring is therefore not a side effect
+	//     of "no SCSI" -- it IS how a machine says so, and it is the only thing
+	//     that distinguishes a 512Ke from a Plus, since they run the same ROM.
+	//   - When clear, $58xxxx also stops decoding. Belt and braces: the ROM
+	//     will not go there once the flag is clear, but third-party software
+	//     that poked the chip directly should find nothing.
+	//
+	// The SE needs no special case. Its window already decodes in full
+	// (configROMSize[1] = 1), but its ROM is 256K, so A17 is a real ROM address
+	// bit and the two probes differ in CONTENT rather than in decode.
+	output reg       scsiPresent
 );
 
 	// Model 0 MUST be the Plus. `status` defaults to zero, and the core's
@@ -63,7 +85,7 @@ module mac_model
 	localparam [2:0] MODEL_SE    = 3'd1;
 	localparam [2:0] MODEL_512K  = 3'd2;
 	localparam [2:0] MODEL_128K  = 3'd3;
-	localparam [2:0] MODEL_512KE = 3'd4; // not yet in the OSD string - see above
+	localparam [2:0] MODEL_512KE = 3'd4; // last entry in the OSD list - see above
 
 	// Slot numbers, not one-hot bits: Main_MiSTer's boot-ROM loader packs the
 	// slot as a plain binary count in ioctl_index[7:6] (user_io.cpp:1619,
@@ -83,6 +105,7 @@ module mac_model
 				machineType   = 1'b1;
 				romSlot       = ROM_SLOT_SE;
 				drive800k     = 1'b1;
+				scsiPresent   = 1'b1;
 			end
 
 			// The 512K and 128K run the 64K ROM in slot 2 (boot2.rom, the
@@ -91,9 +114,9 @@ module mac_model
 			// 65536 bytes and neither touches a memory-map constant, so one
 			// slot serves both). RAM is soldered and not the same size as
 			// each other, which is the one hardware difference between them.
-			// SCSI stays wired in: the 64K ROM has no SCSI Manager and never
-			// scans the bus, so its presence has no effect and gating it is
-			// Phase 4 (accuracy only, not correctness -- see the plan).
+			// scsiPresent = 0 is accuracy, not correctness, for these two:
+			// the 64K ROM has no SCSI Manager and never scans the bus, so it
+			// would never have noticed either way. No Mac had SCSI in 1984.
 			//
 			// drive800k = 0: both shipped with a mechanically single-sided
 			// drive -- no head for the second side, not merely a format
@@ -106,6 +129,7 @@ module mac_model
 				machineType   = 1'b0;
 				romSlot       = ROM_SLOT_64K;
 				drive800k     = 1'b0;
+				scsiPresent   = 1'b0;
 			end
 
 			MODEL_128K: begin
@@ -114,20 +138,24 @@ module mac_model
 				machineType   = 1'b0;
 				romSlot       = ROM_SLOT_64K;
 				drive800k     = 1'b0;
+				scsiPresent   = 1'b0;
 			end
 
 			// A 512Ke is a Plus with 512K soldered in and no SCSI. It shipped
 			// the same 128K ROM and the same 800K double-sided drive as the
-			// Plus, so it needs no new image and no drive restriction --
-			// only the RAM strap. SCSI absence is Phase 4; until then this
-			// model is a Plus with less memory, which is why MacPlus.sv does
-			// not yet offer it in the OSD.
+			// Plus, so it needs no new image and no drive restriction -- only
+			// the RAM strap and scsiPresent. Those two are the entire model,
+			// and scsiPresent is the load-bearing one: without it this is
+			// indistinguishable from a Plus with less memory, because the ROM
+			// is the same ROM. See the port comment above for how the machine
+			// tells its own ROM that it has no SCSI.
 			MODEL_512KE: begin
 				configROMSize = 2'b01;                    // same 128K ROM as the Plus
 				configRAMSize = 2'b01;                    // 512K, soldered
 				machineType   = 1'b0;
 				romSlot       = ROM_SLOT_PLUS;
 				drive800k     = 1'b1;
+				scsiPresent   = 1'b0;   // the whole point of the model
 			end
 
 			// MODEL_PLUS, and every reserved encoding. Falling back to the
@@ -139,6 +167,7 @@ module mac_model
 				machineType   = 1'b0;
 				romSlot       = ROM_SLOT_PLUS;
 				drive800k     = 1'b1;
+				scsiPresent   = 1'b1;
 			end
 		endcase
 	end

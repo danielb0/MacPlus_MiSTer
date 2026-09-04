@@ -100,7 +100,7 @@ localparam CONF_STR = {
 	// 512Ke (that needs Phase 4's synthetic bus error), so showing it now
 	// would misrepresent it as a machine that never existed. It is reachable
 	// as model value 4 (rtl/mac_model.v) but not via this menu until then.
-	"O13,Model,Plus,SE,512K,128K;",
+	"O13,Model,Plus,SE,512K,128K,512Ke;",
 	"O5,Speed,8MHz,16MHz;",
 	"O6,Floppy Write,Off,On;",
 	"ODE,CPU,68000,68010,68020;",
@@ -354,6 +354,7 @@ assign AUDIO_MIX = 0;
 // was declared and never referenced, because the instantiation below passed a
 // literal concat instead.)
 wire [1:0] configROMSize;
+wire       scsiPresent;   // 1 = this model has a SCSI bus; see rtl/mac_model.v
 wire [1:0] configRAMSize;
 wire       machineType;
 wire [1:0] romSlot;
@@ -365,6 +366,7 @@ mac_model mac_model
 	.model         ( status_model  ),
 	.mem_big       ( status_mem    ),
 	.configROMSize ( configROMSize ),
+	.scsiPresent   ( scsiPresent   ),
 	.configRAMSize ( configRAMSize ),
 	.machineType   ( machineType   ),
 	.romSlot       ( romSlot       ),
@@ -652,6 +654,7 @@ addrController_top ac0
 	._cpuAS(_cpuAS),
 	.turbo(status_turbo),
 	.configROMSize(configROMSize),
+	.scsiPresent(scsiPresent),
 	.configRAMSize(configRAMSize), 
 	.memoryAddr(memoryAddr),
 	.memoryLatch(memoryLatch),

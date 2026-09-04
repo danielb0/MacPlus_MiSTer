@@ -12,6 +12,7 @@ module addrController_top(
 	// system config:
 	input turbo,               // 0 = normal, 1 = faster
 	input [1:0] configROMSize,  // 0 = 64K ROM, 1 = 128K ROM, 2 = 256K ROM
+	input scsiPresent,          // 1 = machine has a SCSI bus; see rtl/mac_model.v
 	input [1:0] configRAMSize,	// 0 = 128K, 1 = 512K, 2 = 1MB, 3 = 4MB RAM
 
 	// 68000 CPU memory interface:
@@ -290,6 +291,7 @@ module addrController_top(
 	// address decoding
 	addrDecoder ad(
 		.configROMSize(configROMSize),
+		.scsiPresent(scsiPresent),
 		.address(cpuAddr),
 		._cpuAS(_cpuAS),
 		.memoryOverlayOn(memoryOverlayOn),

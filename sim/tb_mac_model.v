@@ -40,6 +40,7 @@ module tb_mac_model;
 	wire       machineType;
 	wire [1:0] romSlot;
 	wire       drive800k;
+	wire       scsiPresent;
 
 	integer tests = 0;
 	integer fails = 0;
@@ -85,7 +86,8 @@ module tb_mac_model;
 		.configRAMSize ( configRAMSize ),
 		.machineType   ( machineType   ),
 		.romSlot       ( romSlot       ),
-		.drive800k     ( drive800k     )
+		.drive800k     ( drive800k     ),
+		.scsiPresent   ( scsiPresent   )
 	);
 
 	integer m;
@@ -171,6 +173,21 @@ module tb_mac_model;
 		model = 3'd2; #1; ok("512K drive is 400K-only", drive800k === 1'b0);
 		model = 3'd3; #1; ok("128K drive is 400K-only", drive800k === 1'b0);
 		model = 3'd4; #1; ok("512Ke drive takes 800K",  drive800k === 1'b1);
+
+		// ---- 10. scsiPresent - Phase 4 item 9 -----------------------------
+		// Only the Plus and SE ever had a SCSI bus. This strap does more than
+		// gate the $58xxxx decode: when it is clear, rtl/addrDecoder.v mirrors
+		// the ROM window at A17 = 1, which is HOW the Plus ROM is told there is
+		// no SCSI ($4003E4 compares $420000 with $440000). A wrong entry here
+		// is therefore silent in the worst way -- a 512Ke that still reports a
+		// SCSI bus looks like a Plus with less memory, which is exactly the
+		// inauthentic machine Phase 4 exists to remove. The end-to-end
+		// behaviour is gated by sim/tb_scsi_absence.v; this is the table row.
+		model = 3'd0; #1; ok("Plus has SCSI",       scsiPresent === 1'b1);
+		model = 3'd1; #1; ok("SE has SCSI",         scsiPresent === 1'b1);
+		model = 3'd2; #1; ok("512K has no SCSI",    scsiPresent === 1'b0);
+		model = 3'd3; #1; ok("128K has no SCSI",    scsiPresent === 1'b0);
+		model = 3'd4; #1; ok("512Ke has no SCSI",   scsiPresent === 1'b0);
 
 		$display("");
 		$display("MAC-MODEL: %0d of %0d failing", fails, tests);
