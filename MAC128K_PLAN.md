@@ -2853,6 +2853,68 @@ the same purpose. So the drive is a slave to the count in both real
 implementations, and `rtl/dcd.v` should be too rather than hardcoding 49.
 
 
+### Step 3 framing: MultiBlock Read, settled from both ends before coding
+
+**Read the protocol out of the ROM's receive loop and TashTwenty's read loop
+before writing any of it, per [[feedback-read-the-spec-for-historical-hardware]].
+Both agree, and three details are not what the STOP note assumed.**
+
+**ONE COMMAND, N SEPARATE FRAMES.** `$419712` is the per-block loop, and its
+first instruction is `tst.b d1 / beq $419754` -- **for a read (opcode 0) it
+returns immediately without transmitting anything**. Only a write re-transmits
+per block. So the Mac sends the Read command once and then calls the receive
+engine `$41980E` N times, each call hunting a fresh `$AA`. TashTwenty's
+`CmdRea0` loop matches exactly: read a block, `movlw 77 / movwf GROUPS`,
+checksum, `Transmit`, `decfsz TX_BLKS,F`, loop.
+
+**Each frame is 77 groups**: `<$AA>` then
+`<$80><blks><stat><pad><pad><pad>` + `<20 tags>` + `<512 data>` + `<CHK>`
+= 6+20+512+1 = 539 = 77*7, no padding. TashTwenty hardcodes the 77 rather than
+taking it from the count byte -- only its Status path uses `RC_RSPG` -- but the
+Mac asks for 77 anyway (`d7` = 512+20 = 532, `(532+6)/7+1` = 77), so sizing from
+the count byte as `rtl/dcd.v` now does gives the same answer.
+
+**THE TAGS ARE FIRST AND THEY ARE NOT IN THE CALLER'S BUFFER.** Confirmed three
+ways now, and from the receive side this time: `$4197AA` copies 12 bytes from
+`$1A2` to the caller's tag pointer and `$4197B8` copies 20 bytes from `$1A2` out
+to `$2FC/$300/$304/$38A/$38E`, so the tags land in the command-block scratch --
+which is reply bytes 6..25, exactly the region before the 26-byte buffer switch.
+TashTwenty points its data pointer at `0x2062` = buffer + 26 with the comment
+"past the six header bytes and the 20 'tag' bytes". And `$1B6`, the amount
+`$4197E8` advances the caller's data pointer by after each block, is set at
+`$4196BA` **before** the `+$14` is added, so it is 512 and not 532.
+
+**THREE THINGS THAT ARE EASY TO GET WRONG:**
+
+1. **The reply opcode does not echo the continued-write bit.** `$41975E` masks
+   the expected opcode with `andi.b #$3F` before comparing, so a command of
+   `$41` must be answered `$81` and **not** `$C1`. TashTwenty answers every
+   write with `0x81` whether the command was `$01` or `$41`. Answering `$C1`
+   fails the `$419776` comparison and errors $30.
+2. **`blks` counts DOWN from N to 1, and the first frame carries N.**
+   `$41978C cmp.b $19D(a1),d3` happens **before** `$4197EE subq.b #1,d3`, and
+   TashTwenty's `decfsz TX_BLKS,F` sits **after** its `Transmit`. A mismatch is
+   error $31.
+3. **Status bit 7 is the error flag, and $0A is a second one.** `$4197DA
+   btst #$18,d0` on the longword at `$19E` tests bit 7 of the status byte, and
+   `$4197E0` separately rejects a status of exactly `$0A`. TashTwenty's failure
+   path is `bsf TX_STAT,7` plus a one-group reply, which is the same convention.
+
+**THE ONE THING NEITHER SOURCE SETTLES: what goes IN the 20 tag bytes.** They
+are the file-system block tags of the MFS/HFS era, which a real HD20 stores on
+the medium alongside each block. A plain disc image has nowhere to keep them,
+and **TashTwenty does not solve this either** -- its `CmdRead` carries a bare
+`;TODO clear 20 tag bytes too?` and ships whatever the buffer held. Sending
+zeros is the honest choice and is strictly better than TashTwenty's stale
+buffer; the Mac copies them to `$2FC` onward but the ROM does not validate them.
+**Recorded as a known deviation, not an oversight.**
+
+**STILL OPEN, and it is the real work rather than the protocol: the HPS sector
+path.** Everything above is framing; none of it moves a byte off the SD card.
+That needs a mount slot, `hps_io` wiring and a sector buffer, and it is the
+first part of Phase 5 that touches files outside `rtl/dcd*.v`.
+
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
