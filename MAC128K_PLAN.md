@@ -995,7 +995,7 @@ confirms the assumption this plan's phase order rests on.
 | criterion | result |
 |---|---|
 | boots System 1/2/3 from a 400K MFS image | **YES** -- Finder desktop on the 128K |
-| reports the right RAM | **YES** -- System 3 reports 128K. Earlier Systems report no RAM figure at all, which is period-correct: the "About the Finder" memory display came later |
+| reports the right RAM | **YES, BOTH MODELS** -- System 3 reports 128K on the 128K and 512K on the 512K. Earlier Systems report no RAM figure at all, which is period-correct: the "About the Finder" memory display came later |
 | floppy WRITE works | **YES** -- a file created in MacWrite under System 3 survived a reboot |
 | **SCSI-Manager falsification test** | **PASSED** -- the 64K models ignore mounted SCSI disks entirely |
 | Plus unregressed | **YES** -- boots from the SCSI hard disk and mounts both 400K and 800K diskettes on `46aec82a` |
@@ -1037,6 +1037,29 @@ the Plus's, and the ROM-region move is proven by the Plus reading slot 0 --
 the SE's slot 1 is the same mechanism one slot along. Worth a boot when
 convenient, but nothing in this phase treats the SE differently from the
 Plus except `machineType`, which was not touched.
+
+### Which 64K ROM is in `boot2.rom`, and the free slot 3
+
+Both 64K models read **the same** `boot2.rom` -- the deliberate "one slot,
+user's choice" decision, made because the two images differ by 57 of 65536
+bytes and **none of them is a memory-map constant**. Confirmed in service: the
+128K reports 128K and the 512K reports 512K from one shared ROM.
+
+**Identifying the installed image takes two seconds** -- each ROM stores its own
+checksum as its first longword, so `xxd -l 4 -p boot2.rom` gives `28ba61ce`
+(Macintosh 128) or `28ba4e50` (Macintosh 512K).
+
+**Slot 3 is free** if per-model ROMs are ever wanted: `rom_word_addr.v` handles
+four slots and Main_MiSTer sends `boot0`..`boot3`, while only 0/1/2 are used. It
+would be **accuracy only** -- the diff carries no memory-map difference -- so it
+is a nicety, not a fix.
+
+**But one of the 57 bytes is not cosmetic.** The 512K ROM changes
+`ORI #$0100,SR` to `ORI #$0300,SR` after loading the VIA address, raising the
+interrupt mask so the SCC cannot interrupt a VIA access -- an Apple bug fix
+aimed squarely at floppy I/O reliability, and writes are more timing-sensitive
+than reads. **If floppy writes ever look flaky on either 64K model, check which
+image is installed and try `28ba4e50` first.**
 
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
