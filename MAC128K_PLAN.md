@@ -1054,12 +1054,25 @@ four slots and Main_MiSTer sends `boot0`..`boot3`, while only 0/1/2 are used. It
 would be **accuracy only** -- the diff carries no memory-map difference -- so it
 is a nicety, not a fix.
 
-**But one of the 57 bytes is not cosmetic.** The 512K ROM changes
-`ORI #$0100,SR` to `ORI #$0300,SR` after loading the VIA address, raising the
-interrupt mask so the SCC cannot interrupt a VIA access -- an Apple bug fix
-aimed squarely at floppy I/O reliability, and writes are more timing-sensitive
-than reads. **If floppy writes ever look flaky on either 64K model, check which
-image is installed and try `28ba4e50` first.**
+**INSTALLED IMAGE IDENTIFIED 2026-09-03: it is `28BA4E50`, the Macintosh 512K
+ROM.** Verified byte-identical to the reference, with its own stored checksum
+recomputing correctly (so intact, untruncated, right byte order through the
+download path), and differing from the Mac 128 ROM by exactly the 57 bytes the
+earlier diff found.
+
+**That matters because one of those 57 bytes is not cosmetic.** The 512K ROM
+changes `ORI #$0100,SR` to `ORI #$0300,SR` after loading the VIA address,
+raising the interrupt mask so the SCC cannot interrupt a VIA access -- an Apple
+bug fix aimed squarely at floppy I/O reliability, and writes are more
+timing-sensitive than reads. It plausibly explains why floppy writes worked
+first time.
+
+**So the obvious fallback is already spent: do NOT "try the 512K ROM" if writes
+ever misbehave -- it is already in use.** The remaining lever would be the
+opposite one, and only for strict authenticity: a real Macintosh 128 shipped
+`28BA61CE`, so putting that image in the free slot 3 and pointing
+`MODEL_128K` at it would be more faithful, at the cost of the interrupt-mask
+fix. Accuracy versus reliability, and reliability is currently winning.
 
 **Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
 the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
