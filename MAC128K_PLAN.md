@@ -314,11 +314,11 @@ and must NOT cover the `$4xxxxx` ROM window.
 | 2 | Model selector 1 bit -> **3** bits (and moved to bits 1-3), straps derived from it | `MacPlus.sv:89,136,641,698,1066` + `rtl/mac_model.v` | **DONE** `21c0460` |
 | 3 | `configRAMSize` reachable for 128K/512K | `MacPlus.sv:338` | **DONE** `21c0460` |
 | 4 | RAM size derived from model, not chosen, for the soldered-RAM machines | `rtl/mac_model.v` | **DONE** `21c0460` |
-| 5 | Gate SCSI off for non-Plus models | `rtl/addrDecoder.v:125` | small; accuracy only - the 64K ROM never looks, and a mirrored 512Ke (item 9) never looks either |
+| 5 | Gate SCSI off for non-Plus models | `rtl/addrDecoder.v:139` | **DONE** `dcfbe62` |
 | 6 | Delete the dead `configROMSize` localparam | `MacPlus.sv:336` | **DONE** `21c0460` |
 | 7 | Synthetic bus error for the unmapped SCSI window | `MacPlus.sv:523,579,614` | optional accuracy - does **NOT** block the 512Ke (corrected 2026-09-04); must not cover the `$4xxxxx` ROM window |
 | 8 | Refuse 800K images in 128K/512K mode | `MacPlus.sv:965-1013` | small - a 400K-only drive cannot take one |
-| 9 | **Mirror the ROM at A17 = 1 for SCSI-less models** | `rtl/addrDecoder.v:119` + `rtl/mac_model.v` | small - this is what actually makes a 512Ke authentic |
+| 9 | **Mirror the ROM at A17 = 1 for SCSI-less models** | `rtl/addrDecoder.v:134` + `rtl/mac_model.v` | **DONE** `dcfbe62` |
 
 ## System 1.x will not boot with a SCSI disk mounted
 
@@ -1189,11 +1189,38 @@ storage it currently has.
 Hardware pass criteria: **a 512Ke boots from an 800K floppy** (System 3.x/4.x,
 which is what the machine shipped with and has the RAM for -- System 6 wants
 1 MB and is marginal at best on 512K), reports **512K** in "About the Finder",
-and **finds no SCSI devices without hanging while it looks** -- that last one is
-the actual test of the synthetic bus error, since this is the only model whose
-ROM probes. A 128K still boots System 1/2/3 from the 400K control image with
-SCSI now gated; Plus/SE unregressed, which after this phase means checking they
-still see their SCSI disks, because the bus error touches every model.
+and **finds no SCSI devices without hanging while it looks**. That last one is
+the real test, since this is the only model whose ROM probes -- but note what
+"looks" now means after the 2026-09-04 correction: with the mirror in place the
+ROM decides at `$4003E4`, before it ever touches `$58xxxx`, so the expected
+behaviour is that it never looks at all. A 128K still boots System 1/2/3 from
+the 400K control image; Plus/SE unregressed, which after this phase means
+checking they still see their SCSI disks, because the changed decode branch is
+shared by every model even though only three of them alter behaviour.
+
+**Phase 4 status: DONE in simulation, `dcfbe62`. NOT yet hardware-confirmed.**
+Items 9 and 5 landed together as one strap. `sim/tb_scsi_absence.v` gates it
+end-to-end (24/24, written red first: 7 failures, exactly the three SCSI-less
+models, with Plus and SE passing throughout), and `sim/tb_mac_model.v` grew the
+five table rows (27/27). `sim/tb_rom_word_addr.v` (19/19) and
+`sim/tb_sdram_map.v` (27/27) are unregressed.
+
+What that does NOT yet prove is the thing only hardware can: that the Plus ROM,
+running for real, reads the mirrored `$420000` and actually leaves `$0B22` clear.
+The bench asserts the two probes resolve to the same ROM word, which is the
+input to the ROM's compare -- not the ROM's conclusion. Until a 512Ke boots on
+the DE10 and finds no SCSI, treat this as argued-and-simulated, the same
+standing as defect C in [[macplus-scsi-pending-fixes]].
+
+Three simulation traps were found writing that bench and are recorded in its
+comments, because each one silently produces a PASSING bench rather than a
+failing one: `addrController_top` has no reset so its bus counters stay X;
+`@(posedge clk)` then testing `cpuBusControl` reads the pre-nonblocking value,
+exits on a stale true and samples the video slot instead; and `mac_model` is
+`always @(*)`, which iverilog evaluates only on an event, so setting `model` to
+a value it already holds leaves every strap X -- and an X `configROMSize` then
+poisons `macAddr[18]`, because Verilog `!=` returns x whenever either operand
+has an x, even when another bit already differs.
 
 ## Phase 5 - HD20 / DCD, and it gates the release
 
