@@ -256,6 +256,56 @@ This is also the one place the unexplained `addrDecoder.v:119` comment
 not because the new models trip over it, but because it is the only recorded
 clue to how detection works.
 
+**CORRECTED 2026-09-04: detection is NOT a bus error, and item 7 does not block
+the 512Ke.** The Plus ROM was disassembled rather than reasoned about, and it
+settles both questions at once. At `$4003E0`:
+
+```
+$4003E0  clr.w   $0B22.w
+$4003E4  move.l  $420000.l, d0
+$4003EA  cmp.l   $440000.l, d0
+$4003F0  beq     $4003F8          ; SAME -> no SCSI, flag stays 0
+$4003F2  move.b  #$C0, $0B22.w    ; DIFFERENT -> SCSI present
+```
+
+Two plain reads in the ROM window, compared. `$420000` has A17 = 1 and
+`$440000` has A17 = 0 -- exactly the discriminator at `addrDecoder.v:119`.
+Nothing faults, and no bus-error handler is installed first (`$1D4`/`$1E0` are
+not written until `$4003FC`), so a bus error cannot be the mechanism: both reads
+must return data, on both machines.
+
+`$0B22` bit 7 is then the single gate on everything SCSI. `$407D40` -- the
+drive-queue advance inside the boot search -- opens with `tst.b $0B22.w / bpl`
+and returns immediately when the flag is clear, so a machine that fails the test
+never probes an ID, never looks for the `'ER'` (`$4552`) Driver Descriptor Map,
+and never enqueues a SCSI volume.
+
+**So an authentic 512Ke needs exactly one thing: the ROM must MIRROR at
+A17 = 1.** Then `$420000` and `$440000` read the same word and the flag stays
+clear. `addrController_top.v:225` already forces A17 to 0 for a 128K-ROM access,
+so a mirrored read lands on ROM offset 0 either way -- only the decode condition
+has to change.
+
+And the file said so all along. `addrDecoder.v`'s own header comment reads **"If
+ROM is mirrored when A17 is 1, then SCSI is assumed to be unavailable"**. The
+`!!!` at line 119 was the headline; the mechanism was already written out four
+lines up, in the memory map. Same lesson as Phase 3's conversion table
+([[feedback-read-the-spec-for-historical-hardware]]): read the whole mechanism,
+not the marker somebody left on it.
+
+**Why the SE is unaffected.** With `configROMSize[1] = 1` the whole `$4xxxxx`
+window already decodes ROM -- but the SE's ROM is 256K, so A17 is a real ROM
+address bit and `$420000` genuinely differs from `$440000` in CONTENT. The SE
+passes the test on data, not on decode. Nothing to change there.
+
+**What the bus error is still for.** Item 7 keeps its accuracy argument -- a
+68000 with nothing at an address should fault -- but it is now a nice-to-have,
+not a 512Ke enabler, and it carries a hazard worth recording before anyone
+builds it: bus-erroring *every* unmapped access would fault the Plus at
+`$4003E4`, during its own SCSI probe, with no handler installed, and kill the
+machine at startup. Any synthetic bus error must be scoped to the SCSI window
+and must NOT cover the `$4xxxxx` ROM window.
+
 ## What is missing, in full
 
 | # | item | file | size |
@@ -264,10 +314,11 @@ clue to how detection works.
 | 2 | Model selector 1 bit -> **3** bits (and moved to bits 1-3), straps derived from it | `MacPlus.sv:89,136,641,698,1066` + `rtl/mac_model.v` | **DONE** `21c0460` |
 | 3 | `configRAMSize` reachable for 128K/512K | `MacPlus.sv:338` | **DONE** `21c0460` |
 | 4 | RAM size derived from model, not chosen, for the soldered-RAM machines | `rtl/mac_model.v` | **DONE** `21c0460` |
-| 5 | Gate SCSI off for non-Plus models | `MacPlus.sv:632,694,1098` | small; accuracy only - the 64K ROM never looks, so it is not needed for booting |
+| 5 | Gate SCSI off for non-Plus models | `rtl/addrDecoder.v:125` | small; accuracy only - the 64K ROM never looks, and a mirrored 512Ke (item 9) never looks either |
 | 6 | Delete the dead `configROMSize` localparam | `MacPlus.sv:336` | **DONE** `21c0460` |
-| 7 | **Synthetic bus error for the unmapped SCSI window** | `MacPlus.sv:489,548,600` | **real work** - blocks an authentic 512Ke |
+| 7 | Synthetic bus error for the unmapped SCSI window | `MacPlus.sv:523,579,614` | optional accuracy - does **NOT** block the 512Ke (corrected 2026-09-04); must not cover the `$4xxxxx` ROM window |
 | 8 | Refuse 800K images in 128K/512K mode | `MacPlus.sv:965-1013` | small - a 400K-only drive cannot take one |
+| 9 | **Mirror the ROM at A17 = 1 for SCSI-less models** | `rtl/addrDecoder.v:119` + `rtl/mac_model.v` | small - this is what actually makes a 512Ke authentic |
 
 ## System 1.x will not boot with a SCSI disk mounted
 
@@ -1090,16 +1141,33 @@ changeover date (one source says ~August 1984, another says the timeframe is
 unclear), and whether Apple ever offered existing 128K owners a ROM-only
 upgrade.
 
-**Phase 4 - SCSI absence, for every model that needs it.** Items 5 and 7. Build
-the gating mechanism and the synthetic bus error once, for the 512Ke -- the only
-model whose ROM probes -- then extend the gate to `configROMSize == 2'b00` so
-the 64K machines are accurate too. By this point the falsification test has
-already been run with SCSI enabled, so nothing is lost by turning it off.
+**Phase 4 - SCSI absence, for every model that needs it.** Items 9 and 5.
+**Re-scoped 2026-09-04, after the Plus ROM was disassembled** -- see "CORRECTED
+2026-09-04" above. `addrDecoder.v:119` HAS now been understood, and it turns the
+phase from "build a bus error" into a strap:
 
-This is where `addrDecoder.v:119` may finally have to be understood. Note that
-item 7 is not merely a 512Ke enabler: bus-erroring on unmapped accesses is
-authentic 68000 behaviour and a general accuracy win, so it stands on its own as
-a capstone.
+- **Item 9, and it is the whole phase.** One new `mac_model.v` output says
+  whether this machine has SCSI. `addrDecoder.v` consumes it twice: mirror the
+  ROM at A17 = 1 when it is clear, and refuse to decode `$58xxxx` when it is
+  clear. The mirror is what the Plus ROM actually tests, so it is what makes the
+  512Ke authentic; the decode gate is belt-and-braces for third-party software
+  that pokes the chip directly without asking `$0B22` first.
+- **Item 7 drops out of the phase.** Not needed, and hazardous if built
+  carelessly -- see the correction above.
+
+Values: SCSI present on the Plus and SE, absent on the 512Ke, 512K and 128K.
+The SE needs no special case (its 256K ROM fails the equality test on content).
+The 64K machines never run the test at all, so for them item 9 is pure accuracy
+-- their ROM window simply starts mirroring where it previously returned open
+bus, which is what the real machines did.
+
+**The 512Ke also gets exposed in the OSD as part of this phase.** `mac_model.v`
+deliberately parked it at model 4, outside the listed range, because "it still
+has SCSI, which is not an authentic 512Ke". That is the condition this phase
+removes, so the model becomes real here and the CONF_STR list grows by one.
+
+By this point the falsification test has already been run with SCSI enabled, so
+nothing is lost by turning it off.
 
 **CORRECTED 2026-09-03 (Daniel spotted it).** This phase previously said "a
 512Ke boots System 6 from the HD20 image at s1", which contradicts the phase's
