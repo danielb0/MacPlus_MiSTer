@@ -2915,6 +2915,95 @@ That needs a mount slot, `hps_io` wiring and a sector buffer, and it is the
 first part of Phase 5 that touches files outside `rtl/dcd*.v`.
 
 
+### Step 3 built: the sector path, MultiBlock Read, and the first integration
+
+**Done 2026-09-04, `1db34fa` + `d9a43bd` + `cd2a6f3`. This is the first part of
+Phase 5 that touches anything outside `rtl/dcd*.v`.**
+
+**`rtl/dcd_disk.v` -- one sector buffer and one hps_io slot.** Byte addressed on
+the command side, so the command layer never has to think about lanes. Three
+things in it are not decoration:
+
+- **The byte lanes are not a free choice.** The HPS packs disk byte 0 into
+  `sd_buff_dout[7:0]`, so even bytes go to `buffer0`. `rtl/scsi.v` is the
+  hardware-proven precedent and is the reference for byte order anywhere on
+  this core. Getting it backwards transposes every pair, which no checksum in
+  DCD would catch and nothing notices until a filesystem fails to mount.
+- **`sd_buff_wr` is shared across every slot** and is qualified with our own
+  `sd_ack`, or another slot's transfer lands in our sector.
+  `rtl/floppy_loader.v` guards it for the same reason.
+- **An unanswered request times out.** Without that, a stalled HPS leaves the
+  drive holding /HSHK forever, which the Mac sees as a hung bus rather than as
+  a failed command.
+
+The buffer is `scsi_dpram`'s shape **copied rather than instantiated**: a DCD
+device has to work on a **512Ke**, a machine defined by having no SCSI at all,
+and depending on `rtl/scsi.v` for a RAM primitive would tie the two together
+for nothing and drag 1700 lines into the bench.
+
+**MultiBlock Read works exactly as the framing section above says**, and the
+bench proves each frame end to end against a block-device model. Two details
+that only showed up in the building:
+
+- **A failed fetch is ANSWERED, not dropped** -- one group, status bit 7, which
+  is TashTwenty's error path verbatim and exactly what `$4197DA btst #$18,d0`
+  looks for. `blksLeft` is deliberately NOT reset on that path, because the ROM
+  checks the block byte against its own counter FIRST (`$41978C`, error $31)
+  and only then reads the status, so zeroing it reports the wrong failure.
+- **A zero-block read is not a command** and is dropped like any unimplemented
+  opcode.
+
+**THE INTEGRATION DECISION, and it is a real deviation.** `rtl/iwm.v`
+instantiates the DCD as a peer of `floppy.v` on the same byte interface, with
+`_enable` = `~diskEnableExt`, and **it REPLACES the external floppy while a DCD
+image is mounted**. A real HD20 daisy-chains a floppy behind itself -- PH3
+selects down the chain, which is why `rtl/dcd_link.v` takes `lstrb` at all --
+and we do not. That is this plan's stated shape ("occupies the external drive
+slot"), and the deviation is recorded here rather than buried.
+
+**What makes it safe is the other half:** the mux is on `dcdPresent`, so with no
+DCD image mounted the external port is bit-identical to what it has always
+been. `sim/tb_iwm_latch.v` passes unchanged with the DCD instantiated, which is
+the regression that matters.
+
+**GATES.** `tb_dcd_link` 33/33, `tb_dcd_disk` 37/37, `tb_dcd_status` 36/36 (its
+capacity now comes from a real mount rather than a bench-driven port),
+`tb_dcd_read` 22/22. Mutation: 15/16 and 16/17 killed, both survivors
+demonstrably equivalent.
+
+**AND THE SWEEPS FOUND FIVE MORE HOLES, ALL IN THE BENCHES, NONE IN THE RTL.**
+That is now the rule and not the exception on this project. The two worth
+keeping:
+
+- **Holding a buffer address for two clocks hid whether the byte-lane select is
+  pipelined alongside the registered RAM output.** Only a byte-per-clock walk
+  tells them apart, and the real consumer will eventually do exactly that.
+- **Nothing made the host stall, and that hid a genuine race.** A frame does not
+  reach its first data byte until 26 byte-times in -- thousands of clocks -- so
+  a drive that starts transmitting *without waiting for its fetch* is correct
+  against any prompt host and only fails when the SD card is slow. The bench
+  now stalls the host deliberately, with the previous block still in the buffer
+  so serving late is detectable as serving stale.
+
+**FIRST COMPILE OF THE PHASE.** Quartus analysis and elaboration clean, 0
+errors, and the hierarchy really is there
+(`emu|dataController_top:dc0|iwm:i|dcd:dcd0`). Its only connectivity notes are
+the write path that does not exist yet -- `wr_req`, `buf_d`, `buf_we` stuck at
+GND and `readonly` dangling -- plus the parts of `rxBuf` a one-group command
+never reaches.
+
+**WHAT IS LEFT, and it is now a short list:**
+
+1. **MultiBlock Write.** The blocker is not the command layer, it is the LINK
+   layer: a write's first block rides WITH the command, so `rxBuf`'s eight
+   bytes are nowhere near enough and `rtl/dcd_link.v` has to stream received
+   data into the sector buffer instead. Opcodes `$01`, `$02` and the continued
+   `$41`, answered `$81` and never `$C1`.
+2. **Hardware bring-up**, with `HD Diag` (ReneDiag) first -- it exercises the
+   link without needing the file system, the driver patch or a bootable volume.
+3. The OSD greying already deferred, which can ride this phase's build.
+
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
