@@ -1049,10 +1049,31 @@ item 7 is not merely a 512Ke enabler: bus-erroring on unmapped accesses is
 authentic 68000 behaviour and a general accuracy win, so it stands on its own as
 a capstone.
 
-Hardware pass criteria: a 512Ke boots System 6 from the HD20 image at s1,
-reports 512K in "About the Finder", finds no SCSI devices and does not hang
-looking; a 128K still boots System 1/2 from the 400K control image with SCSI now
-gated; every other model unregressed.
+**CORRECTED 2026-09-03 (Daniel spotted it).** This phase previously said "a
+512Ke boots System 6 from the HD20 image at s1", which contradicts the phase's
+own goal: **a 512Ke has no SCSI**, so once the gate exists it cannot see s1 at
+all. The criterion was also wrong on the image -- `s1` is `HD20.vhd`, a SCSI
+disk at ID 5 holding **System 7.1**, which 512K of RAM could not run anyway.
+
+How the error happened is worth recording, because the trap is reusable: the
+file is *named* HD20, and the real **Apple HD20 was a 20 MB drive for exactly
+these machines -- connected to the external FLOPPY port**, precisely because the
+512K/512Ke had no SCSI. The name is period-correct; the inference from it was
+not. This core does not emulate the floppy-port HD20, so:
+
+**A 512Ke in this core is a FLOPPY-ONLY machine, and that is authentic** for a
+512Ke without its optional external hard disk. Worth stating plainly because it
+changes what "useful" means for the model -- Phase 4 removes the only mass
+storage it currently has.
+
+Hardware pass criteria: **a 512Ke boots from an 800K floppy** (System 3.x/4.x,
+which is what the machine shipped with and has the RAM for -- System 6 wants
+1 MB and is marginal at best on 512K), reports **512K** in "About the Finder",
+and **finds no SCSI devices without hanging while it looks** -- that last one is
+the actual test of the synthetic bus error, since this is the only model whose
+ROM probes. A 128K still boots System 1/2/3 from the 400K control image with
+SCSI now gated; Plus/SE unregressed, which after this phase means checking they
+still see their SCSI disks, because the bus error touches every model.
 
 ## Verification
 
