@@ -1855,12 +1855,25 @@ conversion (`dc2dsk`, `releases/bin2dsk.sh`).
   - Volume `3.2 32MB (P)`, 65,514 allocation blocks of 512 bytes, 3 files in the
     root, 30.9 MB free, attributes `$0100` (cleanly unmounted).
 
-  **One honest caveat: it is 32 MB, and a real HD20 is about 20 MB** (38,964
-  data blocks). So this is an HD20-SHAPED volume rather than an image of a real
-  HD20. Capacity is something we report in the identity block, so we can claim
-  whatever we mount -- but whether `SonyDCD` accepts more than a real unit ever
-  had is untested. If it objects, fall back to a 20 MB volume; the Floppy Emu
-  reportedly serves far larger images in HD20 mode, so this is unlikely to bite.
+  **The size caveat is CLOSED (Daniel, 2026-09-04): the Floppy Emu serves up to
+  2 GB in HD20 mode**, so `SonyDCD` plainly accepts capacities far beyond the
+  20 MB a real unit had, and a 32 MB volume is unremarkable.
+
+  **And the ceiling is the FILE SYSTEM, not the interface.** The DCD read and
+  write commands carry a **3-byte block number**, so the protocol addresses
+  16,777,216 blocks -- 8 GB at 512 bytes each. The 2 GB figure is the HFS limit:
+  65,535 allocation blocks (a 16-bit count) times a 32 KB maximum allocation
+  block. Worth knowing because it means capacity questions in this phase are
+  HFS questions, and the identity block can honestly report whatever is mounted.
+
+  That also explains the artefact's size rather than leaving it odd: 65,514
+  allocation blocks of 512 bytes is just under the same 65,535 limit, so
+  `320_32MB_volume.dsk` is "as large as HFS goes with 512-byte allocation
+  blocks", not an arbitrary 32 MB.
+
+  Separately, `count` in the read/write command is a SINGLE byte, so at most 255
+  blocks move per command. That is a transfer-size limit, not a capacity one,
+  but the engine has to honour it.
 
   **THE STARTUP DISK IS HERE TOO**, `C:/temp/Mac/HD20/HD_20_Startup.img`
   (Daniel, 2026-09-04) -- and it needs no conversion: **409,600 bytes, raw 400K,
