@@ -1678,6 +1678,54 @@ behaviourally, exactly as the SCSI targets were done.
   supersedes a reading of the hand-drawn table if the phase decode is ever in
   doubt.
 
+### Borrowing from the Lisa core (Daniel's suggestion, 2026-09-04)
+
+`MiSTer-devel/Apple-Lisa_MiSTer` (default branch `main`, a port of
+alexthecat123's LisaFPGA) contains **`rtl/profile.sv`**, ~900 lines emulating a
+ProFile hard disk. That is the same Apple family as the HD20 -- ProFile, Widget
+and the HD20 share lineage, which is precisely why the HD20 firmware could reuse
+Widget's comments -- and it shows.
+
+**What transfers, and it is the part we would otherwise build from scratch:**
+
+- **The 532-to-512 translation.** ProFile images there are raw 532-byte blocks,
+  so a block spans up to THREE 512-byte SD sectors. `profile.sv` computes the
+  byte offset as `(n<<9) + (n<<4) + (n<<2)` (i.e. `n * 532` by shift-and-add) and
+  runs a **three-sector cache**, with read-modify-write on the write path. If we
+  ever store true 532-byte blocks, that is the design, already working.
+- **The HPS plumbing is signal-for-signal what we use**: `sd_lba`, `sd_rd`,
+  `sd_wr`, `sd_ack`, `sd_buff_addr`, `sd_buff_dout`, `sd_buff_din`,
+  `sd_buff_wr`, `img_mounted`, `img_size`. The integration pattern carries over
+  directly.
+- **Command-set shape as a semantic reference**: `$00` read block, `$01`-`$03`
+  write variants, a spare/diagnostic table at block `$FF`, status bytes ahead of
+  data. DCD's read / write / write-verify / status is the same family, so this
+  is a useful cross-check on what the responses are FOR.
+
+**What does NOT transfer -- and it is the bulk of Phase 5.** ProFile's host link
+is a **parallel handshake**: `_CMD`, `_PSTRB`, `_BSY`, `R_W`, an 8-bit
+bidirectional `PD` bus and a parity line. DCD is serial over the floppy port: a
+phase-line state machine, 7-for-8 group encoding, sync bytes, fast ACK/NAK, and
+per-group hold-off with the held-off group excluded from the checksum. There is
+essentially no overlap. **Borrow the storage layer; write the link layer.**
+
+**This reopens the image-format decision, which is now a genuine choice rather
+than a constraint.** Earlier this section withdrew the "532-byte images" claim on
+the strength of the Floppy Emu using plain 512-byte images with synthesized zero
+tags. Both approaches are real and now both have working precedent:
+
+| | 512-byte image (Floppy Emu) | 532-byte image (`profile.sv`) |
+|---|---|---|
+| image | reuses existing artefacts, incl. our blank `mac_20mb.vhd` | bespoke, must be created |
+| HPS mapping | 1 block = 1 sector, trivial | block spans 3 sectors, needs the cache |
+| tags | synthesized as zero; a tag written is not read back | full fidelity, tags round-trip |
+
+**Recommendation: start with 512-byte images.** It reuses the artefacts we
+already have and the sector path already in this core, and the Mac discards the
+tags. Keep `profile.sv` as the proven blueprint for the 532 path if tags ever
+turn out to matter -- the cost of that option just dropped a lot, because
+somebody has already solved its hard part on the same platform.
+
 ### Test artefacts, and they are mountable TODAY
 
 `diag/` holds three **400K floppy images** in Disk Copy 4.2 format --
