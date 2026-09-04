@@ -2312,6 +2312,84 @@ The receiver validates by summing everything including the checksum byte to zero
 `readData[7:0]` + `newByteReady`. No new physical modelling, because DCD uses
 the ordinary RD and WR lines.
 
+### RTL stage 1: `rtl/dcd_link.v`, 30/30 and mutation-tested (2026-09-04)
+
+The link layer only -- phase decode, the ID states, /HSHK, 7-for-8 coding both
+ways, the checksum, and hold-off. The command layer (Status, MultiBlock Read,
+MultiBlock Write) and the storage back end sit on top and are next. The module
+header carries the reasoning; this is the record of what was gated and how.
+
+**Not yet instantiated anywhere, and deliberately so.** `MacPlus.sv`, `iwm.v`,
+`files.qip` and the `.qsf` are untouched, so nothing in the built core changes
+and no Quartus compile is implied. Integration is its own step, and adding the
+file to the build before it is instantiated would only synthesise dead logic.
+Remember when that step comes that this project's `.qsf` and `files.qip`
+disagree about which files exist -- see [[macplus-qsf-quartus-gui-pollution]].
+
+**`sim/tb_dcd_link.v`: 30/30 under iverilog.** The vector that matters most is
+free: the May specification works a full group by hand in Figure 1, giving
+data `$31..$37` -> `$98 $99 $99 $9A $9A $9B $9B` with an LSB byte of `$D5`, and
+it states the Mac-to-DCD order explicitly as `$D5 $98 $99 $99 $9A $9A $9B $9B`
+-- LSB byte first, which is exactly this module's receive direction. **So the
+decoder is asserted against Apple's own worked example rather than against my
+reading of the prose.** The same vector does double duty: its bytes sum to `$72`
+rather than zero, so it must be REJECTED, which proves the checksum actually
+fires. A checksum that never rejects is the classic silent pass.
+
+**Twelve mutants, all caught** (baseline 30/30):
+
+| mutation | score |
+|---|---|
+| RESET state ignored | 28 |
+| ID state 5 senses 1 | 29 |
+| ID state 6 senses 0 | 29 |
+| LSB bit order reversed | 29 |
+| checksum not negated | 27 |
+| checksum never rejects | 27 |
+| TX shift direction wrong | 25 |
+| sync byte `$96` not `$AA` | 21 |
+| absent device reports DCD | 28 |
+| hold-off does not rewind | 28 |
+| `rxLen` off by one | 29 |
+| group count off by one | 23 |
+
+**Two bugs the bench caught that inspection had not**, both worth recording
+because both are the kind that survive a good-path test:
+
+- `rxLen` was set from `rxCount` before the last byte had been counted, so
+  every command came out one byte short.
+- The group count is `$80 | (groups + 1)`, and I had treated the recovered
+  value as "groups remaining AFTER this one", so a single-group command sat
+  waiting for a second group that never came. Every decode was correct and
+  nothing ever completed -- which looks like a link fault, not an arithmetic
+  one.
+
+**And one gap the mutation sweep caught in the BENCH itself.** The first
+version of the RESET test asserted `txBusy == 0` and `/HSHK` high after
+entering state 4 -- from idle, where both were already true. Removing the
+state-4 case from the module entirely still scored 30/30. The test now starts a
+transfer, gets two bytes out of it, and only then asserts RESET, plus a second
+assertion that the receiver still frames a fresh command afterwards. **A test
+whose precondition is already satisfied is not a test**, and only the mutation
+sweep says so.
+
+**One mutant fails by TIMEOUT rather than by assertion** -- removing the
+hold-off check in `TX_DATA` entirely, which hangs the bench waiting for a sync
+that never comes. That is a detection, but a poor one; if that path is ever
+reworked, give it a bounded assertion instead.
+
+**Deferred to the command layer**, with what is known already recorded above:
+the identity block is now fully pinned down from the page image -- 13 + 3 + 2 +
+3 + 2 + 2 + 1 + 1 + 3 + 3 + 3 = **exactly 36 bytes**, and the field widths are
+in the March document's `ID_Block` record on pages 1-2. Two document errors to
+carry forward: the Status command is drawn with SIX pad bytes, which makes it 8
+bytes and not a whole group, where MultiBlock Read and Diagnostic are both 7
+and the ROM's own command block is 6 + checksum = 7; and the read response is
+drawn as 537 bytes, which is not a whole number of groups either, while the ROM
+computes exactly 76 groups = 532. **The ROM arbitrates, per this plan's source
+hierarchy** -- but neither has been resolved yet, and the read path should not
+be built until they are.
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
