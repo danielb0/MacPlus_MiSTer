@@ -1402,21 +1402,49 @@ check anything surprising against the page image before trusting it.
 and Michael Hanlon, version 1.1, 28 March 1985**, and is subtitled "7-for-8
 version". "Rene" throughout is the drive's internal codename.
 
-**Physical layer -- the DB-19 lines are REPURPOSED, not shared.** This is the
-thing that makes DCD a different engine rather than a floppy variant:
+**Physical layer -- and the table below is CORRECTED FROM THE PAGE IMAGE,
+2026-09-04, because the OCR shifted a whole column.** Read `may_p1.png`
+(rendered with PyMuPDF -- see the rendering note further down), not the `.txt`.
 
-| DB-19 | floppy meaning | DCD meaning | owner |
+| DB-19 | Macintosh name | DCD usage | Mac connection |
 |---|---|---|---|
-| 11 | PH0 | handshake state bit 0 | IWM |
-| 12 | PH1 | handshake state bit 1 | IWM |
-| 13 | PH2 | handshake state bit 2 (N/C on drive side) | IWM |
-| 14 | PH3 | **/Enable** -- selects among daisy-chained DCDs | IWM |
-| 15 | /WrReq | **Read Data** (drive -> Mac) | |
-| 16 | HDSel | **Write Data** (Mac -> drive) | VIA 6522 |
+| 11 | PH0 | Phase0 -- handshake state bit 0 | IWM |
+| 12 | PH1 | Phase1 -- handshake state bit 1 | IWM |
+| 13 | PH2 | Phase2 -- handshake state bit 2 | IWM |
+| 14 | PH3 | Phase3 -- "used to allow multiple DCD's" | IWM |
+| 15 | /WrReq | **N/C** | |
+| 16 | HDSel | **N/C** | VIA/6522 |
+| 17 | /ENBL2 | **/Enable** | IWM |
+| 18 | RD | **ReadData** -- "also connected to Sense on IWM" | IWM |
+| 19 | WR | **WriteData** | IWM |
 
-So the data path is HDSel out and /WrReq in, with PH0-PH2 as a 3-bit state bus
-driven by the Mac, which is master throughout. High bit of every byte always 1,
-net 428.38 kbps.
+**~~The data path is HDSel out and /WrReq in.~~ WRONG, and it was my error, not
+the document's.** The OCR ran the "DCD usage" column two rows out of step with
+the pin numbers, so ReadData and WriteData landed on pins 15/16 instead of
+18/19, and `/Enable` landed on PH3 instead of `/ENBL2`. Four rows of that table
+were wrong. What the page actually says:
+
+- **DCD uses the ORDINARY IWM data lines** -- RD (18) in, WR (19) out -- exactly
+  the pins a floppy uses. It is not a repurposing of the data path at all.
+- **`/WrReq` and `HDSel` are N/C.** So **SEL is unused by DCD**, and an earlier
+  note here saying "SEL/HDSel is a VIA port A bit 5 line, not an IWM line, so
+  our RTL must take it from the VIA" is **withdrawn**: the ROM's phase primitive
+  does drive VIA PA5 as bit 1 of its nibble, but that is the *generic Sony*
+  primitive, and every DCD call passes a nibble with that bit clear
+  (`moveq #$D,d0` = `%1101`). The DCD engine should ignore SEL entirely.
+- **`/Enable` is pin 17 (`/ENBL2`), the ordinary external-drive enable.** PH3 is
+  a separate line used for daisy-chaining.
+
+**What IS repurposed is only PH0-PH2**, from a drive-register address into a
+3-bit handshake state bus, plus ReadData becoming bi-modal: serial data in
+state 1, a constant sense level in every other state. The Mac is master
+throughout. High bit of every byte always 1, net 428.38 kbps.
+
+**This is good news for the RTL, and it is why the ROM writes bytes to the IWM
+data register rather than bit-banging a VIA pin.** A DCD device is a peer of
+`floppy.v` on the same byte-level interface the IWM already provides -- `ca0`,
+`ca1`, `ca2`, `lstrb`, `_enable`, `writeData[7:0]`, `readData[7:0]` with bit 7
+doubling as sense. No new physical modelling is needed.
 
 **Correction, 2026-09-04: the clock is 7.8333 MHz, NOT 8.0, and the spec says so
 explicitly.** "WriteData ... provides serial data transmission at 489.58K bps
@@ -2196,6 +2224,93 @@ data; both real implementations would reject it.
   bytes. **Flag, do not build on it.** It does not disturb the 512-byte image
   recommendation, because the Mac only ever sees the 512 either way -- but the
   two decompositions should be reconciled before anyone writes tag handling.
+
+### CORRECTION: the count bytes are Mac-to-drive ONLY (2026-09-04)
+
+**I got the receive side wrong in the section above and it is corrected here
+before any RTL was built on it.** The claim was that the ROM "reads two bytes
+after the sync on the receive side too, symmetric with the transmitter". It does
+not. Counting the byte reads between the sync hunt at `$419852` and the decode
+loop at `$4198C4` gives **eight**, into `d1,d1,d2,d2,d3,d3,d4,d4` -- and the
+decode then opens with `lsr.b #1,d4`, consuming the **eighth** byte as the LSB
+byte. That is a whole-group prefetch, and it confirms the specification's
+"when sending data from the DCD to the Macintosh, the LSB-byte is sent last".
+
+So the framing is **asymmetric, and both sides' code agrees on the asymmetry**:
+
+| direction | after the sync |
+|---|---|
+| **Mac -> drive** | **two count bytes**, then groups of 8 -- **LSB byte first**, then 7 data |
+| **drive -> Mac** | groups of 8 straight away -- 7 data, then the **LSB byte last** |
+
+**And that asymmetry makes sense of what the count bytes are for.** They carry
+the group count in *each* direction: the Mac tells the drive how many groups it
+is about to send and how many it expects back. The drive has no need to tell the
+Mac anything, because the Mac already knows both numbers -- it computed them at
+`$4196FA`/`$419704` before the transfer started. So one direction carries them
+and the other does not, which is not an inconsistency but the obvious design.
+
+The evidence for the count bytes themselves is unaffected and still comes from
+two genuinely independent sides: the Mac transmitter builds them with
+`+$810081`, and the drive firmware's host-receive routine (`L1da2`) masks
+exactly two bytes with `$7F` before reaching its LSB byte. Only the claim of
+symmetry was wrong.
+
+**`cmpi.b #$BF,d1` is therefore not a check on a count byte.** It tests the
+FIRST TRANSMITTED BYTE OF THE FIRST GROUP from the drive, and sets `d7.high = 6`
+when it matches. Still unexplained, still one branch, and still cheap to trace
+when the read path is implemented -- but it is a different question from the one
+recorded above.
+
+**How the error happened, since it is worth not repeating.** I found two reads,
+stopped counting, and matched them against a pattern I had just established on
+the transmit side. The prefetch is unrolled with `swap` between each pair, so
+the first two reads look like a preamble and the rest look like the loop body.
+**Count the whole unrolled sequence before naming it** -- the same discipline the
+transmit engine needed, where six `roxr` steps and two register halves are one
+group and not two.
+
+### The link layer, as it will be built
+
+Everything above, reduced to what `rtl/dcd.v` has to do. Nothing here is new;
+this is the specification the bench is written against.
+
+**Phase decode.** `state = {ca2,ca1,ca0}`, plain binary, one line changing at a
+time. `lstrb` is PH3 (daisy-chain select) and **SEL is ignored** -- see the
+corrected pinout.
+
+**Sense, driven onto `readData[7]` whenever the device is not sending data:**
+
+| state | sense | meaning |
+|---|---|---|
+| 7 | **1** | drive connected |
+| 6 | **1** | (# sides on a Sony) |
+| 5 | **0** | this is a DCD, not a Sony |
+| 4 | -- | RESET asserted; device performs a power-up reset |
+| 3 | /HSHK | HOST asserted, Mac sensing |
+| 2 | /HSHK | idle |
+| 1 | -- | data mode; `readData` carries transmitted bytes |
+| 0 | /HSHK | HOFF asserted |
+
+**/HSHK is idle-HIGH, asserted-LOW**, which the ROM pins down three ways: the
+transmit entry errors `$10` if sense is 0 at idle, then spins `bmi` waiting for
+it to fall; the end-of-transmission spins `bpl` waiting for it to rise; and the
+receive entry refuses to start unless it is already 0.
+
+**Every transmitted byte has its MSB set, and that is what makes the IWM work
+for us.** `iwm.v` latches `readData` on `newByteReady` and clears the latch
+after a read; the driver polls with `dbmi`, looping while the value is
+non-negative. A byte with the MSB clear would be indistinguishable from an empty
+latch. So the MSB rule is not a quirk of the IWM's write side -- it is the
+data-ready signal on the read side, and the framing depends on it.
+
+**Checksum:** an 8-bit sum of the *decoded* data bytes, sent as `(-sum) & $FF`.
+The receiver validates by summing everything including the checksum byte to zero.
+
+**A DCD device is a peer of `floppy.v`**, on the interface the IWM already has:
+`ca0`, `ca1`, `ca2`, `lstrb`, `_enable`, `writeData[7:0]` + `writeReq`,
+`readData[7:0]` + `newByteReady`. No new physical modelling, because DCD uses
+the ordinary RD and WR lines.
 
 ### Do we need the firmware?
 
