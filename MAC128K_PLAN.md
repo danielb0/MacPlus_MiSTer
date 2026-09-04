@@ -1186,6 +1186,12 @@ not. This core does not emulate the floppy-port HD20, so:
 changes what "useful" means for the model -- Phase 4 removes the only mass
 storage it currently has.
 
+**System version support, corrected 2026-09-04:** the **512Ke runs System 6.0.x
+up to 6.0.8**, which is its ceiling -- memory is tight but it boots. The
+**512K** cannot run System 6 at all, because HFS lives in the 128K ROM it does
+not have. Earlier text in this plan implying System 6 needs 1 MB and is out of
+reach for a 512Ke was wrong.
+
 **A cheap second witness for the 512Ke (Daniel, 2026-09-04).** In "About the
 Finder", a 512K and a 512Ke are distinguished by a **trailing period**: `512K`
 is a 512K, `512K.` is a 512Ke. That is worth having because it is independent of
@@ -1908,10 +1914,20 @@ conversion (`dc2dsk`, `releases/bin2dsk.sh`).
   addressing are consistently 24-bit across the design. Nothing here is being
   stretched beyond what Apple specified.
 
-  **Caveat on what it can and cannot test:** it carries System 6.0.8, which
-  needs 1 MB and will not run on a 512K or 512Ke. So it is an ADDRESSING test on
-  any model, but a BOOT test only on a Plus or SE. Do not read a 512Ke failing
-  to boot it as a DCD fault.
+  **A caveat I wrote here was WRONG and is withdrawn (Daniel, 2026-09-04).** It
+  claimed System 6.0.8 needs 1 MB and would not run on a 512Ke, making this a
+  boot test only on a Plus or SE. Not so: **6.0.8 is the MAXIMUM system for the
+  512Ke and it runs there.** The limit is practical -- with 512K there is very
+  little left for applications -- not a floor that stops it booting. So this
+  volume is a boot test on a 512Ke as well.
+
+  Two lessons, since this is the same mistake in two forms. Daniel had already
+  reported running 6.0.5 on the Ke earlier the same day, so the contradiction
+  was in the conversation before I wrote the claim. And the underlying error was
+  conflating the **512K** (64K ROM, cannot run System 6 at all, since HFS needs
+  the 128K ROM) with the **512Ke** (128K ROM, runs it fine but tightly). Those
+  two models differ by exactly the thing this whole project is about; do not let
+  the shared "512" in the names blur them.
 
   **Authenticity note, so the two do not get confused:** a real HD20 is ~20 MB,
   so large volumes are a CONVENIENCE feature, not accuracy -- the Floppy Emu
