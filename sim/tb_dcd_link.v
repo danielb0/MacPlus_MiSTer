@@ -117,6 +117,55 @@ module tb_dcd_link;
 		end
 	endtask
 
+	// THE MAC-INITIATED HANDSHAKE, replayed exactly as $419A98-$419ABC does
+	// it. This is the sequence every command rides on, and no bench performed
+	// it until 2026-09-04 -- they all jumped straight to state 1 and started
+	// sending, which the drive happens to accept. Real hardware does not work
+	// that way and answered "Comm error" until this was written.
+	//
+	//   $419A9E  read sense                 must be 1 at idle, else error $10
+	//   $419AA6  tst.b $200(a0)  ca0=1      -> state 3, HOST asserted
+	//   $419AB0  spin, timeout -> error $11
+	//   $419AB6  read sense
+	//   $419ABA  bmi $419AB0                LOOP WHILE SENSE == 1
+	//   $419ABC  tst.b $400(a0)  ca1=0      -> state 1, now send
+	//
+	// TashTwenty's Receive does the mirror image: wait while state 2, require
+	// state 3, `bcf PORTC,RC4` to assert /HSHK, wait while state 3, require
+	// state 1.
+	integer hsWait;
+	task macRequestToSend;
+		begin
+			setState(3'd2);
+			@(posedge clk); #1;
+			check("idle: /HSHK is de-asserted before a command", readData[7] === 1'b1);
+			setState(3'd3);
+			hsWait = 0;
+			while (readData[7] !== 1'b0 && hsWait < 4000) begin
+				@(posedge clk); hsWait = hsWait + 1;
+			end
+			check("the drive asserts /HSHK when the Mac asserts HOST",
+			      readData[7] === 1'b0);
+			setState(3'd1);
+		end
+	endtask
+
+	// $419B... returns to state 3 when the command is fully sent, and IntEn3
+	// in TashTwenty says the Mac "is done and is waiting for !HSHK to be
+	// deasserted" before it will go idle.
+	task macEndOfCommand;
+		begin
+			setState(3'd3);
+			hsWait = 0;
+			while (readData[7] !== 1'b1 && hsWait < 4000) begin
+				@(posedge clk); hsWait = hsWait + 1;
+			end
+			check("the drive releases /HSHK once the command is sent",
+			      readData[7] === 1'b1);
+			setState(3'd2);
+		end
+	endtask
+
 	// Collect the next transmitted byte.
 	task getByte;
 		output [7:0] b;
@@ -187,6 +236,54 @@ module tb_dcd_link;
 		// this is not cosmetic.
 		setState(3'd2); @(posedge clk); #1;
 		check("idle state 2: /HSHK de-asserted (sense 1)", readData[7] === 1'b1);
+
+		// ---------------------------------------------------------------
+		// 1b. THE COMMAND HANDSHAKE. Everything else in this bench assumes
+		//     it; nothing tested it, and it was missing from the RTL.
+		// ---------------------------------------------------------------
+		armRx;
+		macRequestToSend;
+		macByte(8'hAA);
+		macByte(8'h81);
+		macByte(8'h81);
+		// One whole group is EIGHT bytes: the LSB byte then seven data bytes.
+		macByte(8'h80);                                   // LSB byte
+		macByte(8'h80); macByte(8'h80); macByte(8'h80);   // 7 data bytes,
+		macByte(8'h80); macByte(8'h80); macByte(8'h80);   //  all zero, so the
+		macByte(8'h80);                                   //  checksum closes
+		macEndOfCommand;
+
+		// The Mac drops /ENBL2 between operations. A handshake abandoned that
+		// way must not leave /HSHK stuck low or the state machine mid-sequence,
+		// or the NEXT command starts from a lie. Nothing exercised this until a
+		// mutant deleting the deselect reset scored full marks.
+		setState(3'd2);
+		@(posedge clk); #1;
+		setState(3'd3);
+		hsWait = 0;
+		while (readData[7] !== 1'b0 && hsWait < 4000) begin
+			@(posedge clk); hsWait = hsWait + 1;
+		end
+		check("mid-handshake: /HSHK is asserted before the deselect",
+		      readData[7] === 1'b0);
+		#1; _enable = 1'b1;                 // /ENBL2 released
+		repeat (4) @(posedge clk); #1;
+		check("a deselected drive reads as absent", readData[7] === 1'b1);
+		#1; _enable = 1'b0;                 // selected again
+		repeat (4) @(posedge clk); #1;
+		check("and it comes back de-asserted, not stuck low",
+		      readData[7] === 1'b1);
+		// ...and a fresh command still works.
+		armRx;
+		macRequestToSend;
+		macByte(8'hAA);
+		macByte(8'h81);
+		macByte(8'h81);
+		macByte(8'h80);                                   // LSB byte
+		macByte(8'h80); macByte(8'h80); macByte(8'h80);   // + seven data bytes
+		macByte(8'h80); macByte(8'h80); macByte(8'h80);
+		macByte(8'h80);
+		macEndOfCommand;
 
 		// ---------------------------------------------------------------
 		// 2. Figure 1, verbatim - decode direction

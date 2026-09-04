@@ -143,6 +143,7 @@ module tb_dcd_read;
 	reg [7:0] sync;
 	reg       ok, okAll;
 	integer   nDecoded;
+	integer   hsWait;
 
 	task setState;
 		input [2:0] s;
@@ -197,6 +198,19 @@ module tb_dcd_read;
 			sum = 0;
 			for (i = 0; i < 6; i = i + 1) sum = sum + cmd[i];
 			cmd[6] = -sum;
+			// THE REAL HANDSHAKE, not a jump to state 1. Every bench here
+			// used to start sending in state 1, which the drive accepted and
+			// real hardware did not: the Mac asserts HOST and spins until the
+			// drive pulls /HSHK low ($419AB0, error $11). See tb_dcd_link.v.
+			setState(3'd2);
+			@(posedge clk); #1;
+			setState(3'd3);
+			hsWait = 0;
+			while (readData[7] !== 1'b0 && hsWait < 8000) begin
+				@(posedge clk); hsWait = hsWait + 1;
+			end
+			check("the drive acknowledged the command with /HSHK",
+			      readData[7] === 1'b0);
 			setState(3'd1);
 			macByte(8'hAA);
 			macByte(8'h80 | macGroups(0));          // command groups
@@ -205,6 +219,16 @@ module tb_dcd_read;
 			                (cmd[3][0] << 3) | (cmd[4][0] << 2) | (cmd[5][0] << 1) |
 			                 cmd[6][0]);
 			for (i = 0; i < 7; i = i + 1) macByte(8'h80 | (cmd[i] >> 1));
+			// The Mac returns to state 3 and waits for the release before
+			// idling - TashTwenty's IntEn3.
+			setState(3'd3);
+			hsWait = 0;
+			while (readData[7] !== 1'b1 && hsWait < 8000) begin
+				@(posedge clk); hsWait = hsWait + 1;
+			end
+			check("the drive released /HSHK at the end of the command",
+			      readData[7] === 1'b1);
+			setState(3'd2);
 		end
 	endtask
 

@@ -32,6 +32,26 @@
    for it to rise; and the receive entry ($419820) refuses to start unless it
    is already 0.
 
+   AND IT IS DRIVEN FROM BOTH DIRECTIONS, WHICH THIS FILE ORIGINALLY MISSED.
+   A drive that only asserts /HSHK when IT wants to talk answers no command at
+   all: before sending anything the Mac asserts HOST and SPINS until the drive
+   pulls /HSHK low, giving up with error $11. On hardware that presents as a
+   diagnostic reporting "Comm error" while the ID probe still succeeds, because
+   identification is a static level and needs no handshake.
+
+     $419A9E  read sense                 must be 1 at idle, else error $10
+     $419AA6  tst.b $200(a0)  ca0=1      -> state 3, HOST asserted
+     $419AB0  subq.l #1,d7 / beq         timeout -> error $11
+     $419AB6  read sense
+     $419ABA  bmi $419AB0                SPIN WHILE SENSE == 1
+     $419ABC  tst.b $400(a0)  ca1=0      -> state 1, and only now send
+
+   TashTwenty's receiver is the mirror image and settles the release too: wait
+   while state 2, require state 3, `bcf PORTC,RC4` to assert; then wait while
+   state 3, require state 1, receive. When the Mac has sent everything it
+   returns to state 3 -- its IntEn3 comment reads "mac is done and is waiting
+   for !HSHK to be deasserted" -- and the drive releases before idling.
+
    EVERY TRANSMITTED BYTE HAS ITS MSB SET, and on this interface that is not a
    quirk - it is the data-ready signal. iwm.v latches readData on newByteReady
    and clears the latch after a read, and the driver polls with `dbmi`,
@@ -148,6 +168,29 @@ module dcd_link
 	wire [2:0] state    = {ca2, ca1, ca0};
 	wire       selected = present & ~_enable;
 
+	// Mac-initiated command handshake. Separate from the transmit FSM because
+	// the two are different conversations that happen to share one wire: here
+	// the Mac asks and we answer, there we ask and the Mac answers.
+	//
+	// ARMING REQUIRES PASSING THROUGH IDLE FIRST, and that is not tidiness.
+	// State 3 occurs at BOTH ends of every exchange - the Mac raises HOST to
+	// begin, and returns to it to wait for the release - so a drive that armed
+	// on state 3 alone would re-assert /HSHK the instant it finished a reply
+	// and deadlock against the Mac's own end-of-transmission spin.
+	localparam RXH_IDLE  = 3'd0, RXH_ARMED = 3'd1, RXH_READY = 3'd2,
+	           RXH_DATA  = 3'd3, RXH_DONE  = 3'd4;
+	reg [2:0] rxHs;
+
+	// A reply request has to be REMEMBERED rather than acted on immediately.
+	// The command layer raises txReq the moment a command decodes, which is
+	// while the Mac is still in state 1 finishing the send - and a drive that
+	// grabbed /HSHK there would never release it for the end-of-command
+	// acknowledgement, hanging the Mac at the far end of the very exchange it
+	// had just got right. TashTwenty's Transmit refuses to start unless the
+	// state is 2 and aborts otherwise; this is that rule, with a latch so the
+	// one-clock request survives the wait for idle.
+	reg txPend;
+
 	// ------------------------------------------------------------------
 	// Sense
 	// ------------------------------------------------------------------
@@ -248,6 +291,8 @@ module dcd_link
 			txBusy       <= 0;
 			newByteReady <= 0;
 			hshk_n       <= 1'b1;
+			rxHs         <= RXH_IDLE;
+			txPend       <= 1'b0;
 		end
 		else begin
 			rxValid      <= 0;
@@ -264,8 +309,58 @@ module dcd_link
 				txState <= TX_IDLE;
 				txBusy  <= 1'b0;
 				hshk_n  <= 1'b1;
+				rxHs    <= RXH_IDLE;
+				txPend  <= 1'b0;
 			end
 			else begin
+
+				// ---------------- command handshake ----------------
+				// Runs only while we are not the initiator; a reply drives
+				// /HSHK from the transmit FSM below, whose assignments come
+				// later in this block and therefore win on the cycle txReq
+				// arrives.
+				if (txState == TX_IDLE && !txBusy) begin
+					if (!selected) begin
+						hshk_n <= 1'b1;
+						rxHs   <= RXH_IDLE;
+					end
+					else case (rxHs)
+					RXH_IDLE:
+						if (state == 3'd2) rxHs <= RXH_ARMED;
+
+					RXH_ARMED:
+						if (state == 3'd3) begin
+							hshk_n <= 1'b0;      // "ready to receive"
+							rxHs   <= RXH_READY;
+						end
+
+					RXH_READY:
+						if (state == 3'd1) rxHs <= RXH_DATA;
+						else if (state == 3'd2) begin
+							hshk_n <= 1'b1;      // Mac changed its mind
+							rxHs   <= RXH_IDLE;
+						end
+
+					RXH_DATA:
+						// Back to 3 means the Mac has sent everything and is
+						// waiting for the release; 2 means it abandoned the
+						// transfer, which TashTwenty's IntEn2 treats as an
+						// abort for the same reason.
+						if (state == 3'd3) begin
+							hshk_n <= 1'b1;
+							rxHs   <= RXH_DONE;
+						end
+						else if (state == 3'd2) begin
+							hshk_n <= 1'b1;
+							rxHs   <= RXH_IDLE;
+						end
+
+					RXH_DONE:
+						if (state == 3'd2) rxHs <= RXH_IDLE;
+
+					default: rxHs <= RXH_IDLE;
+					endcase
+				end
 
 				// ---------------- receive ----------------
 				// The Mac only transmits in state 1. writeReq is the IWM
@@ -342,23 +437,30 @@ module dcd_link
 
 				// ---------------- transmit ----------------
 				case (txState)
-				TX_IDLE:
-					if (txReq && selected) begin
-						// Assert /HSHK and wait for the Mac to come round to
-						// state 1. It goes 2 -> 3 -> 1, sensing us in 3.
-						hshk_n    <= 1'b0;
-						txBusy    <= 1'b1;
-						txState   <= TX_WAIT;
-						txSent    <= 0;
-						txAddr    <= 0;
-						txIdx     <= 0;
-						txSum     <= 0;
-						txTick    <= 0;
-						txLsbAcc  <= 8'h80;
-						txAddrGrp <= 0;
-						txSentGrp <= 0;
-						txSumGrp  <= 0;
+				TX_IDLE: begin
+					if (txReq && selected) txPend <= 1'b1;
+					// Only out of IDLE, and only with the bus idle: see txPend
+					// above. Assert /HSHK to ask for the bus, then wait for the
+					// Mac to come round to state 1. It goes 2 -> 3 -> 1.
+					if ((txReq || txPend) && selected && state == 3'd2) begin
+						txPend    <= 1'b0;
+							// Assert /HSHK and wait for the Mac to come round to
+							// state 1. It goes 2 -> 3 -> 1, sensing us in 3.
+							hshk_n    <= 1'b0;
+							txBusy    <= 1'b1;
+							txState   <= TX_WAIT;
+							rxHs      <= RXH_IDLE;
+							txSent    <= 0;
+							txAddr    <= 0;
+							txIdx     <= 0;
+							txSum     <= 0;
+							txTick    <= 0;
+							txLsbAcc  <= 8'h80;
+							txAddrGrp <= 0;
+							txSentGrp <= 0;
+							txSumGrp  <= 0;
 					end
+				end
 
 				TX_WAIT:
 					if (state == 3'd1) begin
