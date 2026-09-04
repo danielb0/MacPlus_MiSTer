@@ -100,10 +100,30 @@ module dcd_link
 	output reg        rxValid,
 	output reg        rxBad,
 
+	// How many groups the Mac has asked to receive back, from the second count
+	// byte. Valid alongside rxValid. A DCD drive does not decide its own reply
+	// length: both real implementations size the reply from this byte and
+	// nothing else - TashTwenty zeroes exactly `RC_RSPG & $7F` groups of buffer
+	// before it writes a single field into them, and the HD20's own firmware
+	// does `ld R2,53h` immediately before sending the $AA and then ends its
+	// transmit loop on `dec R2 / jr NZ`. Honouring it is also what keeps us
+	// correct against a driver revision that asks for a length we did not
+	// anticipate.
+	output reg  [6:0] rxRspGroups,
+
 	// The command layer raises txReq with a payload; the link layer adds the
 	// sync, the group coding and the checksum. txBusy falls when it is done.
 	// txLen is the payload length EXCLUDING the checksum, and txLen+1 must be
 	// a multiple of 7 so the payload fills whole groups.
+	//
+	// THE CHECKSUM MUST LAND IN THE LAST SLOT OF THE LAST GROUP, not merely
+	// after the data. Where a reply is shorter than the groups requested, the
+	// padding goes BEFORE the checksum: the HD20 firmware emits `com R4 / inc
+	// R4` as the seventh byte of the group in which its counter reaches zero,
+	// and TashTwenty sums one byte less than the block "so we can write the
+	// checksum to the very last byte position". Choosing txLen so that txLen+1
+	// fills whole groups is what puts it there, so that requirement above is
+	// not a convenience - it is the wire format.
 	input             txReq,
 	input       [7:0] txData,    // payload byte selected by txAddr
 	output reg  [9:0] txAddr,
@@ -209,6 +229,7 @@ module dcd_link
 			rxSum        <= 0;
 			rxGroups     <= 0;
 			rxCount      <= 0;
+			rxRspGroups  <= 0;
 			rxBuf        <= 0;
 			rxLen        <= 0;
 			rxValid      <= 0;
@@ -275,8 +296,12 @@ module dcd_link
 
 					RX_CNT2: begin
 						// The second count is how many groups the Mac expects
-						// back. The command layer decides that from the
-						// opcode, so it is consumed and not used here.
+						// back, in the same $80|n form. $419ADC builds the
+						// pair with a single `addi.l #$810081,d0` - $81 added
+						// to both halves at once - so the two bytes are the
+						// same encoding and the low half, sent first, is the
+						// command's.
+						rxRspGroups <= writeData[6:0];
 						rxState <= RX_GROUP;
 						rxIdx   <= 0;
 						rxSum   <= 0;

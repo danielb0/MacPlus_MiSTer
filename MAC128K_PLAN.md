@@ -2770,9 +2770,9 @@ implementations agree with the ROM and not with the paper.
 | 5 | `Num_Blocks` | 3 | highest block = capacity-1 |
 | 8 | `Num_Spares` | word | 0 |
 | 10 | `Num_BadBlocks` | word | 0 |
-| 12 | `Manuf_Reserved` | 52 | identifies this core |
+| 12 | `Manuf_Reserved` | 52 | 0 |
 | 64 | `Icon` | 256 | 128 icon + 128 mask |
-| 320 | trailer | 12 | a Pascal string, free space |
+| 320 | trailer | 12 | `\pMiSTer HD20`, where TashTwenty puts its credits |
 
 = 332. Header `<$83><blks><stat><pad><pad><pad>`, then 4 pad, then `CHK` in the
 **final slot of the final group**: 6+332+4+1 = 343 = 49*7.
@@ -2794,6 +2794,45 @@ further out and I cannot settle it from the ROM. **Minus one is the safe
 direction whichever reading is right**: if the Mac wants a count we lose one
 block of a volume, whereas if it wants a maximum and we send a count it can
 address one block past the end.
+
+**Step 2 done: `sim/tb_dcd_status.v` 36/36, and this time the bench is a
+reimplementation of the Mac's receiver rather than a mirror of our transmitter.**
+Three things in it are derived rather than typed, which is the whole point:
+
+- `macGroups()` is `addq.w #6 / divu.w #7` + 1 from `$4196FA`, and the count
+  byte is that or'd with `$80` because `$419ADC` adds `$81` to both halves of
+  the pair at once. **Feed it 332 and 49 falls out; the number 49 is nowhere in
+  the bench.**
+- The reply is unpacked through the ROM's own two-buffer split at byte 26, so
+  identity offsets are reached the way the driver reaches them.
+- The icon is read at `$1F0`, an address the ROM computes for itself.
+
+**MUTATION SWEEP: 25 mutants, 22 killed, 3 provably equivalent.** The three
+survivors are all no-ops rather than gaps -- moving the icon FIELD boundary by
+two bytes changes nothing because the icon's first two bytes are blank top
+margin, and the two header-boundary mutants only reshuffle which `else if`
+returns the same zero. The faithful four-byte-header mutant, which shifts every
+offset together, **is** killed.
+
+**The sweep found four real holes, all in the BENCH, none in the RTL** -- the
+third time this project has had that result, and worth the same note as before:
+
+- **The icon test was tautological.** `iconByte(i) === identity(64+i)` reduces to
+  the same `rsp[]` subscript on both sides, so it held however the reply was laid
+  out; a mutant moving the icon two bytes scored full marks. It is now pinned by
+  CONTENT at a known phase -- eight blank rows, then row 8's `3F FF FF FC` -- and
+  that is also what kills the four-byte header.
+- Nothing checked the trailer at all.
+- "Every icon pixel is inside the mask" passes trivially when the mask is a copy
+  of the image, which would give a hollow, unclickable desktop icon. The mask now
+  has to be strictly larger somewhere.
+- Blanking part of the icon went unnoticed.
+
+**What this gate still cannot do is what the last one could not: prove the
+revision is right.** It is a stronger bench, not a different kind of evidence.
+The evidence that 1.2a is correct is the ROM plus TashTwenty plus Floppy Emu;
+the bench only proves we implement what we read. **Simulation against the real
+ROM, or hardware, remains the next real gate.**
 
 **Three things that are settled but belong to later steps:**
 
