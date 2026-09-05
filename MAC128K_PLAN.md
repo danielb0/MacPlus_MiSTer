@@ -4636,9 +4636,10 @@ guess and nothing should be built on it.
 group, `replyOp = opcode | $80`, status byte, pads. A handful of lines in
 `dcd.v`'s dispatch, reusing `K_WRITE`'s reply shape.
 
-**WHAT THE ROM CANNOT TELL US, and how to settle it:** whether acknowledging
-`$19` with success -- doing nothing physical -- lets Initialize proceed to a
-valid HFS volume. An HFS initialise is mostly boot blocks, MDB, bitmap and
+**WHAT THE ROM CANNOT TELL US -- ANSWERED 2026-09-05 by TashTwenty's author, see
+the 68kMLA section below: an empty acknowledgement IS enough, and Erase Disk
+works.** The question was whether acknowledging `$19` with success -- doing
+nothing physical -- lets Initialize proceed to a valid HFS volume. An HFS initialise is mostly boot blocks, MDB, bitmap and
 catalog written through ORDINARY block writes, and the low-level `Format Track`
 is `$13`, a different command, so a bare acknowledgement may well be enough.
 That is behavioural, not documentary. **Answer it and try it: the reproducer
@@ -4646,6 +4647,94 @@ takes seconds, the failure path has been watched to completion twice, and the
 test disk is a disposable backup (Daniel).** If it fails, THEN fetch TashTwenty
 and the Floppy Emu sources -- both authors solved this exact problem and a
 second implementation is the right arbiter.
+
+### 68kMLA "Deciphering DCD (Hard Disk 20)" -- Tashtari, 2022-04-26. IT ANSWERS $19/$1A
+
+**Source:** `https://68kmla.org/bb/threads/deciphering-dcd-hard-disk-20.40862/`, by
+**Tashtari, the author of TashTwenty**, posting a logic-analyser capture taken
+from a REAL HD20 on a 512Ke. Forum content, so lower standing than the Apple
+documents -- but it is a first-hand instrument capture by the person who wrote
+the second implementation, and its `$19 -> $99` matches what this plan derived
+independently from the ROM. Fetched with the in-app browser: **68kMLA is behind
+Anubis and `WebFetch` gets an access-denied page**, the same shape of problem as
+[[reference-bitsavers-mirror]].
+
+**THE CAPTURE, which is exactly our case:**
+
+```
+Erase Disk:
+Mac: 19 01 00 00 00 00
+DCD: 99 00 00 00 00 00
+Mac: 1A 00 00 00 00 00
+DCD: 9A 00 00 00 00 8A
+```
+
+**`$19` is answered `$99` and `$1A` is answered `$9A`.** That confirms, from
+hardware, the reply opcode this plan derived from `$419D08`'s
+`andi.b #$3f, $19c(a1)`. Two independent routes to the same byte.
+
+**WHAT THEY ARE.** *"The drive did a bunch of clicking before responding to each
+of these, and I think they lined up with 'Formatting disk...' and 'Verifying
+format...' so perhaps that's what they do, lay down sector boundaries on each
+track and verify that they're there."* So `$19` = format, `$1A` = verify format.
+The DIFormat/DIVerify guess recorded above was right, and is now an observation
+rather than a guess.
+
+**THE OPEN QUESTION IS ANSWERED, AND NOT BY US.** Whether a bare acknowledgement
+is enough for Initialize to succeed:
+
+> *"Mac always gives an expected response length whenever it sends a command, so
+> TashTwenty can (and does) respond to commands it doesn't know with an empty
+> block, which seems to frequently get interpreted as 'yup, yeah, did the thing
+> you said, everything's fine'. It certainly works for Erase Disk, anyway."*
+
+So the disposable-disk experiment is no longer needed to find out. A second
+implementation already does this and Erase Disk works.
+
+**WHY NO DOCUMENT NAMES THEM -- corroborated from a different direction.** He
+maps DCD command numbers onto a **December 1984 Nisha Firmware Specification**
+with an offset of **+4** (`$0A`->Set_Recovery, `$05`->Read_Controller,
+`$11`->Read_SpareTable, `$04`->Read_Id, `$17`->Read_Track), and finds
+`$19 - 4 = $15` and `$1A - 4 = $16` *"neither of which are listed in the
+December 1984 document"*. This plan derived **+2 against the May-85 1.2a
+diagnostic list**, which ends at `$16` Write Track. Two different base documents,
+two different offsets, both falling short of these two commands. **They postdate
+both specifications** -- which is the conclusion already reached here, now
+reached twice.
+
+**A THIRD DOCUMENT EXISTS AND WE DO NOT HAVE IT: the December 1984 Nisha
+Firmware Specification.** Worth knowing it is out there; it would not answer
+`$19`/`$1A` (he checked) but it names the whole diagnostic set from the drive's
+side.
+
+**TWO INCIDENTAL CORROBORATIONS OF TODAY'S FIX, from the same post:**
+
+- *"state 0 has ReadData in data mode, not sense mode"* -- exactly the
+  `readData` change made in `f157fcc8`, that the Mac reads real DATA while
+  asserting hold-off. We found it from `$419926`-`$419964`; he found it with an
+  analyser.
+- *"The descriptions of the handshake protocols between the Mac and the DCD are
+  accurate, except for the holdoff protocol which is quite different"* -- the
+  hold-off defect fixed today, flagged by the same author against the same
+  document.
+
+He is also blunt about 1.2a generally: *"a list of commands that is almost
+entirely wrong"*. Consistent with this project's own experience of it -- three
+corrections against the ROM in one phase.
+
+**WHAT IT CHANGES ABOUT THE FIX.** It argues for a GENERIC answer rather than
+two special cases: reply to any unrecognised command with an empty block of the
+length the Mac asked for. `dcd_link.v` already captures that length as
+`rxRspGroups`, and `dcd.v` already uses it for Status ("49 is not a constant
+here -- it is whatever the Mac asked for"), so the machinery exists. That fixes
+Erase Disk AND makes `HD Diag` usable ([[macplus-hd20-diag-oracle]]), and it is
+what the second implementation does.
+
+**The caveat, and it is the only one:** answering "fine" to a command we do not
+perform is a lie that happens to be harmless here -- there are no sector
+boundaries to lay down on an image file. It should NOT be extended to anything
+that ought to report a genuine failure, and the refused-write path must keep
+reporting `$81`.
 
 ### Do we need the firmware?
 
