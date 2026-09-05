@@ -73,11 +73,34 @@
    the drive firmware, which masks exactly two bytes with $7F before reaching
    its LSB byte.
 
-   7-for-8 coding, per the specification's own worked example (Figure 1),
-   which sim/tb_dcd_link.v asserts verbatim as a golden vector:
+   7-for-8 coding:
 
      transmitted[i] = $80 | (data[i] >> 1)
-     lsbByte        = $80 | (L0<<6 | L1<<5 | ... | L6<<0)   Ln = data[n] & 1
+     lsbByte        = $80 | (L0<<0 | L1<<1 | ... | L6<<6)   Ln = data[n] & 1
+
+   THE LSB BIT ORDER IS data[n] -> BIT n, AND IT WAS BACKWARDS HERE UNTIL
+   2026-09-05. The specification's Figure 1 cannot settle it: its worked example
+   is $31..$37, whose LSBs are 1,0,1,0,1,0,1 and whose LSB-byte is $D5 -- a
+   PALINDROME, identical under either order. So the "golden vector" this file
+   used to cite proved nothing, and neither could any bench, because a reversed
+   packing is self-consistent in a loopback and INVISIBLE TO THE CHECKSUM: it
+   only permutes which of the seven bytes each +1 lands on, and the sum of seven
+   bytes does not change. Four independent sources settle it instead, two on
+   each side of the wire:
+
+     Plus ROM, transmit  $419A4C..$419B06  six `roxr.b #1,d4` then `roxr.b #2,d4`
+                         leaves [1, L6, L5, L4, L3, L2, L1, L0]
+     Plus ROM, receive   $4198C4  `lsr.b #1,d4 / addx.b d1,d1` -- the FIRST data
+                         byte takes bit 0, the second bit 1, and so on
+     HD20 firmware, rx   L1dfc  `rrc R8 / rlc R9` per byte, R8 the LSB byte, so
+                         again byte n takes bit n
+     HD20 firmware, tx   L1edc  `scf / rrc Rn / rrc R15` seven times plus one
+                         more shift and `or R15,#$80` -- Ln accumulates at bit n
+
+   The symptom of the reversed order was that a Status reply's first byte, $83,
+   reached the Mac as $82 and failed the `$419776 subi.b #$80` opcode compare
+   with error $30, while the checksum passed and the link looked healthy from
+   every probe we had.
 
    CHECKSUM: an 8-bit sum of the DECODED data bytes, sent as (-sum) & $FF, so
    a receiver validates by summing everything including the checksum byte to
@@ -131,6 +154,17 @@ module dcd_link
 	// anticipate.
 	output reg  [6:0] rxRspGroups,
 
+	// Payload bytes as they are decoded, for a caller that needs more than the
+	// eight rxBuf holds. rxStb is one clock; rxStbData is the decoded byte and
+	// rxStbAddr its index within this frame's payload, counting from 0 at the
+	// first byte after the two count bytes and including the checksum byte at
+	// the end. A MultiBlock Write's first block rides WITH the command -- 538
+	// payload bytes - so the sector cannot come out of rxBuf and has to be
+	// streamed into the command layer's buffer as it arrives.
+	output reg        rxStb,
+	output reg  [7:0] rxStbData,
+	output reg  [9:0] rxStbAddr,
+
 	// High while the Mac holds the RESET state. The command layer above must
 	// abandon whatever it was doing: a reply still queued across a reset
 	// re-raises txReq afterwards, and the link then asserts /HSHK in the idle
@@ -151,6 +185,23 @@ module dcd_link
 	// checksum to the very last byte position". Choosing txLen so that txLen+1
 	// fills whole groups is what puts it there, so that requirement above is
 	// not a convenience - it is the wire format.
+	// ARMING AND STARTING ARE TWO DIFFERENT THINGS, and the ROM is why.
+	// $419820 is the first instruction of the Mac's receive routine and it
+	// reads the sense line with NO retry budget at all: /HSHK must already be
+	// asserted, error $20 otherwise. The Mac gets there within a few
+	// microseconds of leaving state 2 at the end of its own transmission, long
+	// before an SD card can answer a sector request. The sync byte, by
+	// contrast, has a budget of $10000 spins ($419846) -- over a hundred
+	// milliseconds. So the drive must claim the bus IMMEDIATELY on accepting a
+	// command and send when the data is ready, which is what a real drive with
+	// a spinning platter necessarily does too.
+	//
+	//   txArm  level: a reply is coming. Asserts /HSHK and waits for state 1.
+	//   txReq  pulse: the payload behind txData/txLen is ready; send it.
+	//
+	// Raising both together is the immediate-reply case and behaves exactly as
+	// txReq alone used to.
+	input             txArm,
 	input             txReq,
 	input       [7:0] txData,    // payload byte selected by txAddr
 	output reg  [9:0] txAddr,
@@ -246,22 +297,51 @@ module dcd_link
 	// ------------------------------------------------------------------
 	// Receive: Mac -> drive
 	// ------------------------------------------------------------------
-	localparam RX_SYNC = 2'd0, RX_CNT1 = 2'd1, RX_CNT2 = 2'd2, RX_GROUP = 2'd3;
+	// HOLD-OFF ON THIS DIRECTION IS NOT A RETRANSMISSION, and it is the one
+	// place the two directions genuinely differ. When the Mac is transmitting
+	// and finds an SCC interrupt pending it drops ca0 mid-group ($419B5A,
+	// after the group's fourth byte), FINISHES the group anyway, sends one
+	// filler $00, services the interrupt, releases HOFF, sends a fresh $AA and
+	// carries on with the NEXT group. $419BC8's `subq.w #1,d6` replaces the
+	// `dbra` it skipped, so the group counter and the source pointer both move
+	// on: nothing is resent and the checksum keeps running. The HD20's own
+	// firmware receives it exactly that way -- L1e53 tests the phase line at
+	// the group boundary, discards bytes until $AA and jumps back into the
+	// group loop with the interrupted group's data intact.
+	//
+	// Two consequences here. Bytes that arrive while HOFF is asserted are real
+	// payload and must be taken, so the accept condition covers state 0 once a
+	// frame is under way. And the $AA that follows is a bare resync, NOT the
+	// start of a frame - the two count bytes do not come again - so it needs
+	// its own state rather than a trip through RX_SYNC.
+	//
+	// None of this can fire on a Status or a Read: $419B40 clears the hold-off
+	// flag when the group counter says this is the last group, and those
+	// commands are one group long. Only a write's 77 groups can see it.
+	localparam RX_SYNC = 3'd0, RX_CNT1 = 3'd1, RX_CNT2 = 3'd2,
+	           RX_GROUP = 3'd3, RX_RESYNC = 3'd4;
 
-	reg  [1:0] rxState;
+	reg  [2:0] rxState;
 	reg  [2:0] rxIdx;      // position within the group, 0..7
 	reg  [7:0] rxLsb;
 	reg  [7:0] rxSum;
 	reg  [6:0] rxGroups;   // groups still to come, including the current one
 	reg  [3:0] rxCount;
+	reg  [9:0] rxPos;      // payload bytes taken so far in this frame
+	reg        rxHoff;     // HOFF seen during the current group
 
 	// LSB byte first on this direction, so index 0 is the LSB byte and
-	// indices 1..7 are data bytes 0..6. Bit 6 of the LSB byte belongs to the
-	// first data byte and bit 0 to the seventh - the packing Figure 1 fixes.
+	// indices 1..7 are data bytes 0..6. Data byte n takes bit n; see the
+	// header for the four sources that settle the order.
 	wire [2:0] rxDataIdx = rxIdx - 3'd1;
-	wire       rxLsbBit  = rxLsb[3'd6 - rxDataIdx];
+	wire       rxLsbBit  = rxLsb[rxDataIdx];
 	wire [7:0] rxDecoded = {writeData[6:0], rxLsbBit};
 	wire [7:0] rxSumNext = rxSum + rxDecoded;
+
+	// A frame is under way from the sync byte until the last group lands.
+	wire       rxInFrame = (rxState != RX_SYNC);
+	wire       rxTake    = writeReq & selected &
+	                       ((state == 3'd1) | (rxInFrame & (state == 3'd0)));
 
 	// ------------------------------------------------------------------
 	// Transmit: drive -> Mac
@@ -284,10 +364,12 @@ module dcd_link
 	reg  [9:0] txSentGrp;
 	reg  [7:0] txSumGrp;
 
+	reg        txGo;         // the payload is ready; see txArm/txReq above
+
 	wire [9:0] txTotal  = txLen + 10'd1;              // payload + CHK
 	wire       txIsChk  = (txSent == txLen);
 	wire [7:0] txSource = txIsChk ? (~txSum + 8'd1) : txData;
-	wire [7:0] txLsbSet = txLsbAcc | (8'd1 << (3'd6 - txIdx));
+	wire [7:0] txLsbSet = txLsbAcc | (8'd1 << txIdx);
 
 	always @(posedge clk or negedge _reset) begin
 		if (!_reset) begin
@@ -297,11 +379,17 @@ module dcd_link
 			rxSum        <= 0;
 			rxGroups     <= 0;
 			rxCount      <= 0;
+			rxPos        <= 0;
+			rxHoff       <= 0;
 			rxRspGroups  <= 0;
 			rxBuf        <= 0;
 			rxLen        <= 0;
 			rxValid      <= 0;
 			rxBad        <= 0;
+			rxStb        <= 0;
+			rxStbData    <= 0;
+			rxStbAddr    <= 0;
+			txGo         <= 0;
 			txState      <= TX_IDLE;
 			txTick       <= 0;
 			txIdx        <= 0;
@@ -322,6 +410,7 @@ module dcd_link
 		else begin
 			rxValid      <= 0;
 			rxBad        <= 0;
+			rxStb        <= 0;
 
 			// NEWBYTEREADY MUST BE HELD UNTIL THE NEXT cen, NOT CLEARED ON
 			// EVERY CLOCK. It is set below inside `if (cen)`, so an
@@ -346,8 +435,11 @@ module dcd_link
 				rxState <= RX_SYNC;
 				rxIdx   <= 0;
 				rxCount <= 0;
+				rxPos   <= 0;
+				rxHoff  <= 1'b0;
 				txState <= TX_IDLE;
 				txBusy  <= 1'b0;
+				txGo    <= 1'b0;
 				hshk_n  <= 1'b1;
 				rxHs    <= RXH_IDLE;
 				txPend  <= 1'b0;
@@ -403,9 +495,15 @@ module dcd_link
 				end
 
 				// ---------------- receive ----------------
-				// The Mac only transmits in state 1. writeReq is the IWM
-				// handing over a byte it has finished shifting out.
-				if (writeReq && selected && state == 3'd1) begin
+				// The Mac transmits in state 1, and keeps transmitting the
+				// rest of a group after it drops to state 0 for a hold-off.
+				// writeReq is the IWM handing over a byte it has finished
+				// shifting out. Note the hold-off latch below is set BEFORE
+				// the case, so the group-boundary arm clears it cleanly.
+				if (selected && rxState == RX_GROUP && state == 3'd0)
+					rxHoff <= 1'b1;
+
+				if (rxTake) begin
 					case (rxState)
 					RX_SYNC:
 						// Hunt for the sync. Anything else is noise from a
@@ -441,7 +539,18 @@ module dcd_link
 						rxIdx   <= 0;
 						rxSum   <= 0;
 						rxCount <= 0;
+						rxPos   <= 0;
+						rxHoff  <= 1'b0;
 					end
+
+					// A bare $AA after a hold-off, with no count bytes behind
+					// it. Anything else -- the Mac's filler $00, or a byte
+					// still in flight -- is skipped.
+					RX_RESYNC:
+						if (writeData == SYNC) begin
+							rxState <= RX_GROUP;
+							rxIdx   <= 3'd0;
+						end
 
 					RX_GROUP:
 						if (rxIdx == 3'd0) begin
@@ -450,6 +559,10 @@ module dcd_link
 						end
 						else begin
 							rxSum <= rxSumNext;
+							rxStb     <= 1'b1;
+							rxStbData <= rxDecoded;
+							rxStbAddr <= rxPos;
+							rxPos     <= rxPos + 10'd1;
 							if (rxCount < 4'd8) begin
 								rxBuf[{rxCount, 3'b000} +: 8] <= rxDecoded;
 								rxCount <= rxCount + 4'd1;
@@ -461,13 +574,26 @@ module dcd_link
 									// the checksum byte must be zero.
 									rxState <= RX_SYNC;
 									// rxCount has not yet taken the byte
-									// being stored this cycle.
-									rxLen   <= rxCount + 4'd1;
+									// being stored this cycle. It SATURATES
+									// at 8 above, because rxBuf holds eight,
+									// so the clamp is not decoration: without
+									// it a write's 77-group frame reports 9,
+									// a length rxBuf cannot have.
+									rxLen   <= (rxCount < 4'd8) ? (rxCount + 4'd1)
+									                           : 4'd8;
 									if (rxSumNext == 8'd0) rxValid <= 1'b1;
 									else                   rxBad   <= 1'b1;
 								end
-								else
+								else begin
 									rxGroups <= rxGroups - 7'd1;
+									// The group is complete and counted; the
+									// hold-off only costs us the byte framing,
+									// so hunt the resync $AA and carry on.
+									if (rxHoff) begin
+										rxState <= RX_RESYNC;
+										rxHoff  <= 1'b0;
+									end
+								end
 							end
 							else
 								rxIdx <= rxIdx + 3'd1;
@@ -476,13 +602,31 @@ module dcd_link
 				end
 
 				// ---------------- transmit ----------------
+				// txReq can land in any state on the way in, so latch it here
+				// rather than only where the frame starts.
+				if (txReq) txGo <= 1'b1;
+
 				case (txState)
 				TX_IDLE: begin
+					// Remember a one-clock txReq until the bus comes round to
+					// state 2. DO NOT latch it from txArm as well, tempting as
+					// that looks: txArm is a LEVEL and it is necessarily still
+					// high for one clock after the frame it armed has finished,
+					// because the command layer cannot know the frame is over
+					// until it has seen txBusy fall. Latching that tail leaves
+					// a phantom request behind, which then grabs the bus at the
+					// start of the NEXT command - and the command layer reads
+					// the resulting txBusy as "still sending" and drops the
+					// command entirely. That cost an afternoon; the symptom was
+					// a second Status going unanswered while the first was
+					// perfect.
 					if (txReq && selected) txPend <= 1'b1;
+					else if (!txArm && !txGo) txPend <= 1'b0;
+
 					// Only out of IDLE, and only with the bus idle: see txPend
 					// above. Assert /HSHK to ask for the bus, then wait for the
 					// Mac to come round to state 1. It goes 2 -> 3 -> 1.
-					if ((txReq || txPend) && selected && state == 3'd2) begin
+					if ((txReq || txArm || txPend) && selected && state == 3'd2) begin
 						txPend    <= 1'b0;
 							// Assert /HSHK and wait for the Mac to come round to
 							// state 1. It goes 2 -> 3 -> 1, sensing us in 3.
@@ -521,11 +665,24 @@ module dcd_link
 					else if (!selected || state >= 3'd4) begin
 						hshk_n  <= 1'b1;
 						txBusy  <= 1'b0;
+						txGo    <= 1'b0;
 						txState <= TX_IDLE;
 					end
 
+				// Armed, on the bus, and waiting for the payload. The Mac is
+				// spinning on its $10000-try sync hunt, which is where a real
+				// drive's seek time goes; state 0 here is a hold-off before we
+				// have sent anything and is simply waited out. State 2 means
+				// the Mac gave up, and without that escape a slow fetch that
+				// the Mac abandoned would hold /HSHK low for ever.
 				TX_SYNC:
-					if (cen) begin
+					if (!selected || state == 3'd2 || state >= 3'd4) begin
+						hshk_n  <= 1'b1;
+						txBusy  <= 1'b0;
+						txGo    <= 1'b0;
+						txState <= TX_IDLE;
+					end
+					else if (cen && txGo) begin
 						if (txTick != 0) txTick <= txTick - 8'd1;
 						else begin
 							txByte       <= SYNC;
@@ -613,6 +770,7 @@ module dcd_link
 					if (cen) begin
 						hshk_n  <= 1'b1;
 						txBusy  <= 1'b0;
+						txGo    <= 1'b0;
 						txState <= TX_IDLE;
 					end
 
@@ -623,9 +781,10 @@ module dcd_link
 	end
 
 	// The one derived value the deck cannot reconstruct from the outside: a
-	// byte is only a RECEIVED byte if it arrives while we are selected and in
-	// data mode. writeReq alone also fires for the internal drive.
-	wire rxByteEvt = writeReq & selected & (state == 3'd1);
+	// byte is only a RECEIVED byte if it arrives while we are selected and the
+	// Mac is transmitting to us. writeReq alone also fires for the internal
+	// drive, and a hold-off puts part of a group in state 0.
+	wire rxByteEvt = rxTake;
 
 	assign dbg_link = {rxBad, rxValid, newByteReady, rxByteEvt,
 	                   txBusy, txState, rxHs, hshk_n, selected, state};

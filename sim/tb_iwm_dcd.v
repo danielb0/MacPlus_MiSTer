@@ -552,9 +552,12 @@ module tb_iwm_dcd;
 			wrPerByte = wrPulses - wrMark;
 			macByte(8'h80 | macGroups(0));
 			macByte(8'h80 | macGroups(rspLen));
-			macByte(8'h80 | (cmd[0][0] << 6) | (cmd[1][0] << 5) | (cmd[2][0] << 4) |
-			                (cmd[3][0] << 3) | (cmd[4][0] << 2) | (cmd[5][0] << 1) |
-			                 cmd[6][0]);
+			// Data byte n owns bit n of the LSB byte -- see the four ROM /
+			// firmware sites quoted in rtl/dcd_link.v. It was backwards here
+			// and in the RTL together, which is why nothing caught it.
+			macByte(8'h80 |  cmd[0][0]        | (cmd[1][0] << 1) | (cmd[2][0] << 2) |
+			                (cmd[3][0] << 3)  | (cmd[4][0] << 4) | (cmd[5][0] << 5) |
+			                (cmd[6][0] << 6));
 			for (i = 0; i < 7; i = i + 1) macByte(8'h80 | (cmd[i] >> 1));
 
 			setState(3'd3);
@@ -581,7 +584,7 @@ module tb_iwm_dcd;
 				for (i = 0; i < 8 && rxTimeouts == 0; i = i + 1)
 					iwmGetByte(raw[i]);
 				for (i = 0; i < 7; i = i + 1)
-					rsp[g*7 + i] = {raw[i][6:0], raw[7][6-i]};
+					rsp[g*7 + i] = {raw[i][6:0], raw[7][i]};
 			end
 			nDecoded = (rxTimeouts == 0) ? n * 7 : 0;
 		end

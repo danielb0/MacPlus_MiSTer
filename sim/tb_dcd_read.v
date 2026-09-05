@@ -221,9 +221,12 @@ module tb_dcd_read;
 			macByte(8'hAA);
 			macByte(8'h80 | macGroups(0));          // command groups
 			macByte(8'h80 | macGroups(READ_LEN));   // reply groups, per block
-			macByte(8'h80 | (cmd[0][0] << 6) | (cmd[1][0] << 5) | (cmd[2][0] << 4) |
-			                (cmd[3][0] << 3) | (cmd[4][0] << 2) | (cmd[5][0] << 1) |
-			                 cmd[6][0]);
+			// Data byte n owns bit n of the LSB byte -- see the four ROM /
+			// firmware sites quoted in rtl/dcd_link.v. It was backwards here
+			// and in the RTL together, which is why nothing caught it.
+			macByte(8'h80 |  cmd[0][0]        | (cmd[1][0] << 1) | (cmd[2][0] << 2) |
+			                (cmd[3][0] << 3)  | (cmd[4][0] << 4) | (cmd[5][0] << 5) |
+			                (cmd[6][0] << 6));
 			for (i = 0; i < 7; i = i + 1) macByte(8'h80 | (cmd[i] >> 1));
 			// The Mac returns to state 3 and waits for the release before
 			// idling - TashTwenty's IntEn3.
@@ -256,7 +259,7 @@ module tb_dcd_read;
 			for (g = 0; g < n; g = g + 1) begin
 				for (i = 0; i < 8; i = i + 1) getByte(raw[i]);
 				for (i = 0; i < 7; i = i + 1)
-					rsp[g*7 + i] = {raw[i][6:0], raw[7][6-i]};
+					rsp[g*7 + i] = {raw[i][6:0], raw[7][i]};
 			end
 			nDecoded = n * 7;
 		end

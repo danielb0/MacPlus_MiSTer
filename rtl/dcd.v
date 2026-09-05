@@ -1,11 +1,48 @@
 /* dcd.v - DCD (Apple HD20) device: command layer over rtl/dcd_link.v.
 
-   MAC128K_PLAN.md Phase 5. Implements Status ($03) and MultiBlock Read ($00)
-   over rtl/dcd_disk.v, and answers everything else with a NAK-shaped no-reply.
-   Write ($01), Write-Verify ($02) and continued Write ($41) additionally need
-   the link layer to stream RECEIVED data into the sector buffer - a write's
-   first block rides with the command, far past the eight bytes rxBuf holds -
-   and are not here yet.
+   MAC128K_PLAN.md Phase 5. Implements Status ($03), MultiBlock Read ($00),
+   MultiBlock Write ($01/$41) and Write-Verify ($02/$42) over rtl/dcd_disk.v,
+   and answers everything else with a NAK-shaped no-reply.
+
+   THE WRITE FRAMING, read out of the ROM's own per-block loop at $419712:
+
+     Write   from Mac:   <$AA> <$CD> <$81>
+                         <op> <blks> <adrH> <adrM> <adrL> <pad>
+                               <20 tags> <512 data> <CHK>     77 groups
+             from drive: <$AA> <$80|op> <blks> <stat> <3 pad> <CHK>
+                                                              1 group
+
+   Four things about it are not guessable and all four come from that loop:
+
+   1. EACH BLOCK IS A SEPARATE COMMAND, transmitted and answered in turn.
+      $419712's `tst.b d1 / beq $419754` returns immediately for a read; only a
+      write re-transmits. So unlike a read, the drive answers one group per
+      command rather than sending N frames off one.
+   2. SUBSEQUENT BLOCKS CARRY THE OPCODE WITH BIT 6 SET -- $419716's
+      `ori.b #$40,$19C(a1)` -- so $01 continues as $41 and $02 as $42.
+   3. THE REPLY OPCODE IS THE COMMAND OPCODE MASKED TO 6 BITS, THEN $80.
+      $41975E masks the expected opcode with `andi.b #$3F` before $419776's
+      `subi.b #$80` compare, so $41 must be answered $81 and NOT $C1 -- and,
+      just as firmly, $02 must be answered $82 and not $81. Error $30 either
+      way.
+   4. THE DRIVE TRACKS THE BLOCK ADDRESS ITSELF ON A CONTINUED WRITE. The
+      reply lands on top of the command block at $19C, so by the time $41971C
+      rewrites the count byte the three address bytes at $19E-$1A0 hold the
+      previous reply's status and padding -- zeros. Only $19D is refreshed.
+      A drive that trusted the address would write every block of a multi-block
+      write to block 0.
+
+   The count byte at $19D is the number of blocks STILL TO GO, counting down,
+   and the reply must echo it: $41978C compares it against the Mac's own d3
+   before $4197EE decrements, and a mismatch is error $31. Echoing what we were
+   sent is therefore both correct and the only thing we can do.
+
+   WRITE-VERIFY IS SERVED AS A PLAIN WRITE, and that is a recorded deviation. A
+   real HD20 wrote the block and read it back off the platter to compare. There
+   is no platter here and no failure mode to detect between the sector buffer
+   and the HPS that the block layer does not already report, so the read-back
+   would compare a buffer against itself. The status byte still reports a
+   refused or timed-out write, which is the part the driver acts on.
 
    MULTIBLOCK READ IS N SEPARATE TRANSMISSIONS, NOT ONE LONG ONE. The Mac sends
    the command once: $419712 returns immediately for opcode 0, and only a write
@@ -68,7 +105,7 @@
      off  size  field              value
        0     2  Device_Type        0
        2     2  Device_Manuf       1, which 1.2a gives as "Apple = 1"
-       4     1  Device_Character   $DE
+       4     1  Device_Character   $F6, or $DE on a locked image
        5     3  Num_Blocks         highest block = capacity - 1
        8     2  Num_Spares         0
       10     2  Num_BadBlocks      0
@@ -76,19 +113,20 @@
       64   256  Icon               rtl/dcd_icon.vh
      320    12  trailer            a Pascal string; nothing reads it
 
-   Device_Character is $DE, NOT the $F6 TashTwenty writes, and the difference
-   is deliberate: Writable is cleared and Write_Protected set, because
-   MultiBlock Write is not implemented. THIS IS NOT COSMETIC. HFS writes the
-   volume's MDB back at mount time to mark it in use, and with opcode $01
-   unanswered that write becomes a handshake timeout - so claiming to be
-   writable would make a perfectly good read path present as a broken drive,
-   and would hide the real result behind a failure mode we already know about.
-   A locked volume is a state the Mac has handled natively since 1984.
+   Device_Character is $F6 on a writable mount and $DE on a locked one: the
+   fixed bits are Mountable + Readable + Ejectable + Icon_Included +
+   Disk_In_Place = $D6, and exactly one of Writable ($20) and Write_Protected
+   ($08) joins them. It was pinned at $DE while MultiBlock Write was missing,
+   because HFS writes the volume's MDB back at mount time to mark it in use
+   and an unanswered opcode $01 turns that into a handshake timeout - a
+   perfectly good read path presenting as a broken drive. With the write path
+   in, the bit follows the image's own read-only flag, which is a state the Mac
+   has handled natively since 1984.
 
    $F6 is Mountable + Readable + Writable + Ejectable + Icon_Included +
    Disk_In_Place, and TashTwenty writes exactly that constant, which is what
-   confirms 1.2a's bit values are the shipping ones. We send the same set with
-   $20 traded for $08. EJECTABLE IS THE ONE BIT I AM NOT SURE OF - a fixed disk
+   confirms 1.2a's bit values are the shipping ones. A locked image trades $20
+   for $08. EJECTABLE IS THE ONE BIT I AM NOT SURE OF - a fixed disk
    arguably should not claim it, and TashTwenty's own comment writes it
    "ejectable (?)". It is kept because $F6 is the value known to mount on real
    hardware; clearing it is the one-bit experiment if the Finder is ever seen
@@ -167,9 +205,17 @@ module dcd
 	wire [23:0] blockCount;
 	wire        diskBusy, diskErr;
 	reg  [23:0] diskLba;
-	reg         diskRd;
-	wire  [8:0] bufAddr = txAddr[8:0] - 9'd26;   // reply byte 26 is data byte 0
+	reg         diskRd, diskWr;
 	wire  [7:0] bufQ;
+
+	// Byte 26 of a frame is data byte 0 in BOTH directions - six header bytes
+	// then the 20 tags - so the same offset serves the read path's txAddr and
+	// the write path's receive index. The subtraction is deliberately done on
+	// the full 10-bit index and truncated after: 537-26 = 511 wraps correctly
+	// either way, but only because the buffer is exactly 512 bytes.
+	wire  [9:0] bufWrOff = rxStbAddr - 10'd26;
+	wire        bufWe    = rxStb & (rxStbAddr >= 10'd26) & (rxStbAddr < 10'd538);
+	wire  [8:0] bufAddr  = bufWe ? bufWrOff[8:0] : (txAddr[8:0] - 9'd26);
 
 	dcd_disk disk
 	(
@@ -179,9 +225,9 @@ module dcd
 		.sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr),
 		.img_mounted(img_mounted), .img_size(img_size), .img_readonly(img_readonly),
 		.present(present), .blockCount(blockCount), .readonly(readonly),
-		.lba(diskLba), .rd_req(diskRd), .wr_req(1'b0),
+		.lba(diskLba), .rd_req(diskRd), .wr_req(diskWr),
 		.busy(diskBusy), .err(diskErr),
-		.buf_addr(bufAddr), .buf_q(bufQ), .buf_d(8'd0), .buf_we(1'b0)
+		.buf_addr(bufAddr), .buf_q(bufQ), .buf_d(rxStbData), .buf_we(bufWe)
 	);
 
 	wire        dcdReset;
@@ -189,11 +235,22 @@ module dcd
 	wire [3:0]  rxLen;
 	wire        rxValid, rxBad;
 	wire [6:0]  rxRspGroups;
+	wire        rxStb;
+	wire [7:0]  rxStbData;
+	wire [9:0]  rxStbAddr;
 	wire [9:0]  txAddr;
 	reg         txReq;
 	reg  [9:0]  txLen;
 	wire        txBusy;
 	reg  [7:0]  txData;
+
+	// /HSHK has to be claimed the moment a command is accepted, not when the
+	// sector is ready: the Mac's receive routine checks the sense line with no
+	// retry budget at all. See the txArm note in rtl/dcd_link.v. It stays up
+	// for the whole command, which for a multi-block read is N frames. A reg
+	// rather than `cstate != C_IDLE` so that it drops on the same edge the
+	// last frame is retired, before the link's TX_IDLE can look at it again.
+	reg         txArm;
 
 	wire [7:0]  opcode = rxBuf[7:0];
 	wire [15:0] dbg_link;
@@ -208,7 +265,9 @@ module dcd
 		.present(present),
 		.rxBuf(rxBuf), .rxLen(rxLen), .rxValid(rxValid), .rxBad(rxBad),
 		.rxRspGroups(rxRspGroups),
+		.rxStb(rxStb), .rxStbData(rxStbData), .rxStbAddr(rxStbAddr),
 		.dcdReset(dcdReset),
+		.txArm(txArm),
 		.txReq(txReq), .txData(txData), .txAddr(txAddr), .txLen(txLen),
 		.txBusy(txBusy),
 		.dbg_link(dbg_link)
@@ -252,28 +311,36 @@ module dcd
 	// Readable, Ejectable, Icon_Included, Disk_In_Place = $D6. Exactly one of
 	// Writable ($20) and Write_Protected ($08) joins it.
 	//
-	// Flip WRITE_IMPLEMENTED when MultiBlock Write lands. The read-only-mount
-	// case is already wired behind it, so a locked image stays locked then too.
-	localparam WRITE_IMPLEMENTED = 1'b0;
+	// WRITE_IMPLEMENTED went true when MultiBlock Write landed; a read-only
+	// mount still reports write-protected, which is a state the Mac has
+	// handled natively since 1984.
+	localparam WRITE_IMPLEMENTED = 1'b1;
 	wire writeProtected = ~WRITE_IMPLEMENTED | readonly;
 	wire [7:0] deviceChar = 8'hD6 | (writeProtected ? 8'h08 : 8'h20);
 
-	// The two replies share a six-byte header and differ after it. replyRead
-	// is latched when the command is decoded, not derived from the opcode
-	// register, because a read answers N times and the opcode is long gone.
-	reg       replyRead;
+	// The three replies share a six-byte header and differ after it. The kind
+	// is latched when the command is decoded rather than derived from the
+	// opcode register, because a read answers N times and the opcode is long
+	// gone by the last of them.
+	localparam K_STATUS = 2'd0, K_READ = 2'd1, K_WRITE = 2'd2;
+	reg [1:0] replyKind;
+	reg [7:0] replyOp;
 	reg [7:0] replyStat;
 	reg [7:0] blksLeft;
 
 	always @(*) begin
-		// ---- the six-byte header, common to both ----
-		if      (txAddr == 10'd0)  txData = replyRead ? 8'h80 : 8'h83;
-		else if (txAddr == 10'd1)  txData = replyRead ? blksLeft : 8'h00;
+		// ---- the six-byte header, common to all three ----
+		if      (txAddr == 10'd0)  txData = replyOp;
+		else if (txAddr == 10'd1)  txData = (replyKind == K_STATUS) ? 8'h00
+		                                                            : blksLeft;
 		else if (txAddr == 10'd2)  txData = replyStat;
 		else if (txAddr <  10'd6)  txData = 8'h00;  // three pads complete the header
 
+		// ---- MultiBlock Write: the header IS the reply, one group ----
+		else if (replyKind == K_WRITE) txData = 8'h00;
+
 		// ---- MultiBlock Read: 20 tag bytes then the sector ----
-		else if (replyRead)
+		else if (replyKind == K_READ)
 			txData = (txAddr < 10'd26)  ? 8'h00 :     // tags; see the header
 			         (txAddr < 10'd538) ? bufQ  :     // 512 bytes of block
 			                              8'h00;
@@ -319,14 +386,40 @@ module dcd
 	wire [23:0] cmdLba    = {rxBuf[23:16], rxBuf[31:24], rxBuf[39:32]};
 	wire  [9:0] askedLen  = {rxRspGroups, 3'b000} - {3'b000, rxRspGroups} - 10'd1;
 
+	// Bit 6 is the continued-write marker; bits 5:0 are the opcode proper.
+	wire  [5:0] cmdOp     = opcode[5:0];
+	wire        cmdCont   = opcode[6];
+	wire        cmdIsWr   = (cmdOp == 6'h01) || (cmdOp == 6'h02);
+
+	// A write command must have brought a whole sector with it. Without this
+	// a truncated or malformed frame would commit whatever the buffer happened
+	// to hold - which, after a read, is a different block of the user's disk.
+	// Cleared by the frame that reports itself, so it is still the previous
+	// frame's verdict on the cycle rxValid is read.
+	reg lastLba_valid;
+	reg [23:0] lastLba;
+	reg wrFull;
+
+	always @(posedge clk or negedge _reset) begin
+		if (!_reset) wrFull <= 1'b0;
+		else if (dcdReset) wrFull <= 1'b0;
+		else if (rxStb && rxStbAddr == 10'd537) wrFull <= 1'b1;
+		else if (rxValid || rxBad) wrFull <= 1'b0;
+	end
+
 	always @(posedge clk or negedge _reset) begin
 		if (!_reset) begin
+			txArm     <= 1'b0;
 			txReq     <= 1'b0;
 			txLen     <= 10'd0;
 			diskRd    <= 1'b0;
+			diskWr    <= 1'b0;
 			diskLba   <= 24'd0;
+			lastLba   <= 24'd0;
+			lastLba_valid <= 1'b0;
 			blksLeft  <= 8'd0;
-			replyRead <= 1'b0;
+			replyKind <= K_STATUS;
+			replyOp   <= 8'h83;
 			replyStat <= 8'h00;
 			cstate    <= C_IDLE;
 			sending   <= 1'b0;
@@ -336,10 +429,14 @@ module dcd
 		// holding /HSHK low in the idle state waiting for a transfer the Mac
 		// has long since given up on -- the wedge HD Diag reports as $28.
 		else if (dcdReset) begin
+			txArm     <= 1'b0;
 			txReq     <= 1'b0;
 			diskRd    <= 1'b0;
+			diskWr    <= 1'b0;
 			blksLeft  <= 8'd0;
-			replyRead <= 1'b0;
+			lastLba_valid <= 1'b0;
+			replyKind <= K_STATUS;
+			replyOp   <= 8'h83;
 			replyStat <= 8'h00;
 			sending   <= 1'b0;
 			cstate    <= C_IDLE;
@@ -347,27 +444,52 @@ module dcd
 		else begin
 			txReq  <= 1'b0;
 			diskRd <= 1'b0;
+			diskWr <= 1'b0;
 
 			case (cstate)
 			C_IDLE:
 				if (rxValid && !txBusy && rxRspGroups != 7'd0) begin
 					if (opcode == 8'h03) begin
-						replyRead <= 1'b0;
+						replyKind <= K_STATUS;
+						replyOp   <= 8'h83;
 						replyStat <= 8'h00;
 						txLen     <= askedLen;
-						txReq     <= 1'b1;
+						txArm     <= 1'b1;
+						lastLba_valid <= 1'b0;
+						cstate    <= C_SEND;
 					end
 					else if (opcode == 8'h00 && cmdBlocks != 8'd0) begin
-						replyRead <= 1'b1;
+						replyKind <= K_READ;
+						replyOp   <= 8'h80;
 						blksLeft  <= cmdBlocks;
 						diskLba   <= cmdLba;
 						txLen     <= askedLen;
+						txArm     <= 1'b1;
+						lastLba_valid <= 1'b0;
+						cstate    <= C_FETCH;
+					end
+					// A continued write with nothing to continue from is not a
+					// command: the address would be the zeros the reply left
+					// behind at $19E, so serving it would write block 0.
+					else if (cmdIsWr && wrFull && (!cmdCont || lastLba_valid))
+					begin
+						replyKind <= K_WRITE;
+						replyOp   <= {2'b10, cmdOp};
+						blksLeft  <= cmdBlocks;
+						diskLba   <= cmdCont ? (lastLba + 24'd1) : cmdLba;
+						lastLba   <= cmdCont ? (lastLba + 24'd1) : cmdLba;
+						lastLba_valid <= 1'b1;
+						txLen     <= askedLen;
+						txArm     <= 1'b1;
 						cstate    <= C_FETCH;
 					end
 				end
 
+			// Read fetches, write commits. Same three states either way; the
+			// block layer's busy/err handshake is identical.
 			C_FETCH: begin
-				diskRd <= 1'b1;
+				diskRd <= (replyKind == K_READ);
+				diskWr <= (replyKind == K_WRITE);
 				cstate <= C_FETCH_GO;
 			end
 
@@ -390,7 +512,9 @@ module dcd
 					// reason.
 					if (diskErr) begin
 						replyStat <= 8'h80;
-						txLen     <= 10'd6;
+						// A write reply is one group already, so only the
+						// read's 77-group frame needs shortening.
+						if (replyKind == K_READ) txLen <= 10'd6;
 					end
 					else replyStat <= 8'h00;
 					cstate <= C_SEND;
@@ -410,7 +534,14 @@ module dcd
 				end
 				else if (!txBusy) begin
 					sending <= 1'b0;
-					if (replyStat[7] || blksLeft <= 8'd1) cstate <= C_IDLE;
+					// A write is one command per block: the Mac transmits
+					// again for the next one. Only a read keeps going off a
+					// single command.
+					if (replyKind != K_READ || replyStat[7] || blksLeft <= 8'd1)
+					begin
+						txArm  <= 1'b0;
+						cstate <= C_IDLE;
+					end
 					else begin
 						blksLeft <= blksLeft - 8'd1;
 						diskLba  <= diskLba + 24'd1;
@@ -418,7 +549,10 @@ module dcd
 					end
 				end
 
-			default: cstate <= C_IDLE;
+			default: begin
+				txArm  <= 1'b0;
+				cstate <= C_IDLE;
+			end
 			endcase
 		end
 	end

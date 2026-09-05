@@ -18,26 +18,35 @@
 //      there is no excuse for getting it wrong and no way to notice from a
 //      later test - a bad ID just looks like "no hard disk".
 //
-//   2. THE FIGURE 1 GOLDEN VECTOR. The specification works a full group by
-//      hand: data $31..$37 encode to $98 $99 $99 $9A $9A $9B $9B with an LSB
-//      byte of $D5, and it gives the Mac-to-DCD order explicitly as
-//      "$D5 $98 $99 $99 $9A $9A $9B $9B" - LSB byte FIRST. That is exactly
-//      this module's receive direction, so the vector can be asserted
-//      verbatim rather than recomputed from my own reading of the prose.
-//      A decoder that packs the LSB bits in the wrong order fails here and
-//      essentially nowhere else.
+//   2. THE LSB BIT ORDER, AND FIGURE 1 CANNOT TEST IT. The specification
+//      works a full group by hand - data $31..$37 encode to
+//      $98 $99 $99 $9A $9A $9B $9B behind an LSB byte of $D5 - and this bench
+//      used to claim that vector caught a reversed packing. IT DOES NOT.
+//      $31..$37 have LSBs 1,0,1,0,1,0,1, which is a PALINDROME: the LSB byte
+//      is $D5 under either order. Nor can any loopback catch it, because a
+//      reversed packing is self-consistent, and nor can the checksum, because
+//      permuting which of seven bytes each +1 lands on leaves their sum alone.
+//      The RTL was reversed for a fortnight behind a green bench because of
+//      exactly this. The discriminating vector below is the Status command the
+//      Plus ROM actually builds, byte for byte off $419D12's `moveq #1,d3`,
+//      and it decodes to two different payloads under the two orders.
 //
 //   3. THE CHECKSUM MUST REJECT. Figure 1's own bytes sum to $72, not zero,
-//      so the same vector that proves the decoder proves the checksum
-//      actually fires. A checksum that always passes is the classic silent
-//      failure, and it would not show up until real data corrupted.
+//      so the same vector still proves the checksum actually fires. A checksum
+//      that always passes is the classic silent failure, and it would not show
+//      up until real data corrupted.
 //
-//   4. HOLD-OFF REWINDS, IT DOES NOT CONTINUE. The interrupted group is
-//      resent from its start, behind a fresh sync, and is excluded from the
-//      checksum. Both the specification and the ROM's resync path are
-//      explicit. An implementation that resumes mid-group looks fine until an
-//      SCC interrupt lands during a transfer, which on real hardware is
-//      often.
+//   4. HOLD-OFF IS NOT THE SAME IN BOTH DIRECTIONS, and reading the ROM both
+//      ways is the only way to know. Drive to Mac, the interrupted group is
+//      RESENT from its start behind a fresh sync and excluded from the
+//      checksum ($419974 backs the group counter up and re-decodes). Mac to
+//      drive, it is NOT: $419B5A drops ca0 mid-group, the Mac sends the rest
+//      of the group anyway, adds one filler byte, and after a fresh $AA
+//      carries straight on with the NEXT group - $419BC8's `subq.w #1,d6`
+//      replaces the `dbra` it skipped, so nothing is resent. The HD20's own
+//      firmware receives it that way at L1e53. A receiver that ignored bytes
+//      arriving in state 0, or that expected a retransmission, loses a group
+//      of a write the first time an SCC interrupt lands.
 //
 module tb_dcd_link;
 
@@ -47,6 +56,7 @@ module tb_dcd_link;
 	reg  [7:0]  writeData;
 	reg         writeReq;
 	reg         present;
+	reg         txArm;
 	reg         txReq;
 	reg  [9:0]  txLen;
 
@@ -55,8 +65,22 @@ module tb_dcd_link;
 	wire [63:0] rxBuf;
 	wire [3:0]  rxLen;
 	wire        rxValid, rxBad;
+	wire [6:0]  rxRspGroups;
+	wire        rxStb;
+	wire [7:0]  rxStbData;
+	wire [9:0]  rxStbAddr;
 	wire [9:0]  txAddr;
 	wire        txBusy;
+
+	// Everything the payload stream hands up, so a frame longer than rxBuf can
+	// be checked end to end. 600 covers a write's 538 payload bytes.
+	reg  [7:0] streamed [0:599];
+	integer    streamCount = 0;
+	always @(posedge clk)
+		if (rxStb) begin
+			if (rxStbAddr < 600) streamed[rxStbAddr] = rxStbData;
+			streamCount = streamCount + 1;
+		end
 
 	integer pass = 0;
 	integer fail = 0;
@@ -73,6 +97,9 @@ module tb_dcd_link;
 		.readData(readData), .newByteReady(newByteReady),
 		.present(present),
 		.rxBuf(rxBuf), .rxLen(rxLen), .rxValid(rxValid), .rxBad(rxBad),
+		.rxRspGroups(rxRspGroups),
+		.rxStb(rxStb), .rxStbData(rxStbData), .rxStbAddr(rxStbAddr),
+		.txArm(txArm),
 		.txReq(txReq), .txData(txData), .txAddr(txAddr), .txLen(txLen),
 		.txBusy(txBusy)
 	);
@@ -205,7 +232,7 @@ module tb_dcd_link;
 	initial begin
 		_reset = 0; ca0 = 0; ca1 = 1; ca2 = 0;  // state 2, idle
 		lstrb = 0; _enable = 0; writeData = 0; writeReq = 0;
-		present = 1; txReq = 0; txLen = 0;
+		present = 1; txArm = 0; txReq = 0; txLen = 0;
 		repeat (4) @(posedge clk);
 		#1; _reset = 1;
 		repeat (4) @(posedge clk);
@@ -312,6 +339,37 @@ module tb_dcd_link;
 		check("Figure 1 does not report valid", sawValid !== 1'b1);
 
 		// ---------------------------------------------------------------
+		// 2b. THE VECTOR FIGURE 1 CANNOT BE: a real Status command
+		// ---------------------------------------------------------------
+		// $41967C builds the command block as <op><blks><adrH><adrM><adrL>
+		// <pad>, and $419D12's `moveq #$1,d3` puts 1 in the block count for a
+		// Status. So the seven payload bytes on the wire are
+		//   $03 $01 $00 $00 $00 $00 $FC
+		// whose LSBs are 1,1,0,0,0,0,0 -- NOT a palindrome. Data byte n owns
+		// bit n, so the LSB byte is $80|$01|$02 = $83, and the group is
+		//   $83 $81 $80 $80 $80 $80 $80 $FE
+		// Under the reversed packing this same group decodes to
+		// $02 $00 $00 $00 $00 $01 $FD -- a valid checksum, an opcode of $02,
+		// and no reply. That is precisely what the board reported on
+		// 2026-09-05 and was read as "the Mac issued a write-verify".
+		armRx;
+		setState(3'd1);
+		macByte(8'hAA);
+		macByte(8'h81);
+		macByte(8'hB1);
+		macByte(8'h83);        // LSB byte: bit 0 = LSB($03), bit 1 = LSB($01)
+		macByte(8'h81); macByte(8'h80); macByte(8'h80); macByte(8'h80);
+		macByte(8'h80); macByte(8'h80); macByte(8'hFE);
+		@(posedge clk); #1;
+		check("ROM Status command reports valid", sawValid === 1'b1);
+		check("ROM Status command decodes to opcode $03, not $02",
+		      rxBuf[7:0] === 8'h03);
+		check("ROM Status command block count is 1", rxBuf[15:8] === 8'h01);
+		check("ROM Status command address is zero",
+		      rxBuf[39:16] === 24'h000000);
+		check("ROM Status command asks for 49 groups back", rxRspGroups === 7'd49);
+
+		// ---------------------------------------------------------------
 		// 3. A well-formed group is accepted
 		// ---------------------------------------------------------------
 		// Six payload bytes plus a checksum chosen so the whole group sums to
@@ -328,11 +386,11 @@ module tb_dcd_link;
 		macByte(8'hAA);
 		macByte(8'h81);
 		macByte(8'h81);
-		// LSB byte first: bit 6 belongs to payload[0], bit 0 to payload[6].
-		macByte(8'h80 | (payload[0][0] << 6) | (payload[1][0] << 5) |
-		                (payload[2][0] << 4) | (payload[3][0] << 3) |
-		                (payload[4][0] << 2) | (payload[5][0] << 1) |
-		                 payload[6][0]);
+		// LSB byte first, and data byte n owns bit n.
+		macByte(8'h80 |  payload[0][0]        | (payload[1][0] << 1) |
+		                (payload[2][0] << 2)  | (payload[3][0] << 3) |
+		                (payload[4][0] << 4)  | (payload[5][0] << 5) |
+		                (payload[6][0] << 6));
 		for (i = 0; i < 7; i = i + 1)
 			macByte(8'h80 | (payload[i] >> 1));
 		@(posedge clk); #1;
@@ -379,10 +437,10 @@ module tb_dcd_link;
 		macByte(8'h82);                  // $80 | 2 groups
 		macByte(8'h82);
 		for (i = 0; i < 14; i = i + 7) begin
-			macByte(8'h80 | (payload[i+0][0] << 6) | (payload[i+1][0] << 5) |
-			                (payload[i+2][0] << 4) | (payload[i+3][0] << 3) |
-			                (payload[i+4][0] << 2) | (payload[i+5][0] << 1) |
-			                 payload[i+6][0]);
+			macByte(8'h80 |  payload[i+0][0]       | (payload[i+1][0] << 1) |
+			                (payload[i+2][0] << 2) | (payload[i+3][0] << 3) |
+			                (payload[i+4][0] << 4) | (payload[i+5][0] << 5) |
+			                (payload[i+6][0] << 6));
 			macByte(8'h80 | (payload[i+0] >> 1)); macByte(8'h80 | (payload[i+1] >> 1));
 			macByte(8'h80 | (payload[i+2] >> 1)); macByte(8'h80 | (payload[i+3] >> 1));
 			macByte(8'h80 | (payload[i+4] >> 1)); macByte(8'h80 | (payload[i+5] >> 1));
@@ -403,7 +461,10 @@ module tb_dcd_link;
 		// ---------------------------------------------------------------
 		sum = 0;
 		for (i = 0; i < 6; i = i + 1) begin
-			payload[i] = 8'h41 + i[7:0];
+			// All odd, so the LSB pattern is 1,1,1,1,1,1,0 with the
+			// checksum -- deliberately NOT a palindrome, or this test
+			// could not tell the two bit orders apart either.
+			payload[i] = 8'h41 + 2*i[7:0];
 			sum = sum + payload[i];
 		end
 		chk = -sum;                       // the module must append exactly this
@@ -411,10 +472,10 @@ module tb_dcd_link;
 		expTx[7] = 8'h80;
 		for (i = 0; i < 6; i = i + 1) begin
 			expTx[i] = 8'h80 | (payload[i] >> 1);
-			expTx[7] = expTx[7] | (payload[i][0] << (6 - i));
+			expTx[7] = expTx[7] | (payload[i][0] << i);
 		end
 		expTx[6] = 8'h80 | (chk >> 1);
-		expTx[7] = expTx[7] | chk[0];
+		expTx[7] = expTx[7] | (chk[0] << 6);
 
 		setState(3'd2);
 		@(posedge clk); #1;
@@ -512,9 +573,9 @@ module tb_dcd_link;
 		armRx;
 		setState(3'd1);
 		macByte(8'hAA); macByte(8'h81); macByte(8'h81);
-		macByte(8'h80 | (payload[0][0] << 6) | (payload[1][0] << 5) |
-		                (payload[2][0] << 4) | (payload[3][0] << 3) |
-		                (payload[4][0] << 2) | (payload[5][0] << 1) | chk[0]);
+		macByte(8'h80 |  payload[0][0]        | (payload[1][0] << 1) |
+		                (payload[2][0] << 2)  | (payload[3][0] << 3) |
+		                (payload[4][0] << 4)  | (payload[5][0] << 5) | (chk[0] << 6));
 		for (i = 0; i < 6; i = i + 1) macByte(8'h80 | (payload[i] >> 1));
 		macByte(8'h80 | (chk >> 1));
 		@(posedge clk); #1;
@@ -545,6 +606,159 @@ module tb_dcd_link;
 		setState(3'd2);
 		repeat (8) @(posedge clk); #1;
 		check("  ...and /HSHK is released, not stuck low", readData[7] === 1'b1);
+
+		// ---------------------------------------------------------------
+		// 7. MAC-TO-DRIVE HOLD-OFF: the rest of the group still arrives
+		// ---------------------------------------------------------------
+		// $419B5A drops ca0 after the group's fourth transmitted byte and the
+		// Mac keeps going: three more data bytes, the LSB byte, one filler
+		// $00, then ca0 back up, a fresh $AA, and straight on to the NEXT
+		// group. Nothing is resent and the checksum never pauses. A receiver
+		// that stops taking bytes in state 0 loses four bytes of the group and
+		// then mis-frames everything after it.
+		sum = 0;
+		for (i = 0; i < 13; i = i + 1) begin
+			payload[i] = 8'hA0 + i[7:0];
+			sum = sum + payload[i];
+		end
+		payload[13] = -sum;
+
+		armRx;
+		setState(3'd1);
+		macByte(8'hAA);
+		macByte(8'h82);                  // two groups from the Mac
+		macByte(8'h81);
+		// group 1, with HOFF asserted part-way through
+		macByte(8'h80 |  payload[0][0]       | (payload[1][0] << 1) |
+		                (payload[2][0] << 2) | (payload[3][0] << 3) |
+		                (payload[4][0] << 4) | (payload[5][0] << 5) |
+		                (payload[6][0] << 6));
+		macByte(8'h80 | (payload[0] >> 1));
+		macByte(8'h80 | (payload[1] >> 1));
+		macByte(8'h80 | (payload[2] >> 1));
+		setState(3'd0);                  // HOFF, mid-group, exactly as $419B5A
+		macByte(8'h80 | (payload[3] >> 1));
+		macByte(8'h80 | (payload[4] >> 1));
+		macByte(8'h80 | (payload[5] >> 1));
+		macByte(8'h80 | (payload[6] >> 1));
+		macByte(8'h00);                  // the filler byte at $419BBA
+		setState(3'd1);                  // ca0H at $419BD4 releases HOFF
+		macByte(8'hAA);                  // the resync at $419BE6
+		// group 2 follows immediately; the Mac does NOT resend group 1
+		macByte(8'h80 |  payload[7][0]        | (payload[8][0]  << 1) |
+		                (payload[9][0]  << 2) | (payload[10][0] << 3) |
+		                (payload[11][0] << 4) | (payload[12][0] << 5) |
+		                (payload[13][0] << 6));
+		for (i = 7; i < 14; i = i + 1) macByte(8'h80 | (payload[i] >> 1));
+		@(posedge clk); #1;
+
+		check("hold-off from the Mac: the frame still checksums", sawValid === 1'b1);
+		check("hold-off from the Mac: not reported bad", sawBad !== 1'b1);
+		ok = 1;
+		for (i = 0; i < 8; i = i + 1)
+			if (rxBuf[i*8 +: 8] !== payload[i]) ok = 0;
+		check("hold-off from the Mac: the interrupted group is kept, not lost", ok);
+		ok = 1;
+		for (i = 0; i < 14; i = i + 1)
+			if (streamed[i] !== payload[i]) ok = 0;
+		check("hold-off from the Mac: all 14 payload bytes stream through", ok);
+
+		// ---------------------------------------------------------------
+		// 8. THE PAYLOAD STREAM reaches past rxBuf's eight bytes
+		// ---------------------------------------------------------------
+		// A write's first block rides with the command: 538 payload bytes, of
+		// which rxBuf holds eight. Without the stream the sector could not be
+		// captured at all. The index must count payload bytes only - not the
+		// sync, not the two count bytes, and not the per-group LSB bytes.
+		check("payload stream indexes payload bytes only", streamCount >= 14);
+		check("payload stream: byte 0 is the first payload byte",
+		      streamed[0] === payload[0]);
+		check("payload stream: byte 13 is the checksum", streamed[13] === payload[13]);
+
+		// ---------------------------------------------------------------
+		// 9. txArm claims the bus before the payload exists
+		// ---------------------------------------------------------------
+		// $419820 reads the sense line as the FIRST thing the Mac's receive
+		// routine does, with no retry budget: /HSHK must already be low. The
+		// sync hunt behind it has a budget of $10000. So arming and sending
+		// are two separate events, and a drive that waited for its sector
+		// before asserting /HSHK would fail every read with error $20 on any
+		// storage slower than a few microseconds.
+		sum = 0;
+		for (i = 0; i < 6; i = i + 1) begin
+			payload[i] = 8'h71 + 2*i[7:0];
+			sum = sum + payload[i];
+		end
+		chk = -sum;
+		expTx[7] = 8'h80;
+		for (i = 0; i < 6; i = i + 1) begin
+			expTx[i] = 8'h80 | (payload[i] >> 1);
+			expTx[7] = expTx[7] | (payload[i][0] << i);
+		end
+		expTx[6] = 8'h80 | (chk >> 1);
+		expTx[7] = expTx[7] | (chk[0] << 6);
+
+		setState(3'd2);
+		@(posedge clk); #1;
+		txLen = 10'd6;
+		txArm = 1'b1;                     // "a reply is coming" - no payload yet
+		hsWait = 0;
+		while (readData[7] !== 1'b0 && hsWait < 4000) begin
+			@(posedge clk); hsWait = hsWait + 1;
+		end
+		check("txArm alone asserts /HSHK", readData[7] === 1'b0);
+		setState(3'd3);
+		@(posedge clk); #1;
+		// State 3 is where the Mac senses, so this is the level that matters.
+		check("  ...and still holds it where the Mac reads it, in state 3",
+		      readData[7] === 1'b0);
+		setState(3'd1);
+		// A long wait in state 1 with no payload: the drive must stay silent.
+		// (readData carries transmitted bytes in state 1, not the sense line,
+		// so newByteReady is the only honest thing to watch here.)
+		ok = 1;
+		for (i = 0; i < 2000; i = i + 1) begin
+			@(posedge clk);
+			if (newByteReady) ok = 0;
+		end
+		check("txArm alone sends nothing while the payload is not ready", ok);
+
+		@(posedge clk); #1; txReq = 1'b1;
+		@(posedge clk); #1; txReq = 1'b0;
+		getByte(got[0]);
+		check("txReq starts the frame that txArm reserved", got[0] === 8'hAA);
+		for (i = 0; i < 8; i = i + 1) getByte(got[i]);
+		ok = 1;
+		for (i = 0; i < 8; i = i + 1)
+			if (got[i] !== expTx[i]) ok = 0;
+		check("the late frame is encoded exactly as a prompt one", ok);
+		@(posedge clk);
+		while (txBusy) @(posedge clk);
+		#1; txArm = 1'b0;
+		setState(3'd3);
+		@(posedge clk); #1;
+		check("late frame releases /HSHK at the end", readData[7] === 1'b1);
+		setState(3'd2);
+
+		// An armed drive whose Mac gives up must let go. Without the escape a
+		// fetch the Mac abandoned holds /HSHK low for ever.
+		@(posedge clk); #1;
+		txArm = 1'b1;
+		hsWait = 0;
+		while (readData[7] !== 1'b0 && hsWait < 4000) begin
+			@(posedge clk); hsWait = hsWait + 1;
+		end
+		check("armed again for the abandon test", readData[7] === 1'b0);
+		setState(3'd3);
+		@(posedge clk); #1;
+		setState(3'd1);
+		repeat (8) @(posedge clk); #1;
+		#1; txArm = 1'b0;
+		setState(3'd2);                   // the Mac gives up waiting
+		repeat (8) @(posedge clk); #1;
+		check("an armed frame the Mac abandons releases the bus",
+		      readData[7] === 1'b1);
+		check("  ...and clears txBusy", txBusy === 1'b0);
 
 		$display("tb_dcd_link: %0d/%0d", pass, pass + fail);
 		if (fail != 0) $display("FAILED");

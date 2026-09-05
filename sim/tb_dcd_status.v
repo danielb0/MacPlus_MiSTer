@@ -183,9 +183,12 @@ module tb_dcd_status;
 			macByte(8'hAA);
 			macByte(8'h80 | macGroups(0));         // command groups
 			macByte(8'h80 | macGroups(rspLen));    // reply groups
-			macByte(8'h80 | (cmd[0][0] << 6) | (cmd[1][0] << 5) | (cmd[2][0] << 4) |
-			                (cmd[3][0] << 3) | (cmd[4][0] << 2) | (cmd[5][0] << 1) |
-			                 cmd[6][0]);
+			// Data byte n owns bit n of the LSB byte -- see the four ROM /
+			// firmware sites quoted in rtl/dcd_link.v. It was backwards here
+			// and in the RTL together, which is why nothing caught it.
+			macByte(8'h80 |  cmd[0][0]        | (cmd[1][0] << 1) | (cmd[2][0] << 2) |
+			                (cmd[3][0] << 3)  | (cmd[4][0] << 4) | (cmd[5][0] << 5) |
+			                (cmd[6][0] << 6));
 			for (i = 0; i < 7; i = i + 1) macByte(8'h80 | (cmd[i] >> 1));
 			// The Mac returns to state 3 and waits for the release before
 			// idling - TashTwenty's IntEn3.
@@ -207,7 +210,7 @@ module tb_dcd_status;
 			for (g = 0; g < n; g = g + 1) begin
 				for (i = 0; i < 8; i = i + 1) getByte(raw[i]);
 				for (i = 0; i < 7; i = i + 1)
-					rsp[g*7 + i] = {raw[i][6:0], raw[7][6-i]};
+					rsp[g*7 + i] = {raw[i][6:0], raw[7][i]};
 			end
 			nDecoded = n * 7;
 		end
@@ -297,20 +300,22 @@ module tb_dcd_status;
 		      {identity(0), identity(1)} === 16'h0000);
 		check("Device_Manuf is 1 (Apple) at identity offset 2",
 		      {identity(2), identity(3)} === 16'h0001);
-		// $DE, not the $F6 TashTwenty writes: Writable traded for
-		// Write_Protected because MultiBlock Write is not implemented. HFS
-		// writes the MDB back at mount time to mark a volume in use, so a
-		// drive that claims to be writable turns a working read path into a
-		// handshake timeout at the worst possible moment.
-		check("Device_Character is $DE at identity offset 4",
-		      identity(4) === 8'hDE);
+		// $F6, the constant TashTwenty writes, now that MultiBlock Write is
+		// implemented. It was pinned at $DE while it was not: HFS writes the
+		// MDB back at mount time to mark a volume in use, so a drive that
+		// claimed to be writable turned a working read path into a handshake
+		// timeout at the worst possible moment. The locked case below still
+		// has to produce $DE, and from the image's own flag rather than from
+		// a compile-time constant.
+		check("Device_Character is $F6 at identity offset 4",
+		      identity(4) === 8'hF6);
 		check("  ...which is Mountable and Readable",
 		      (identity(4) & 8'hC0) === 8'hC0);
 		check("  ...and declares an icon and a disk in place",
 		      (identity(4) & 8'h06) === 8'h06);
-		check("  ...and reports WRITE-PROTECTED, not writable",
-		      ((identity(4) & 8'h08) === 8'h08) &&
-		      ((identity(4) & 8'h20) === 8'h00));
+		check("  ...and reports WRITABLE, not write-protected",
+		      ((identity(4) & 8'h20) === 8'h20) &&
+		      ((identity(4) & 8'h08) === 8'h00));
 
 		// ---- capacity: 24-bit, and one less than the image ----
 		cap = {8'h00, identity(5), identity(6), identity(7)};
@@ -413,13 +418,36 @@ module tb_dcd_status;
 		mount(64'd38965);                  // a real HD20, 20 MB
 		repeat (4) @(posedge clk);
 		runStatus;
-		check("a second mount still reports write-protected",
-		      identity(4) === 8'hDE);
+		check("a second mount still reports writable",
+		      identity(4) === 8'hF6);
 		check("a 20 MB capacity reports as 38964, the highest block",
 		      {identity(5), identity(6), identity(7)} === 24'd38964);
 		sum = 0;
 		for (i = 0; i < 343; i = i + 1) sum = sum + rsp[i];
 		check("the second reply also checksums to zero", sum === 8'h00);
+
+		// ---------------------------------------------------------------
+		// A LOCKED IMAGE. The write path exists now, so write-protection has
+		// to come from the mount rather than from a constant - and it must
+		// move exactly one bit pair, not disturb Mountable, Readable, the
+		// icon flag or Disk_In_Place.
+		// ---------------------------------------------------------------
+		setState(3'd2);
+		@(posedge clk); #1;
+		img_size = 64'd38965 * 64'd512; img_readonly = 1'b1; img_mounted = 1'b1;
+		@(posedge clk); #1;
+		img_mounted = 1'b0;
+		repeat (4) @(posedge clk);
+		runStatus;
+		check("a read-only mount reports $DE, write-protected",
+		      identity(4) === 8'hDE);
+		check("  ...and nothing else in the byte moved",
+		      (identity(4) & 8'hC6) === 8'hC6);
+		setState(3'd3);
+		repeat (4) @(posedge clk);
+		setState(3'd2);
+		mount(64'd38965);                  // back to a writable mount
+		repeat (4) @(posedge clk);
 
 		setState(3'd3);
 		repeat (4) @(posedge clk);

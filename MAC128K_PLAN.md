@@ -3640,6 +3640,214 @@ and undone; HD Diag's hard reset will still report `$24`.
 this touches what they cover. **Next step is the Quartus compile, gated, with
 `build_tag.v` stamped from HEAD first.**
 
+### STOP: the 7-for-8 LSB BIT ORDER WAS REVERSED, and it is what the board was actually reporting (2026-09-05)
+
+**Found while starting MultiBlock Write, by reading the ROM's own write loop
+before designing anything -- [[feedback-read-the-spec-for-historical-hardware]]
+paying for itself for the third time in this phase. It is not the write path
+that was blocking the boot.**
+
+`rtl/dcd_link.v` packed data byte *n*'s LSB into **bit 6-n** of the group's LSB
+byte, in both directions. It is **bit n**. Four independent sites, two on each
+side of the wire, and they agree with each other and not with us:
+
+| source | site | what it does |
+|---|---|---|
+| Plus ROM, transmit | `$419A4C`..`$419B06` | six `roxr.b #1,d4` in the prologue then `roxr.b #2,d4`, leaving `[1, L6, L5, L4, L3, L2, L1, L0]` |
+| Plus ROM, receive | `$4198C4` | `lsr.b #1,d4 / addx.b d1,d1` -- the FIRST data byte takes bit 0, the second bit 1 |
+| HD20 firmware, receive | `L1dfc` | `rrc R8 / rlc R9` per byte, R8 being the LSB byte: byte n takes bit n |
+| HD20 firmware, transmit | `L1edc` | `scf / rrc Rn / rrc R15` seven times, one more shift, `or R15,#$80` -- Ln accumulates at bit n |
+
+**WHY NOTHING CAUGHT IT, and all three reasons are worth keeping.**
+
+1. **Figure 1 is a palindrome.** The specification's worked example is data
+   `$31..$37`, whose LSBs are `1,0,1,0,1,0,1`. Reversed, that is `1,0,1,0,1,0,1`.
+   The LSB byte is `$D5` under either order. `sim/tb_dcd_link.v` asserted this
+   vector "verbatim" and its own comment claimed a wrong packing "fails here and
+   essentially nowhere else". It fails there never.
+2. **A reversed packing is self-consistent**, so every loopback bench -- ours
+   encode, ours decode -- agrees with itself perfectly.
+3. **The checksum cannot see it.** It sums the seven decoded bytes; a permutation
+   of which byte each `+1` lands on leaves the sum alone. So `bad-checksum=0` on
+   hardware proved nothing about it, and neither could any amount of soak.
+
+**AND IT RE-READS THE 2026-09-05 HARDWARE RESULT, which was over-interpreted.**
+The board reported `commands=3+`, `last op=$02`, 255+ bytes out and zero
+checksum errors, and that was written up as "Status and MultiBlock Read both
+work; the Mac then issued a write-verify". Work through the arithmetic instead:
+
+- **A Status REPLY could never be accepted.** Its first group is
+  `$83 $00 $00 $00 $00 $00 $00`, LSBs `1,0,0,0,0,0,0`. Reversed, the Mac decodes
+  byte 0 as **`$82`**, and `$419776`'s `subi.b #$80` / compare then errors
+  **`$30`** every single time. Every Status the drive answered was thrown away.
+- **`last op=$02` IS A MISDECODED STATUS COMMAND.** `$419D12` sets `d3` to 1, so
+  the Status command block on the wire is `$03 $01 $00 $00 $00 $00 $FC` -- LSBs
+  `1,1,0,0,0,0,0`, which is *not* a palindrome. Reversed it decodes to
+  `$02 $00 $00 $00 $00 $01 $FD`: a **valid checksum**, an **opcode of `$02`**,
+  and a block count of 0. `rtl/dcd.v` matched neither `$03` nor `$00`, dropped
+  it, and the Mac spun. That is the whole hang, exactly as observed, and the
+  write path was never reached at all.
+- The 255+ bytes out are one Status reply (49 groups = 392 bytes) saturating an
+  8-bit counter -- consistent with a command that happened to decode as `$03`
+  because a different address made its checksum parity land the other way.
+
+**So "identification, Status and MultiBlock Read all work on the board" is
+withdrawn.** What was proven on hardware is identification (static sense levels,
+untouched by any of this), that frames move in both directions, and that the
+Mac really does send `$AA` on a write. Nothing above the link layer was
+confirmed. `sim/tb_dcd_link.v` now carries the ROM's real Status command as a
+discriminating vector, and the header comment records why the Figure 1 one is
+not one.
+
+**The lesson is not "read the spec" -- we did.** It is that a worked example can
+be degenerate, and that a bench built from the same reading as the RTL cannot
+test that reading. This plan already wrote that sentence once, at the 1.1/1.2a
+STOP note. It was right then and it was still not enough.
+
+### MultiBlock Write and Write-Verify, built (2026-09-05)
+
+**The plan's own item 1, and the framing came out of `$419712` rather than out
+of either specification.** The per-block loop settles four things that are not
+guessable, and three of them are silent-corruption bugs if guessed wrong:
+
+1. **Each block is a separate command.** `$419712`'s `tst.b d1 / beq $419754`
+   returns immediately for a read; only a write re-transmits. So the drive
+   answers **one group** and goes back to idle, where a read sends N frames off
+   one command.
+2. **Continuations set bit 6, not a fixed `$41`.** `$419716` is
+   `ori.b #$40,$19C(a1)`, so `$01` continues as `$41` **and `$02` continues as
+   `$42`**.
+3. **The reply opcode is `(command & $3F) | $80`.** `$41975E` masks with
+   `andi.b #$3F` before `$419776`'s compare, so `$41` is answered `$81` -- and,
+   just as firmly, **`$02` must be answered `$82`**. An implementation copied
+   from a write-only reference answers `$81` and earns error `$30`.
+4. **A continued write carries no usable address.** The reply lands on top of
+   the command block at `$19C`, and `$41971C` refreshes **only** the count byte
+   at `$19D` -- so `$19E`-`$1A0` hold the previous reply's zero status and
+   padding. **The drive must advance the block number itself.** A drive that
+   trusted the wire would write every block after the first to block 0.
+
+The count byte at `$19D` counts **down** and the reply must echo it
+(`$41978C` compares before `$4197EE` decrements; a mismatch is error `$31`).
+
+**`rtl/dcd_link.v` now streams the payload.** A write's first block rides with
+the command -- 6 header + 20 tags + 512 data = 538 payload bytes -- so `rxBuf`'s
+eight are nowhere near enough. The link exposes `rxStb` / `rxStbData` /
+`rxStbAddr` (the byte's index within the frame's payload) and `rtl/dcd.v` routes
+indices 26..537 into the sector buffer. **Byte 26 is data byte 0 in both
+directions**, so the same `-26` offset serves the read path's `txAddr` and the
+write path's receive index.
+
+**A write is refused unless frame byte 537 actually arrived** (`wrFull`). The
+checksum is not known until byte 538, long after the sector has been streamed
+into the buffer, so a truncated frame leaves the buffer holding a mixture of
+this command and whatever was there before -- which, after a read, is a
+different block of the user's disk. Committing that is silent corruption of data
+the Mac never sent.
+
+**Write-verify is served as a plain write, and that is a recorded deviation.** A
+real HD20 wrote the block and read it back off the platter. There is no platter
+here, and the read-back would compare the sector buffer against itself; the
+block layer already reports a refused or timed-out commit through the status
+byte, which is the part the driver acts on.
+
+**`WRITE_IMPLEMENTED` is now true**, so `Device_Character` is `$F6` on a
+writable mount and `$DE` on a locked one -- and it comes from the image's own
+read-only flag rather than from a compile-time constant.
+
+### /HSHK has to be claimed on ACCEPTING a command, not on having the data
+
+**A second thing the write path forced out of the ROM, and it was wrong for
+MultiBlock Read too.** `$419820` is the **first** instruction of the Mac's
+receive routine and it reads the sense line with **no retry budget at all** --
+error `$20` otherwise. The Mac gets there within a few microseconds of leaving
+state 2 at the end of its own transmission, long before an SD card can answer.
+The sync byte behind it, by contrast, has a budget of `$10000` spins
+(`$419846`) -- over a hundred milliseconds, which is where a real drive's seek
+time goes.
+
+So arming and sending are two different events, and `rtl/dcd_link.v` now takes
+two signals: `txArm` (level, "a reply is coming" -- assert /HSHK and wait for
+state 1) and `txReq` (pulse, "the payload is ready"). `rtl/dcd.v` raises `txArm`
+the moment a command is accepted and holds it for the whole command, which for a
+multi-block read is all N frames.
+
+**One trap in that, and it cost an afternoon.** `txPend` used to latch from
+`(txReq || txArm)`. `txArm` is a level and is necessarily still high for one
+clock after the frame it armed has finished -- the command layer cannot know the
+frame is over until it has *seen* `txBusy` fall. Latching that tail left a
+phantom request that grabbed the bus at the start of the **next** command, and
+the command layer then read the resulting `txBusy` as "still sending" and
+dropped the command entirely. The symptom was a second Status going unanswered
+while the first was perfect. `txPend` now latches from `txReq` only and clears
+when neither `txArm` nor `txGo` is asserted.
+
+### Hold-off is NOT the same in the two directions
+
+**Drive to Mac** the interrupted group is **resent** from its start behind a
+fresh sync and excluded from the checksum -- `$419974` backs the group counter
+up and re-decodes. That is what the specification describes and what
+`rtl/dcd_link.v` already did.
+
+**Mac to drive it is not.** `$419B5A` drops `ca0` after the group's **fourth**
+transmitted byte when the SCC has an interrupt pending, and the Mac then:
+
+- sends the **rest of the group anyway**, in state 0;
+- sends one filler `$00` (`$419BBA`);
+- drops the interrupt mask so the SCC ISR runs;
+- `subq.w #1,d6` -- which **replaces** the `dbra` it skipped, so the group
+  counter and the source pointer both move on and **nothing is resent**;
+- `ca0H` releases HOFF, then a bare `$AA` (`$419BE6`), then the **next** group.
+
+The HD20's own firmware receives it exactly that way at `L1e53`: it tests the
+phase line at the group boundary, discards bytes until `$AA`, and jumps back
+into the group loop with the interrupted group's data intact.
+
+Two consequences, both now in the RTL. Bytes arriving while HOFF is asserted are
+**real payload and must be taken**, so the accept condition covers state 0 once
+a frame is under way. And the `$AA` that follows is a **bare resync**, not the
+start of a frame -- the two count bytes do not come again -- so it needs its own
+state (`RX_RESYNC`) rather than a trip through `RX_SYNC`.
+
+**None of this can fire on a Status or a Read.** `$419B40` clears the hold-off
+flag when the group counter says this is the last group, and those commands are
+one group long. Only a write's 77 groups can see it -- which is why it has never
+mattered until now, and why it will matter the first time somebody writes to an
+HD20 with AppleTalk up.
+
+### Gates, 2026-09-05
+
+| bench | result |
+|---|---|
+| `tb_dcd_link` | **66/66** (was 45; the ROM Status vector, the Mac-to-drive hold-off, the payload stream and the arm/go split are new) |
+| `tb_dcd_write` | **133/133**, new file |
+| `tb_dcd_status` | **75/75** (was 69; a read-only mount now has to produce `$DE` from the mount rather than from a constant) |
+| `tb_dcd_read` | **40/40** unchanged |
+| `tb_iwm_dcd` | **33/33** unchanged |
+
+**Mutation: 9 built and 9 killed**, chosen to attack the new claims rather than
+the easy ones -- both LSB orders restored, the reply opcode pinned to `$81`, the
+continued write trusting the wire address, the sector offset moved to 25, the
+receiver ignoring state-0 bytes, the resync removed, `txArm` dropped from the
+bus claim, and the short-frame guard removed. Two die by timeout, which is the
+honest failure mode for a drive that never answers.
+
+**`sim/tb_dcd_write.v` is deliberately not built from `rtl/dcd.v`.** Its Mac
+model frames the command out of `$419600`-`$419E40` and its block-device model
+out of `hps_io.sv`, and the round-trip test writes a block through the write
+path and reads it back through the read path -- the only check that survives
+both halves being wrong in the same direction.
+
+**NEXT STEP IS THE QUARTUS COMPILE, gated, with `build_tag.v` stamped from HEAD
+first.** Nothing here has been near the board. The hardware question this build
+answers is a real one: with the LSB order corrected, does the Plus ROM accept a
+Status reply at all? Everything above the link layer is still unconfirmed on
+hardware.
+
+**Still open and untouched:** `iwm.v:319` feeds `dcd0` `lstrb` as PH3, but PH3
+is VIA PA5/`SEL`; the post-RESET /HSHK window and the phantom states after PH3;
+and the OSD greying.
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
