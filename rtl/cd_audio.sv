@@ -1356,13 +1356,21 @@ wire signed [15:0] ap_src_r = (ap_ch1 == 8'h02) ? sum_r[15:0] :
 // The gain is REGISTERED, not read into a wire, so Quartus infers a ROM rather
 // than a 256-way mux: 109 ALMs and 0 memory bits combinational against 5 ALMs
 // and 2 M10K blocks registered. Those came from a STANDALONE HARNESS with free
-// inputs (2026-08-30; numbers and method in rtl/cd_vol_lut.vh), and in THIS
-// core neither figure is what synthesis sees -- scsi.v:1670 ties ap_vol0/1 to
-// a constant 8'hff, which is the drive's power-on full scale, so they never
-// move and Quartus folds the whole table to unity. The register therefore
-// costs nothing and buys nothing until a MODE SELECT path for page 0x0E
-// exists; it is here so that day needs no rethink, and the added cycle would
-// be free even then.
+// inputs (2026-08-30; numbers and method in rtl/cd_vol_lut.vh).
+//
+// MEASURED IN THIS CORE, build 9303cab0, 2026-09-05, against f157fcc8. It does
+// NOT cost what the harness said, and it is NOT free either -- both guesses
+// were made here before anyone compiled it. scsi.v:1670 ties ap_vol0/1 to a
+// constant 8'hff (the drive's power-on full scale), so constant propagation
+// collapses each 256x16 table to a 32-bit altsyncram: ap_gain_l and ap_gain_r
+// become Ram0_rtl_0 and Ram1_rtl_0, 64 memory bits for the pair against the
+// harness's 8,192, and ONE extra M10K block -- 133 -> 134 of 553. They are
+// inferred as RAM, not removed as stuck-at.
+//
+// So the honest cost is one block of the 419 free, for a register that buys
+// nothing until a MODE SELECT path for page 0x0E exists. Worth it at that
+// price, and the added cycle is free either way -- but do not repeat here that
+// it costs nothing.
 `include "cd_vol_lut.vh"
 reg [15:0] ap_gain_l, ap_gain_r;
 always @(posedge clk) begin

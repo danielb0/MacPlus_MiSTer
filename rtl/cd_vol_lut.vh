@@ -26,11 +26,22 @@
 // (altsyncram). rtl/cd_audio.sv does that; do the same at any new point of
 // use. The case statement was never the cost -- the missing register was.
 //
-// SCOPE OF THOSE NUMBERS. The harness drove `v` from a free input. MacPlus has
-// exactly one point of use, and scsi.v:1670 feeds it a constant, so both forms
-// fold away there and neither cost is paid today. Take the table above as what
-// this construct costs WHEN THE INPUT VARIES -- which is the case the guidance
-// above is for -- not as a delta to expect in a MacPlus fit report.
+// SCOPE OF THOSE NUMBERS: the harness drove `v` from a free input, and MacPlus
+// does not. scsi.v:1670 feeds its one point of use a constant, so the table
+// above is what this construct costs WHEN THE INPUT VARIES -- the case the
+// guidance is for -- and not the delta a MacPlus fit report shows.
+//
+// WHAT MACPLUS ACTUALLY PAID, measured in build 9303cab0 against f157fcc8,
+// 2026-09-05: constant propagation collapses each 256x16 table to a 32-bit
+// altsyncram, so the pair costs 64 memory bits rather than 8,192 -- but they
+// are still INFERRED AS RAM, not optimised away, and they still take one
+// M10K block between them: 133 -> 134 of 553.
+//
+// Two predictions died on that report and both are worth remembering. The
+// combinational form was never going to cost 109 ALMs here, because its input
+// was already constant; and the registered form was not going to be free
+// either. A cost measured with a free input tells you nothing about a
+// constant-driven instance in EITHER direction -- measure, do not reason.
 //
 // The justification that used to stand here -- "a case guarantees Quartus
 // builds this as logic, never an M10K -- RAM blocks are the scarce resource

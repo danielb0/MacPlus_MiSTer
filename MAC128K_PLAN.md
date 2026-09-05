@@ -5750,6 +5750,62 @@ same correction lands in `sim/test_read_probes.tcl`.
 **Still not compiled.** This rides the same pending build as `b8dedd0`.
 
 
+### The compile, `9303cab0` -- successful, and it falsified the prediction
+
+`quartus_sh --flow compile MacPlus`, Quartus 17.0.2, tag stamped from HEAD
+first. **Fitter successful, no errors, timing closes** -- every setup slack
+positive, TNS 0.000 on all domains, tightest 0.540 ns on the HDMI PLL. The one
+Critical Warning (127005, the RTC MIF depth) is byte-identical to the one in
+the 2026-09-03 log: pre-existing, not ours.
+
+| | `f157fcc8` (baseline) | `9303cab0` | delta |
+|---|---|---|---|
+| ALMs | 20,392 (49%) | 20,319 (48%) | **-73** |
+| Registers | 22,678 | 22,647 | -31 |
+| RAM blocks | 133 / 553 | **134 / 553** | **+1** |
+| Memory bits | 931,781 | 931,845 | **+64** |
+
+**THE PREDICTION WAS WRONG, and it was recorded in `f109a59` precisely so this
+could be checked rather than reinterpreted.** It said: no M10K delta, and
+`ap_gain_l`/`ap_gain_r` listed under "Registers Removed During Synthesis" as
+stuck-at. Neither happened. The map report puts both under **inferred RAM**:
+
+```
+...|cd_audio:g_cd_audio.cd_audio_i|ap_gain_l[0..15]  ->  ...|Ram0_rtl_0 ; RAM
+...|cd_audio:g_cd_audio.cd_audio_i|ap_gain_r[0..15]  ->  ...|Ram1_rtl_0 ; RAM
+```
+
+**What actually happens.** Constant propagation does reach the table -- each
+`altsyncram` is **32 memory bits**, not the 4,096 a 256x16 ROM would be, and 32
++ 32 is exactly the +64 measured. But Quartus still *instantiates* them, and
+the pair takes one M10K block between them. So the register is neither the
+harness's 2 blocks / 8,192 bits nor the zero this plan predicted. It is **one
+block of the 419 free**.
+
+Attribution is clean rather than assumed: the baseline `MacPlus.map.rpt`
+contains **no** `ap_gain` and **no** `Ram0_rtl_0` under `cd_audio` at all, and
+nothing else in `b8dedd0` or `9303cab` infers memory.
+
+**The -73 ALMs is NOT attributed.** It covers all of `b8dedd0`'s five parts plus
+the probe change together, and separating them needs a build per part that
+nobody has asked for. Recording it unattributed is the point: quoting it as
+"the LUT fix saved 73 ALMs" would be the same error one paragraph later.
+
+**The lesson, and it is the one already written down.** Two predictions died on
+this report, in opposite directions. The combinational form was never going to
+cost 109 ALMs *here*, because its input was already constant -- that part of the
+review was right. But the registered form was not going to be free either, and
+that was reasoned, not measured. A cost measured with a free input tells you
+nothing about a constant-driven instance in EITHER direction. This is
+[[feedback-read-the-spec-for-historical-hardware]]'s hollow-evidence rule
+applied to a fit figure, and the review that named the problem then committed
+the same class of mistake in its own fix. The comments in `cd_audio.sv` and
+`cd_vol_lut.vh` now carry the measured numbers and say so.
+
+**Not on hardware.** The bitstream exists (`output_files/MacPlus.rbf`,
+3,083,976 bytes) and the board has not been touched.
+
+
 ## Verification
 
 House ladder applies unchanged: a failing test before the fix, iverilog
