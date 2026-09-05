@@ -4270,12 +4270,27 @@ leaves `X`, and `X !== 8'h00`. Both fixed before the RTL was touched.
 `tb_dcd_write` 133/133, `tb_dcd_disk` 41/41.** `scripts/read_probes.tcl` learns
 `TX_HOFF` so it does not decode as `?6`.
 
-**FIXED, CONFIRMED ON HARDWARE 2026-09-05 on `f157fcc8`.** The reproducer that
-failed on demand -- launch an application by mouse and keep sweeping -- no
-longer does. The intermittent System Error that had been open since the HD20
-first booted is closed, and it was one defect: the transmit side rewinding a
-held-off group that the ROM, the drive firmware and TashTwenty all finish and
-continue past.
+**FIXED, CONFIRMED ON HARDWARE 2026-09-05 on `f157fcc8`, BOTH DIRECTIONS.** The
+reproducer that failed on demand -- launch an application by mouse and keep
+sweeping -- no longer does. The intermittent System Error that had been open
+since the HD20 first booted is closed, and it was one defect: the transmit side
+rewinding a held-off group that the ROM, the drive firmware and TashTwenty all
+finish and continue past.
+
+**The WRITE side was tested too (Daniel, same day), which matters more than it
+sounds.** Every hardware write before this build happened with a mouse that was
+necessarily mostly still, and the Mac-to-drive `RX_RESYNC` path had only ever
+run in simulation -- so it was the one route in this change that hardware had
+never exercised. It is now exercised and clean.
+
+**MORE SOAK TESTING IS PLANNED BEFORE RELEASE (Daniel).** So read Phase 5 as
+"confirmed, not yet soaked": a single clean pass in each direction is what is
+recorded here, and the volume-integrity method to reuse is
+`scripts/hfs_integrity.py` -- do not re-derive it. Note what the soak must now
+control for that earlier ones did not: byte-exact copies kept passing all week
+while this defect was live, because nothing in the method moved the mouse.
+Any future HD20 soak should keep the mouse in motion throughout, or it is
+testing the easy path again.
 
 **COMPILED 2026-09-05: `f157fcc8`, archived as
 `output_files/MacPlus_f157fcc8_hd20-holdoff.rbf`.** 0 errors, 119 warnings,
