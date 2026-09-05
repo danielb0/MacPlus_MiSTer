@@ -5806,6 +5806,41 @@ the same class of mistake in its own fix. The comments in `cd_audio.sv` and
 3,083,976 bytes) and the board has not been touched.
 
 
+### Backlog: grey `Mount Sec Floppy` while an HD20 is mounted (final polish)
+
+**Daniel, 2026-09-05: backlog, not now -- this is final polish before release.**
+
+Mounting an HD20 costs you the EXTERNAL floppy, because the DCD replaces it
+rather than daisy-chaining behind it (`rtl/iwm.v:294`). The internal drive
+(`S2`, "Mount Pri Floppy") is untouched -- its enable at `iwm.v:191` never
+mentions the DCD. Only `S3`, "Mount Sec Floppy", is taken.
+
+**The OSD does not say so.** `S3` stays selectable with an HD20 mounted, and
+selecting it gives a flick of disk-light activity, which reads as "something
+happened" when nothing did. That activity is `ldr_ext_busy` in `LED_USER`
+(`MacPlus.sv:38`): `floppy_loader ldr_ext` starts on `img_mounted[3]`
+regardless of the DCD, so the HPS READS the image into the track buffer and
+then stops. Confirmed on hardware by Daniel, 2026-09-05: brief activity, then
+nothing.
+
+**It is cosmetic, NOT a data-safety issue, and that is traced rather than
+assumed.** While `dcdPresent`, `floppyExt._enable` is held high
+(`iwm.v:251`), and `floppy.v` then refuses `writeReq`, clears its own
+write-busy and ignores `lstrb`. So the whole write chain is dead at its
+source: no `dskWriteReqExt` (`MacPlus.sv:870`) -> no `wc_ext_wr_req` -> no
+commit -> no `wr_ext_sd_wr` -> no `sd_wr` on slot 3. The mounted image is
+inert and cannot be written. The two hazards the enable term was added for --
+DCD command bytes landing on the floppy's track 0, and the ROM's chain walk
+ejecting it at boot -- are both closed by that same single term.
+
+**The fix** is the OSD mask `b8dedd0` already built for the model-dependent
+items: drive the `D`/`d` prefix on the `S3` line from `dcdPresent` the way the
+Model bits drive theirs, and remember Main re-polls `UIO_GET_OSDMASK` while the
+menu is open (`menu.cpp:2636`), so it will track a mount live. A greyed item
+cannot be activated (`menu.cpp:2403`), so this actually prevents the action
+rather than only annotating it.
+
+
 ## Verification
 
 House ladder applies unchanged: a failing test before the fix, iverilog
