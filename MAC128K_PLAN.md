@@ -3847,23 +3847,37 @@ hardware.
 **Still open and untouched:** the post-RESET /HSHK window and the phantom
 states after PH3; and the OSD greying.
 
-**`iwm.v:319`'s `lstrb` is a DEAD PORT, not a live wiring bug.** This list
-used to head with "`iwm.v:319` feeds `dcd0` `lstrb` as PH3, but PH3 is VIA
-PA5/`SEL`", which reads as though a signal were miswired. It is not reaching
-anything: `rtl/dcd_link.v` declares `lstrb` at `:125` and mentions it once
-more in a comment at `:120`, and the body never reads it -- every phase
-decision comes from `state = {ca2, ca1, ca0}` at `:242`. So whether PH3 is
-LSTRB or VIA PA5/`SEL` cannot change any behaviour we have, and no capture
-can settle it either, because the signal goes nowhere.
+**`iwm.v:319`'s `lstrb` IS the right signal. The port is dead, which is a
+different and smaller problem.** Two claims, and this document had the first
+one backwards. The specification settles it on page 1: the connector pin
+table gives pin 14 as `PH3` / `/Enable`, "Used to allow multiple DCD's",
+sourced from the **IWM** -- and the same table sources pin 16 `HDSel` from
+the **VIA/6522**, so it is drawing exactly the distinction the open item got
+wrong. PH3 is an IWM phase line, NOT VIA PA5/`SEL`, and feeding `dcd0` the
+IWM's `lstrb` is correct. `rtl/dcd_link.v:120`'s comment calling lstrb "PH3
+(daisy-chain select)" is right, and now has a citation behind it.
 
-It stays a real question for the daisy-chain select and goes live the moment
-a second DCD is chained. Until then the honest options are to wire it
-deliberately or to drop the port; leaving it declared invites exactly the
-re-investigation this entry caused. Note too that the comment at `:120`
-asserting "lstrb is PH3" is an unverified hardware claim sitting in the
-code, which is the shape [[feedback-read-the-spec-for-historical-hardware]]
-warns about -- it should be checked against the specification before it is
-acted on, not after.
+What is true is that nothing reads it: `dcd_link` declares `lstrb` at `:125`
+and never uses it, taking every phase decision from `state = {ca2, ca1, ca0}`
+at `:242`. That is a real gap rather than a cosmetic one, because the spec
+makes the behaviour behind PH3 mandatory. Raising /ENBL clears the
+flow-through flip-flop and every one down the chain; the Mac "may toggle
+Phase3 to enable the next device in the chain (and disable the current
+DCD)"; and a drive that does not support chaining "must support 'phantom'
+states (i.e., returning a 1 for all states 5, 6, and 7) after the 'next' DCD
+has been selected", so that the Mac does not assume an infinite chain.
+
+**That is the same phantom-states item already listed above: they are one
+item, not two, and PH3 is its trigger.** Harmless with a single drive, which
+is all we mount, and harmless for this build. Recorded rather than fixed.
+
+**The lesson is [[feedback-read-the-spec-for-historical-hardware]] again, and
+it was earned twice in one session.** The open item inferred "PH3 is VIA
+PA5/`SEL`" without opening the spec. The correction to it then called the
+code's own comment "an unverified hardware claim" -- also without opening the
+spec, which had the answer in a pin table on its first page, in a file
+already sitting on this machine and already inventoried in this document.
+Both times the wrong answer was plausible and internally consistent.
 
 ### Do we need the firmware?
 
