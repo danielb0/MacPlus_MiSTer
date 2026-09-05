@@ -377,6 +377,31 @@ module tb_dcd_disk;
 		check("a read with nothing mounted is refused", err === 1'b1);
 		check("  ...and issues nothing to the host", sd_rd === 1'b0);
 
+		// ---------------------------------------------------------------
+		// A MAC RESET MUST NOT EJECT THE MEDIUM.
+		//
+		// The mount is HOST state: a real HD20 is a separate box with its own
+		// power supply, so resetting the Mac neither ejects its disk nor spins
+		// it down (scsi.v:389 makes the same argument for the CD). This is not
+		// tidiness. The ROM's DCD probe at $418630 runs a few hundred ms into
+		// every boot and img_mounted is a one-shot from the HPS that never
+		// fires again, so a `present` cleared by _cpuReset can NEVER be 1 at
+		// probe time - mount before boot and the reset clears it, mount after
+		// boot and the probe has already gone. The drive was unidentifiable on
+		// hardware for exactly this reason until 2026-09-05, and every test
+		// above passed throughout: the bench reset once at time zero and then
+		// never again, so it could not see it.
+		// ---------------------------------------------------------------
+		mount(64'd1024 * 64'd512, 1'b1);
+		check("remounted ahead of the reset test", present === 1'b1);
+		_reset = 0;
+		repeat (4) @(posedge clk); #1;
+		_reset = 1;
+		repeat (4) @(posedge clk); #1;
+		check("a reset does not eject the medium", present === 1'b1);
+		check("  ...and the capacity survives it", blockCount === 24'd1024);
+		check("  ...and the read-only flag survives it", readonly === 1'b1);
+
 		$display("tb_dcd_disk: %0d/%0d", pass, pass + fail);
 		if (fail != 0) $display("FAILED");
 		$finish;

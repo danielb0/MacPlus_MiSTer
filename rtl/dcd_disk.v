@@ -83,13 +83,35 @@ module dcd_disk #(
 	// img_size is a byte count; a DCD block number is 24 bits, so anything
 	// past 2^24 blocks (8 GB) is clamped rather than allowed to wrap round to
 	// a tiny capacity. The practical ceiling is HFS long before this.
-	always @(posedge clk or negedge _reset) begin
-		if (!_reset) begin
-			present    <= 1'b0;
-			blockCount <= 24'd0;
-			readonly   <= 1'b0;
-		end
-		else if (img_mounted) begin
+	//
+	// NOT RESET BY _reset, AND THAT IS THE WHOLE POINT. A mounted image is
+	// HOST state, not guest state: a real HD20 is a separate box with its own
+	// power supply, so a Mac reset neither ejects its medium nor spins it
+	// down. scsi.v:389 settled exactly this question for the CD - "an external
+	// drive is not power-cycled by a Mac reset" - and this is that same rule.
+	//
+	// It is also the only way this drive can ever be IDENTIFIED. The ROM's DCD
+	// probe at $418630 runs a few hundred ms into every boot, and img_mounted
+	// is a one-shot from the HPS that never fires again. Clearing `present` on
+	// _cpuReset therefore guaranteed present=0 at probe time on every boot,
+	// while mounting afterwards set it far too late - a closed loop with no
+	// way in, in which the drive could never be seen no matter what the user
+	// did. Everything downstream of identification was unreachable because of
+	// this one line.
+	//
+	// Confirmed on hardware 2026-09-05 on build 296aa68d, from a cleared probe
+	// epoch: with the image mounted, the phase states driven while selected
+	// were 0,2,3,5,7 - state 6 ABSENT. The probe holds state 6 across a whole
+	// status read on its way to state 5, so its absence proves the probe never
+	// ran while we were present.
+	initial begin
+		present    = 1'b0;
+		blockCount = 24'd0;
+		readonly   = 1'b0;
+	end
+
+	always @(posedge clk) begin
+		if (img_mounted) begin
 			present    <= (img_size != 64'd0);
 			blockCount <= (img_size[63:33] != 0) ? 24'hFFFFFF : img_size[32:9];
 			readonly   <= img_readonly;
