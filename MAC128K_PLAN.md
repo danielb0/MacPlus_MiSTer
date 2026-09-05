@@ -4565,8 +4565,46 @@ not cover, so it cannot give the semantics -- the documented limit of that
 source. It does correct one thing: `Read Device ID` and `Controller Status` are
 `$04` and `$05`, NOT `$19`/`$1A` as an earlier note guessed.
 
-**NEITHER SPECIFICATION DOCUMENTS IT, and that is now checked rather than
-assumed.** Both 1.2a and the Mar85 protocol document scope themselves in their
+**THE 1.2a DIAGNOSTIC COMMAND TABLE, RECOVERED FROM THE PAGE IMAGE 2026-09-05.**
+The `.txt` OCR of this table is unusable -- it truncates mid-table and garbles
+what it does emit -- and the `.txt` STOPS BEFORE THE LAST PAGES ENTIRELY (the
+PDF has 12 pages; the text ends part way through page 9). Rendered with PyMuPDF
+at 3x and read from the image:
+
+| spec | command | spec | command |
+|---|---|---|---|
+| `$02` | Read Device ID | `$0D` | Diagnostic Write |
+| `$03` | Controller Status | `$0E` | Auto Offset |
+| `$04` | Servo Status | `$0F` | Read Spare Table |
+| `$05` | Servo Command | `$10` | Write Spare Table |
+| `$06` | Seek | `$11` | Format Track |
+| `$07` | Data Recal / Brake Release | `$13` | Abort Status |
+| `$08` | Set Recovery | `$14` | Servo Reset |
+| `$09` | Soft Reset | `$15` | Read Track *(new stuff)* |
+| `$0A` | Park | `$16` | Write Track *(new stuff)* |
+| `$0B` | Diagnostic Read | | |
+| `$0C` | Read Header | | |
+
+**THE SPEC'S NUMBERING IS THE FIRMWARE TABLE MINUS 2**, verified at several
+points rather than assumed from one: spec `$02` Read Device ID = firmware `$04`;
+spec `$11` Format Track = firmware `$13`; spec `$16` Write Track = firmware
+`$18`. They even agree on the hole -- the spec skips `$12`, which the firmware
+calls `Abort_10`.
+
+**So firmware `$19`/`$1A` are spec `$17`/`$18`: TWO ENTRIES PAST THE END OF THE
+DOCUMENT'S LIST.** 1.2a is May 1985; the drive shipped that September on
+firmware Rev 3372. Those two commands postdate the specification, which is why
+no amount of reading it will name them. **That is a closed question now, not an
+open one** -- and it was worth rendering the page rather than concluding it from
+the garbled text, which would have been a guess either way.
+
+This table is also the thing [[macplus-hd20-diag-oracle]] wanted: HD Diag drives
+these commands behind the `$04` diagnostic opcode, and `dcd.v` implements none
+of them. Recorded here so that decision can be taken on facts if it ever comes
+up.
+
+**NEITHER SPECIFICATION DOCUMENTS `$19`/`$1A`, and that is now checked rather
+than assumed.** Both 1.2a and the Mar85 protocol document scope themselves in their
 own words to "the formats for Status, MultiBlock Read, and MultiBlock Write".
 Searching both for initialize/format/verify/erase finds nothing Mac-facing.
 
