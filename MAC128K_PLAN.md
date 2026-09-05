@@ -4270,11 +4270,37 @@ leaves `X`, and `X !== 8'h00`. Both fixed before the RTL was touched.
 `tb_dcd_write` 133/133, `tb_dcd_disk` 41/41.** `scripts/read_probes.tcl` learns
 `TX_HOFF` so it does not decode as `?6`.
 
-**NEXT STEP IS THE QUARTUS COMPILE, gated, with `build_tag.v` stamped from HEAD
-first.** The hardware test is already written and needs no design work: repeat
-condition C -- launch MacWrite by mouse and keep sweeping -- which currently
-fails on demand. That is the first time in this phase a fix has had a
-before/after test that can actually fail.
+**COMPILED 2026-09-05: `f157fcc8`, archived as
+`output_files/MacPlus_f157fcc8_hd20-holdoff.rbf`.** 0 errors, 119 warnings,
+18m59s. Timing closes with margin in every corner -- setup +0.491, hold +0.191,
+recovery +4.588, removal +0.807, minimum pulse width +1.098. The one Critical
+Warning is the pre-existing RTC `.mif` depth mismatch (32 vs 20) and is
+unrelated. NOT FLASHED.
+
+**One new warning that IS ours, and it is cosmetic:**
+`dbg_probes.sv(602): object "dcd_rxhs_d" assigned a value but never read`. The
+rxHs ring that read it was replaced by the unanswered-opcode fields, so the
+register is now dead. Harmless, synthesised away; clean it up on the next change
+to that file rather than spending a compile on it. Recorded here because a dead
+signal left unrecorded is how `iwm.v:319`'s dead `lstrb` port came to read as
+live wiring earlier in this phase.
+
+**THE HARDWARE TEST, which needs no design work: repeat condition C -- launch
+MacWrite by mouse and keep sweeping.** That fails on demand on `6cc44fdc`, so
+for the first time in this phase a fix has a before/after test that can actually
+fail. Two things to watch beyond pass/fail:
+
+- `reply-abandoned-in-TX_WAIT` should stay **0** through sustained movement.
+  Read it with the WORKING-TREE `scripts/read_probes.tcl` now, not the pinned
+  `6cc44fdc` copy -- the new script matches this bitstream and the pinned one no
+  longer does. `TX_HOFF` decodes by name rather than as `?6`.
+- `PDC2`'s unanswered-command line should print "none". The review found no
+  caller for `$19`/`$1A` anywhere in `$417D30`-`$41A800`, so anything else there
+  is a genuine surprise and worth stopping for.
+- **The WRITE side is the untested half.** Every hardware write so far happened
+  with a mouse that was necessarily mostly still, and the Mac-to-drive
+  `RX_RESYNC` path has only ever run in simulation. Copy a large file TO the
+  HD20 while sweeping, then reconcile with `scripts/hfs_integrity.py`.
 
 ### Do we need the firmware?
 
