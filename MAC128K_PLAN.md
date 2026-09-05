@@ -5611,6 +5611,64 @@ if and only if `configRAMSize` actually ignores `mem_big`. A model added later
 cannot have one edited without the other. Verified by mutation: flipping the
 512Ke row alone fails 2 checks.
 
+### Review of `b8dedd0` (2026-09-05, evening) -- adheres to the plan, no RTL bug found
+
+An independent read of all five parts against the sections above, with the
+four touched benches rebuilt from source into a scratch directory (no stale
+`.vvp` could pass for a run): `tb_dcd_status` 105/105, `tb_dcd_read` 48/48,
+`tb_mac_model` 48/48, `tb_scsi_cdrom` 43/43. Those match the figures in the
+commit. Note that `sim/out/tb_mac_model.vvp` is dated 2026-09-04, so the
+commit's own 48/48 was run from somewhere other than `sim/out`; the rebuild
+settles it either way.
+
+**Part 5 checked on the RTL, not the comments.** The dispatch order at
+`dcd.v:508` is Status, Read, guarded Write, then `!cmdKnown`, so a refused
+write still falls through unanswered and the `$81` path in `C_WAIT` is
+untouched. `C_SENDING` returns to idle after one frame for every kind but
+`K_READ`, so the ack cannot chain. Header byte 1 is zero for Status and the
+ack alike. The probe deck decides "dispatched" by whether `cstate` left idle,
+so an ack is counted as answered with no probe change.
+
+**Part 4 checked against Main_MiSTer itself, not the lines quoted above.** A
+greyed item is drawn disabled AND cannot be activated (`menu.cpp:2403`,
+`if (p && !d)`, which guards every item type including `S`). Main re-polls
+`UIO_GET_OSDMASK` while the menu is open and rebuilds when it changes
+(`menu.cpp:2636`), which is what makes feeding the second `mac_model` from the
+LIVE `status[3:1]` meaningful before Reset & Apply.
+
+**FINDING 1 -- Part 1 cannot do in this core what the harness measured.** The
+volume inputs are constants: `rtl/scsi.v:1667-1671` ties `cd_ap_vol0/1` to
+`8'hff` with the comment "MODE SELECT does not write these yet". Quartus
+propagates constants across hierarchy, so in the shipped build the table was
+almost certainly folded to unity already, and the registered form will fold
+the same way. The register is harmless and is the right shape for the day a
+MODE SELECT path exists. But three things written around it are not backed by
+any measurement of THIS design, and the harness had free inputs:
+
+- `rtl/cd_audio.sv:1360`: "ap_vol0/1 only move on a MODE SELECT of page
+  0x0E" -- they never move.
+- `rtl/cd_vol_lut.vh`: the mux "did [cost 109 ALMs], twice, once per channel"
+  in what shipped -- measured in the harness, not in the core.
+- The commit's expectation of 2 new M10K blocks.
+
+This is the hollow-evidence pattern recorded 2026-09-05 in
+[[feedback-read-the-spec-for-historical-hardware]], applied to a fit claim.
+**Prediction for the compile, so the result is not misread:** no M10K delta,
+and `ap_gain_l`/`ap_gain_r` listed under "Registers Removed During Synthesis"
+in `output_files/MacPlus.map.rpt` as stuck-at. Sorgelig's objection was to
+the SOURCE, and the register answers it either way. Suggested wording for the
+two comments: the inputs are constants today, so the register costs nothing
+and buys nothing until a MODE SELECT path exists.
+
+**FINDING 2 -- adjacent, out of scope for the commit.** The HD20 slot comment
+at `MacPlus.sv:96-99` still says that on a 128K or 512K "the slot mounts and
+nothing ever talks to it". Commit `7b67ff6` overturned that for the 512K via
+the floppy-loaded driver. It sits between two lines this commit edited.
+
+Neither finding changes behaviour; both are comment corrections to fold into
+the next edit of those files. Nothing here has been compiled and the gate is
+unchanged.
+
 ## Verification
 
 House ladder applies unchanged: a failing test before the fix, iverilog

@@ -94,9 +94,14 @@ localparam CONF_STR = {
 	// extension list rather than the floppies' S/DSK.
 	//
 	// Mounting one REPLACES the external floppy for as long as it is mounted -
-	// see rtl/iwm.v. It is also only useful on a Plus or a 512Ke, the 128K-ROM
-	// machines: the 64K ROMs carry no DCD engine at all, so on a 128K or 512K
-	// the slot mounts and nothing ever talks to it.
+	// see rtl/iwm.v. The drive itself is NOT model-gated: iwm.v keys it off a
+	// mounted image alone, so every model gets the same device and only the
+	// Mac-side driver differs. A Plus or a 512Ke carries SonyDCD in the 128K
+	// ROM and boots straight from it; a 512K gets the same support as a .Sony
+	// patch loaded from the `Hard Disk 20` startup floppy (confirmed on
+	// hardware 2026-09-05, 7b67ff6). A 128K alone mounts no volume - that
+	// patch will not load - though even there HD Diag drives the link from
+	// its own RAM-resident driver.
 	"SC5,IMGVHD,Mount HD20;",
 	"D0OI,CD-ROM Drive,Enabled,Disabled;",
 	// Index 0 MUST be Full: `status` defaults to zero and unity is the wanted

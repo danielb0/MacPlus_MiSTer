@@ -14,17 +14,23 @@
 //
 // READ THIS TABLE INTO A REGISTER, NEVER STRAIGHT INTO A WIRE. A combinational
 // output cannot be a memory read, so it forces the whole 256-way 16-bit mux
-// into logic -- and it did, twice, once per channel. Measured 2026-08-30 with
-// standalone quartus_map + quartus_fit on this device and version, two
-// harnesses around this IDENTICAL table differing only in that:
+// into logic. Measured 2026-08-30 with standalone quartus_map + quartus_fit on
+// this device and version, two harnesses around this IDENTICAL table differing
+// only in that:
 //
 //     form                          ALMs   RAM blocks   mem bits
-//     combinational (what shipped)   109            0          0
+//     combinational (the old form)   109            0          0
 //     registered (same table)          5            2      8,192
 //
 // Given a registered output Quartus 17.0 infers the ROM by itself
 // (altsyncram). rtl/cd_audio.sv does that; do the same at any new point of
 // use. The case statement was never the cost -- the missing register was.
+//
+// SCOPE OF THOSE NUMBERS. The harness drove `v` from a free input. MacPlus has
+// exactly one point of use, and scsi.v:1670 feeds it a constant, so both forms
+// fold away there and neither cost is paid today. Take the table above as what
+// this construct costs WHEN THE INPUT VARIES -- which is the case the guidance
+// above is for -- not as a delta to expect in a MacPlus fit report.
 //
 // The justification that used to stand here -- "a case guarantees Quartus
 // builds this as logic, never an M10K -- RAM blocks are the scarce resource

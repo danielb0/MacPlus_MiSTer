@@ -1353,11 +1353,16 @@ wire signed [15:0] ap_src_l = (ap_ch0 == 8'h01) ? sum_l[15:0] :
 wire signed [15:0] ap_src_r = (ap_ch1 == 8'h02) ? sum_r[15:0] :
                               (ap_ch1 == 8'h01) ? sum_l[15:0] : 16'sd0;
 //
-// The gain is REGISTERED, not read into a wire, and that register is the whole
-// reason the table is cheap: combinationally it cost 109 ALMs and 0 memory
-// bits, registered it costs 5 ALMs and 2 inferred M10K blocks (measured
-// 2026-08-30; the numbers and the method are in rtl/cd_vol_lut.vh). The added
-// cycle is free -- ap_vol0/1 only move on a MODE SELECT of page 0x0E.
+// The gain is REGISTERED, not read into a wire, so Quartus infers a ROM rather
+// than a 256-way mux: 109 ALMs and 0 memory bits combinational against 5 ALMs
+// and 2 M10K blocks registered. Those came from a STANDALONE HARNESS with free
+// inputs (2026-08-30; numbers and method in rtl/cd_vol_lut.vh), and in THIS
+// core neither figure is what synthesis sees -- scsi.v:1670 ties ap_vol0/1 to
+// a constant 8'hff, which is the drive's power-on full scale, so they never
+// move and Quartus folds the whole table to unity. The register therefore
+// costs nothing and buys nothing until a MODE SELECT path for page 0x0E
+// exists; it is here so that day needs no rethink, and the added cycle would
+// be free even then.
 `include "cd_vol_lut.vh"
 reg [15:0] ap_gain_l, ap_gain_r;
 always @(posedge clk) begin
