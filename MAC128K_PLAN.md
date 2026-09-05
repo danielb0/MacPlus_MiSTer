@@ -4203,7 +4203,7 @@ A bug that was intermittent for days is now switchable, which is what makes a
 before/after test of the fix meaningful. Further trials of A/B/C/D would refine
 a rate nobody needs. Go and fix it.
 
-### Phase 5: the hold-off fix, applied 2026-09-05. BENCHES GREEN, NOT COMPILED
+### Phase 5: the hold-off fix. HARDWARE-CONFIRMED 2026-09-05, `f157fcc8`
 
 Items 1-5 of the fix shape above, written against the reproducer the mouse
 experiment produced. Item 6 (the `$7F` NAK) is deliberately left out: it is the
@@ -4269,6 +4269,13 @@ leaves `X`, and `X !== 8'h00`. Both fixed before the RTL was touched.
 **Benches: `tb_dcd_link` 89/89, `tb_dcd_read` 40/40, `tb_dcd_status` 75/75,
 `tb_dcd_write` 133/133, `tb_dcd_disk` 41/41.** `scripts/read_probes.tcl` learns
 `TX_HOFF` so it does not decode as `?6`.
+
+**FIXED, CONFIRMED ON HARDWARE 2026-09-05 on `f157fcc8`.** The reproducer that
+failed on demand -- launch an application by mouse and keep sweeping -- no
+longer does. The intermittent System Error that had been open since the HD20
+first booted is closed, and it was one defect: the transmit side rewinding a
+held-off group that the ROM, the drive firmware and TashTwenty all finish and
+continue past.
 
 **COMPILED 2026-09-05: `f157fcc8`, archived as
 `output_files/MacPlus_f157fcc8_hd20-holdoff.rbf`.** 0 errors, 119 warnings,
