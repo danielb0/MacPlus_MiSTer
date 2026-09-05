@@ -3844,9 +3844,26 @@ answers is a real one: with the LSB order corrected, does the Plus ROM accept a
 Status reply at all? Everything above the link layer is still unconfirmed on
 hardware.
 
-**Still open and untouched:** `iwm.v:319` feeds `dcd0` `lstrb` as PH3, but PH3
-is VIA PA5/`SEL`; the post-RESET /HSHK window and the phantom states after PH3;
-and the OSD greying.
+**Still open and untouched:** the post-RESET /HSHK window and the phantom
+states after PH3; and the OSD greying.
+
+**`iwm.v:319`'s `lstrb` is a DEAD PORT, not a live wiring bug.** This list
+used to head with "`iwm.v:319` feeds `dcd0` `lstrb` as PH3, but PH3 is VIA
+PA5/`SEL`", which reads as though a signal were miswired. It is not reaching
+anything: `rtl/dcd_link.v` declares `lstrb` at `:125` and mentions it once
+more in a comment at `:120`, and the body never reads it -- every phase
+decision comes from `state = {ca2, ca1, ca0}` at `:242`. So whether PH3 is
+LSTRB or VIA PA5/`SEL` cannot change any behaviour we have, and no capture
+can settle it either, because the signal goes nowhere.
+
+It stays a real question for the daisy-chain select and goes live the moment
+a second DCD is chained. Until then the honest options are to wire it
+deliberately or to drop the port; leaving it declared invites exactly the
+re-investigation this entry caused. Note too that the comment at `:120`
+asserting "lstrb is PH3" is an unverified hardware claim sitting in the
+code, which is the shape [[feedback-read-the-spec-for-historical-hardware]]
+warns about -- it should be checked against the specification before it is
+acted on, not after.
 
 ### Do we need the firmware?
 
