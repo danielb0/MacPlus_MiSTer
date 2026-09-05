@@ -159,6 +159,47 @@ module tb_dbg_probes;
 	// next, so a capture needs two edges to be true. Three, to be sure.
 	task dcd_settle; begin repeat (3) @(posedge clk); end endtask
 
+	// The bench stub ties every ISSP source low, so a clear has to be forced
+	// on the net the deck actually reads. Factored out of the inline
+	// sequence further down: the unanswered-command tests need a clean slate
+	// several times over.
+	task dcd_clear;
+		begin
+			force probes.dcd_clr_src = 1'b1;
+			repeat (6) @(posedge clk);
+			release probes.dcd_clr_src;
+			dcd_settle;
+		end
+	endtask
+
+	// A whole command arrival, as the deck sees one. rtl/dcd.v dispatches on
+	// the SAME edge rxValid is asserted, so what separates an answered
+	// command from a dropped one is cstate on the NEXT edge: non-zero means
+	// it moved out of C_IDLE and took the command, zero means it did not.
+	// cst_after is therefore the whole experiment, and it is driven here
+	// rather than derived so the bench can present both outcomes.
+	task dcd_cmd(input [7:0] op, input [2:0] cst_after);
+		begin
+			dcd_lvl(3'd1, 1'b1, 1'b1, 3'd0, 3'd0, 3'd0, 1'b1, op);
+			@(negedge clk); dcd_stim[14] = 1'b1;   // rxValid, one clock
+			@(negedge clk); dcd_stim[14] = 1'b0;
+			dcd_stim[18:16] = cst_after;           // cstate as of the next edge
+			dcd_settle;
+		end
+	endtask
+
+	// The other way a command goes unanswered: it lands while the command
+	// layer is still busy with the previous one, so C_IDLE never sees it at
+	// all. Same silence on the wire, different bug.
+	task dcd_cmd_busy(input [7:0] op, input [2:0] cst_now);
+		begin
+			dcd_lvl(3'd1, 1'b1, 1'b1, 3'd0, 3'd0, cst_now, 1'b1, op);
+			@(negedge clk); dcd_stim[14] = 1'b1;
+			@(negedge clk); dcd_stim[14] = 1'b0;
+			dcd_settle;
+		end
+	endtask
+
 	task ok(input [800:0] name, input cond);
 		begin
 			tests = tests + 1;
@@ -591,10 +632,6 @@ module tb_dbg_probes;
 		   probes.pdc2_r[17:15] == 3'd5);
 		ok("probe - PDC2 says the receive handshake completed",
 		   probes.pdc2_r[14:12] == 3'd4);
-		// rxHs rather than the raw phase lines: the Mac moves one line at a
-		// time, so a ring of raw states would be full of intermediates.
-		ok("probe - PDC2's ring holds the last four handshake steps in order",
-		   probes.pdc2_r[11:0] == 12'h4E0);
 
 		// rxBuf fills byte by byte as a frame arrives, so between frames the
 		// opcode field carries part of a command that has not been checksummed
@@ -664,6 +701,53 @@ module tb_dbg_probes;
 		// mislead than on the inbound side, not less.
 		ok("probe - and the outbound one saturates too, rather than wrapping to 44",
 		   probes.pdc2_r[31:24] == 8'd255);
+
+		// ---- the unanswered-command field ------------------------------
+		// rtl/dcd.v answers $00/$01/$02/$03 (and $41/$42) and DROPS anything
+		// else with no reply at all. The Mac cannot tell that from a dead
+		// drive: it times out and resets us, which is what sets PDCD's
+		// abandoned bit -- so that bit is downstream of this one and reading
+		// it first sent one investigation to the wrong layer entirely.
+		// dcd_last_op cannot serve here because it keeps the NEWEST opcode
+		// and every real capture ends with the $00 of an ordinary read.
+		dcd_clear;
+		dcd_cmd(8'h03, 3'd4);     // Status, dispatched to C_SEND
+		ok("probe - an answered command leaves the unanswered fields clear",
+		   probes.pdc2_r[3:2] == 2'd0);
+
+		dcd_cmd(8'h19, 3'd0);     // one the Plus ROM sends and dcd.v drops
+		ok("probe - an unanswered command is counted",
+		   probes.pdc2_r[3:2] == 2'd1);
+		ok("probe - and its OPCODE is recorded, not just the fact of it",
+		   probes.pdc2_r[11:4] == 8'h19);
+		ok("probe - and the reason is 'not dispatched from C_IDLE'",
+		   probes.pdc2_r[1:0] == 2'd1);
+
+		// THE FIRST OPCODE IS KEPT, NOT THE NEWEST. A driver that gives up on
+		// a command retries and then resets, so the newest would name the
+		// recovery path rather than what started it.
+		dcd_cmd(8'h1A, 3'd0);
+		ok("probe - a second unanswered command does NOT overwrite the first",
+		   probes.pdc2_r[11:4] == 8'h19);
+		ok("probe - but it is counted",
+		   probes.pdc2_r[3:2] == 2'd2);
+
+		dcd_cmd(8'h1A, 3'd0);
+		dcd_cmd(8'h1A, 3'd0);
+		ok("probe - the unanswered counter saturates rather than wrapping",
+		   probes.pdc2_r[3:2] == 2'd3);
+
+		// The other reason, and it must not be confused with the first: the
+		// opcode is one we implement, but it arrived while the layer was busy.
+		dcd_clear;
+		dcd_cmd_busy(8'h00, 3'd3);
+		ok("probe - a command that arrived BUSY is recorded with reason 2",
+		   probes.pdc2_r[1:0] == 2'd2 && probes.pdc2_r[11:4] == 8'h00);
+
+		dcd_clear;
+		ok("probe - the JTAG clear empties the unanswered fields too",
+		   probes.pdc2_r[11:0] == 12'd0);
+
 
 		$display("");
 		$display("PROBES: %0d of %0d failing", fails, tests);

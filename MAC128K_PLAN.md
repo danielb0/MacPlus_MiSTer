@@ -3879,6 +3879,403 @@ spec, which had the answer in a pin table on its first page, in a file
 already sitting on this machine and already inventoried in this document.
 Both times the wrong answer was plausible and internally consistent.
 
+### Review 2026-09-05 (evening): the drive-to-Mac HOLD-OFF is built from the spec's prose, and the ROM, the firmware and TashTwenty all contradict it
+
+**Read-only review against the 1.2a specification, the Plus ROM (`4D1F8172`,
+capstone linear disassembly of `$417D30`-`$41A800`), the HD20 Z8 firmware
+reassembly (`342-0343-B.asm`) and TashTwenty. No RTL changed, nothing compiled.
+This supersedes the `$19`/`$1A` unimplemented-opcode hypothesis as the leading
+explanation of the intermittent System Error.**
+
+**THE FINDING.** `rtl/dcd_link.v` `TX_DATA`/`TX_LSB` treat state 0 as "abandon
+this group, rewind to `txAddrGrp`, wait in `TX_WAIT` for state 1, resend behind
+a fresh `$AA`". That is what 1.2a pages 4-5 say ("that group will be ignored and
+will not be included in the checksum ... restarts reading data with the group
+that was interrupted"). It is not what anything real does:
+
+| source | on HOFF mid-group |
+|---|---|
+| Plus ROM `$4198EC`..`$419998` | writes 3 to the SCC (`$4198D6`) and reads RR3 at byte 1 of every group; `$41991C tst.b (a0)` asserts HOFF after it has ALREADY read four bytes of the next group; `$419926`..`$419964` keep polling for the remaining four under the shared 80-poll `dbmi d6` budget (~265 us), error `$22` if they stop; `$41996E dbne` falls through and `$41997A subq.w #1,d7` performs the SAME decrement, so nothing is backed up; `$419986` ph0H takes 0 -> 1 directly, no state 3 and no /HSHK check; `$419992` hunts `$AA` 65535 tries; `$419998 bra $4198C4` decodes the group already in `d1`-`d4` and reads the NEXT group. The finished group stays in the checksum. `tst.w d7 / beq` feeds the `sne`, so there is never a hold-off on the last group. |
+| HD20 firmware `L1f4c`..`L1fac` | tests P2.7 only after the LSB byte; `or P2,#8` releases /HSHK; sends a `$00` filler; waits for release; `and P2,#0F7h` re-asserts; sends `$AA`; `jp L1edc` with R8-R14 already holding the next group |
+| TashTwenty `XSuspend` | "We finished a group, so decrement group count ... Resume transmission after interrupted group" |
+
+The plan's earlier reading of `$419974` as "backs up one group" was wrong in
+exactly the way the transmit side had already been corrected: the `subq` stands
+in for the `dbra`/`dbne` it skipped. Both directions CONTINUE. The March-85
+timing figure agrees in its own words -- t3 "Rene will acknowledge the holdoff
+immediately after the last byte of the group is sent" -- and the prose in 1.2a
+is simply wrong. The ROM outranks the document; third time in this phase.
+
+**WHAT THE MAC SEES FROM THE RTL AS BUILT, deterministically per hold-off:**
+
+1. The remaining bytes of the group never arrive (and could not be seen anyway:
+   `dcd_link.v:295` only presents `txByte` in state 1). Error `$22` ~265 us
+   after HOFF; the error exit `$419A0E` lands in state 2.
+2. We hold /HSHK low in `TX_WAIT`, where state 2 is "legitimate". The retry's
+   transmit entry `$419A9E` finds sense low at idle and returns `$10`.
+3. Prime's retry logic (`$4195DC`: `$1BE`=2 hard, bit 6 of `$1BA` clear, `$1BF`
+   clear) resets the drive via `$419C66` -> `$B48`. **That reset is what sets
+   `reply-abandoned-in-TX_WAIT`. It is the signature of this bug, not a
+   downstream symptom, and it was in every crashed capture.**
+4. `$2D(a1)` allows three attempts per request. Three hold-offs inside one
+   request return readErr -19 (`$41960A`) to the File Manager. A code segment
+   or resource load failing that way bombs as ID 02 / ID 10. Steps 1-3 are read
+   out of the ROM; step 4's last sentence is inference.
+
+**WHY IT IS INTERMITTENT: the trigger is SCC RR3, and the mouse is on the SCC.**
+Quadrature goes to the DCD inputs; `rtl/scc.v:725` raises `dcd_ip` on every
+transition, so a moving mouse produces a hold-off at the next group boundary of
+whatever frame is in flight. AppleTalk or serial traffic does the same with the
+mouse still. Keyboard and mouse button are VIA (level 1, masked) and cannot.
+
+**SMALLER DISCREPANCIES FROM THE SAME READ:**
+
+- **The error flag is BIT 0, not `$80`.** `$4197DA btst #24,d0` on the longword
+  at `$19E` tests bit 0 of the status byte (plus `cmpi.b #$A`). The firmware's
+  own defs say `Op_Failed EQU 001h` (`DefsHD20.inc:291`, marked `???` by the
+  reassembler, but the ROM agrees). Softerr `$40` IS honoured -- `btst #$1e,
+  $1ba` selects retry-without-reset. 1.2a's `$80`, TashTwenty's `bsf TX_STAT,7`
+  and `rtl/dcd.v`'s `replyStat <= 8'h80` are all invisible to this ROM: a
+  refused write (read-only mount, out of range) is currently reported as
+  SUCCESS; a failed read only changes which error fires (`$22` on length).
+- **Abandoned frames are not abandoned.** On the Mac's error exit (1 -> 3 -> 2,
+  or 0 -> 2) the transmitter keeps clocking bytes out and `TX_WAIT` holds
+  /HSHK low in state 2 for ever; the receiver keeps a stale `rxState` across an
+  abort and never re-syncs at the next state-3 handshake. Neither causes the
+  first error; each turns one into a reset cycle.
+- **No NAK.** `$41985E cmpi.b #$BF` is the ROM checking for the `$7F` NAK frame
+  the spec draws. We answer a bad checksum with silence, so the Mac waits out
+  `$419658`'s budget. `bad-checksum=0` on hardware, so low priority.
+- **The ROM DOES read the identity block**, at `$41951C`-`$41953E`, outside the
+  `$419600`-`$419E40` window the earlier search covered: Num_Blocks into the
+  drive table (`$12(a1,d1)`, swapped, with `$14` cleared), Device_Character bit
+  3 into the write-protect flag `$2(a1,d1)`, and bit 4 (Ejectable) selects
+  drive-queue flag byte 2 instead of 8. Inside Macintosh: 8 = "nonejectable
+  disk in drive". So `$F6` presents the HD20 to the Finder as EJECTABLE. Not the
+  bomb, but it is the documented consumer of the bit this plan called uncertain,
+  and the "ROM never reads `$1A2`-`$1AB`" claim above is withdrawn.
+- **`$19`/`$1A` have no caller.** Nothing in `$417D30`-`$41A800` branches to
+  `$419CEC` or `$419CF0`; the diagnostic csCode table at `$419E6E` (csCodes 249
+  to 256, offsets relative to `$419DA0`) targets `$419EEE`-`$41A38C`. The PDC2
+  unanswered-opcode probe is built and green and can stay in the next build,
+  but expect it to print "none".
+
+**RETRY ANATOMY, for reading captures.** `$1BE` = 1 soft / 2 hard; `$1BA` =
+error code or the reply status longword; `$2D(a1)` = attempts left (3);
+`$1BF` = "already reset once". Between frames of a multi-block read the Mac
+requires sense HIGH in state 3 (`$419A02`, error `$25`, no retry), then in
+state 2 waits for it to go LOW again (`$419658`, generous budget, soft `$40`),
+then `$419820` requires LOW with no retry. `txArm` satisfies all three; the
+TX_END release timing and the state-2 re-arm are what make it work.
+
+**FIX SHAPE -- APPLIED 2026-09-05, benches green, NOT YET COMPILED:**
+
+1. `TX_DATA`/`TX_LSB`: on state 0 set a `txHoff` flag and KEEP SENDING to the
+   end of the group. `readData` must present `txByte` in state 0 as well as 1.
+2. At the group boundary with `txHoff`: release /HSHK; wait in a `TX_HOFF`
+   state; on state 1 re-assert, send `$AA`, continue with the NEXT group --
+   `txAddr`/`txSent`/`txSum` untouched, no rewind. States 2, 3 and >= 4 there,
+   and 2/3 anywhere mid-frame, abort: release, `TX_IDLE`.
+3. A `txAbort` pulse to `rtl/dcd.v` so `C_SENDING` drops `txArm` and returns to
+   `C_IDLE` instead of arming an unsolicited next frame -- sequenced so the
+   `TX_IDLE` re-arm cannot fire on the tail of `txArm` (the phantom-request trap
+   already recorded above).
+4. Receiver: return `rxState` to `RX_SYNC` when the handshake enters
+   `RXH_READY` (state 3 from 2 is always a fresh command).
+5. `replyStat` on failure carries bit 0 (`$01`, or `$81` to satisfy both
+   readings).
+6. Optional: the `$7F` NAK on `rxBad`.
+
+**THE TEST METHOD, and what it was missing.** Byte-exact copies and
+`hfs_integrity.py` prove data integrity, which is why they kept passing; nothing
+in the method controlled for the one intermittent input to the protocol.
+
+- **Zero-compile discriminator, on the CURRENT bitstream:** the same read-heavy
+  action (launch an application, open a large document, duplicate a large file)
+  ten times with the mouse untouched and ten times moving it continuously.
+  Prediction: untouched clean, moving stalls (each hold-off costs a reset cycle)
+  and bombs. Then copy a large file TO the HD20 while moving the mouse and
+  byte-compare it -- the Mac-to-drive `RX_RESYNC` path has only ever run in
+  simulation. Check the Chooser: AppleTalk active is an SCC source without the
+  mouse; off for the control.
+- **Probe:** before the compile, spend two of PDC2's twelve bits on sticky
+  "HOFF seen while transmitting" / "HOFF seen while receiving"; fold into the
+  same build as the opcode probe per the standing one-compile instruction. Read
+  `reply-abandoned-in-TX_WAIT` as the primary signal.
+- **Benches:** `sim/tb_dcd_link.v` test 5 asserts the wrong behaviour BY NAME
+  ("the interrupted group RESTARTS, not continues"); `tb_dcd_read` (77 groups)
+  and `tb_dcd_status` (49 groups) contain no hold-off at all. Same reading as
+  the RTL, so they could not disagree with it -- the lesson already written at
+  the 1.1/1.2a STOP and the LSB STOP. Rewrite the Mac model from
+  `$4198C4`-`$419998`: assert state 0 after four bytes of a group, keep polling
+  for the other four within 80 polls (fail if any is missing), 0 -> 1, hunt
+  `$AA`, expect the NEXT group, sum everything including the finished group;
+  put the hold-off on a middle group of a multi-group frame and once on the
+  second-to-last. Mutants that must die: the rewind; stopping at HOFF; presenting
+  sense instead of data in state 0. Add a ROM-faithful status check (bit 0).
+
+**Reproducing the disassembly:** capstone `CS_ARCH_M68K | CS_MODE_M68K_000 |
+CS_MODE_BIG_ENDIAN`, base `$400000`, linear, emitting `dc.w` and advancing two
+bytes on any undecodable word (capstone stops dead otherwise). The regions read
+here were `$419600`-`$419E40` (engines), `$417D30`-`$419600` (Prime, at
+`$4194D6`-`$419648`), `$419E40`-`$41A800` (the csCode table and its targets).
+
+### The mouse experiment: PROTOCOL, pre-registered. NOT YET RUN
+
+The first recommendation of the review above, written out so it can be executed
+without re-deriving it, and with its predictions committed BEFORE any data
+exists. Zero compiles: it runs on the bitstream already on the board.
+
+**PRECONDITIONS, both verified 2026-09-05 by reading the tree, not assumed:**
+
+- **The board is running HEAD.** `rtl/build_tag.v` is stamped `6cc44fdc` and
+  `git rev-parse HEAD` is `6cc44fdc`. The fix shape above is NOT applied, which
+  is the whole point -- this experiment measures the bug, it does not test a fix.
+- **Moving the mouse really does reach the SCC in this core.**
+  `rtl/dataController_top.sv:596` wires `.dcd_a(mouseX1)` and `:597`
+  `.dcd_b(mouseY1)` -- raw quadrature into the SCC's two DCD inputs -- and
+  `rtl/scc.v:725` raises `dcd_ip_a` on `(dcd_a != dcd_latch_a) & wr15_a[3]`.
+  So a mouse in motion sets an RR3 IP per quadrature transition, and a mouse
+  held still sets none. Without this the experiment would have been void, and
+  it is exactly the sort of thing this plan has assumed wrongly before.
+
+**READ THE PROBES WITH THE PINNED SCRIPT, NOT THE WORKING TREE.** The working
+tree's `scripts/read_probes.tcl` has been re-cut for the unanswered-opcode
+probe, which is NOT in the flashed bitstream: against `6cc44fdc` its
+`UNANSWERED COMMAND` line decodes the old rxHs ring and is pure fiction.
+`PDCD`'s packing is untouched by that diff, so the primary signal would in fact
+survive -- but running the matching script costs nothing and removes the
+question. The HEAD copy is pinned at
+
+```
+C:/Users/User/AppData/Local/Temp/claude/C--Git-MiSTer-devel-MacPlus-MiSTer/5f70b546-25ae-445f-b37d-e71b90e2ecc8/scratchpad/read_probes_6cc44fdc.tcl
+```
+
+**THE THREE ARMS.** The review's still-vs-moving pair cannot separate "an SCC
+interrupt causes a hold-off" from "mouse tracking costs CPU time and something
+downstream is timing-sensitive": moving the mouse does both at once. A third
+arm at a different movement RATE separates them, because only the first
+mechanism is proportional to the transition count.
+
+| arm | mouse | prediction |
+|---|---|---|
+| **A (control)** | untouched for the whole trial | clean; `reply-abandoned-in-TX_WAIT=0` |
+| **B (low dose)** | slow, small movements, kept up throughout | occasional abandon, occasional stall |
+| **C (high dose)** | continuous fast sweeps corner to corner | abandon on most trials, visible stalls, bombs |
+
+Ten trials each. **AppleTalk OFF in the Chooser for all three** -- it is an SCC
+interrupt source that does not need the mouse, so leaving it on contaminates
+arm A. Confirm it is off before starting and record that you did.
+
+**Arm A must be driven from the KEYBOARD, or it is not a control.** Double-
+clicking an icon means moving the mouse, which is the treatment. Select the
+target with the mouse, let go, wait two seconds, clear the probe, then open it
+with **Cmd-O** and do not touch the mouse until the read has finished.
+
+**PER-TRIAL PROCEDURE.** Same read-heavy action every trial -- launch an
+application, or open a large document, off the HD20.
+
+Wrapped as `arm.cmd` / `take.cmd` in the scratchpad beside the pinned reader,
+because the rig is driven from PowerShell and thirty trials of a bare
+`quartus_stp` command line is how transcription errors get into a data set.
+Both were smoke-tested against the live board before the run began.
+
+1. `arm.cmd` -- clears PDCD's sticky fields and reports `ARMED`.
+2. Perform the action, with the arm's mouse regime running throughout.
+3. `take.cmd <label>` -- reads once, prints a one-line summary, appends it to
+   `mouse_experiment_log.txt`, and keeps the full capture as `raw_<label>.txt`.
+4. Note by hand what the probe cannot see: whether the Mac **stalled** (a pause
+   of a second or more that the control never shows) and whether it **bombed**
+   (with the ID).
+
+**A TRIAL THAT SHOWS `commands=0` IS VOID, NOT CLEAN**, and `take.cmd` says so
+in those words. Measured 2026-09-05: an idle Finder generates NO DCD traffic
+whatsoever -- `commands=0`, `Mac->drive 0`, `drive->Mac 0` over six samples --
+which is the good news, because it means every counter in a trial comes from
+the action alone and nothing background pollutes it. The cost is that an action
+served out of the disk cache is indistinguishable from a clean run on the
+`abandoned` bit alone. Quit the application fully between trials and rotate
+between two or three large ones.
+
+**INTERLEAVE THE ARMS -- A1, B1, C1, A2, B2, C2 ...** rather than ten of each in
+a block. Thirty blocked trials drift on cache state, uptime and heat, and that
+drift would land entirely on whichever arm ran last.
+
+**THEN THE WRITE SIDE.** Copy a large file TO the HD20 while sweeping the mouse,
+and reconcile it with `scripts/hfs_integrity.py`. The Mac-to-drive `RX_RESYNC`
+path has only ever run in simulation; every hardware write so far was done with
+a mouse that was, by necessity, mostly still.
+
+**PRE-REGISTERED READINGS.** Committed now so that whatever comes back cannot be
+narrated into agreement afterwards:
+
+- **A clean, C failing, B in between** -- the hold-off finding is confirmed on
+  hardware and the fix shape above is the right work. This is the prediction.
+- **A clean, but B and C failing at the SAME rate** -- something about mouse
+  movement matters and it is NOT the transition count. Suspect the VBL tracking
+  task's CPU cost, not the link layer, and do not start cutting `dcd_link.v`.
+- **A fails too** -- the trigger is not the mouse. Either another SCC source is
+  live (re-check the Chooser and the serial ports) or the System Error has a
+  second cause, and the hold-off work becomes a correctness fix on the spec
+  rather than the explanation of the bomb.
+- **Nothing fails anywhere, over thirty trials** -- the action is not read-heavy
+  enough to span a multi-group frame with a hold-off in it. Escalate to a
+  bigger read (a large file duplicate) before concluding anything; a null from a
+  test that could not have failed is not evidence. See
+  [[feedback-read-the-spec-for-historical-hardware]] on hollow empirical claims.
+
+**RESULTS. FIRST DATA 2026-09-05, and it went the way the prediction said.**
+One trial per condition so far -- this is a signal, not yet a result.
+
+| arm | trials | abandoned | bad-cksum | stalls | bombs | notes |
+|---|---|---|---|---|---|---|
+| A control (still, Cmd-O) | 1 | 0/1 | 0 | 0 | 0 | MacWrite launched from the keyboard |
+| B low dose (slow movement) | 1 | **1/1** | 0 | **1** | **1** | slow movement fails too -- see the note on why this arm could not discriminate |
+| C high dose (fast sweeps) | 1 | **1/1** | 0 | **1** | **1** | MacWrite, mouse moved a lot: noticeable pause, then a System Error |
+| **D mouse-launch, then still** | 1 | 0/1 | 0 | 0 | 0 | **the de-confounding trial: clean** |
+| write + sweep, `hfs_integrity.py` | 0 | - | - | - | - | not run |
+
+**BOTH TRIALS ARE VALID, which is the first thing to check and the easiest to
+skip.** Each shows `commands=3+` and `drive->Mac=255+ (SAT)`, so each really did
+drive the HD20 -- neither is the cached read that would have made a clean
+`abandoned=0` meaningless.
+
+**THE CRASH CAPTURE PUTS THE CPU IN THE BOMB BOX.** `PIFA PC=4013F6`, inside
+`$4013F2`'s `btst.b #$3, $EFE1FE.l` / `bne` click loop -- the System Error
+alert polling the mouse button ([[macplus-rom-pc-landmarks]]). `PACT` and the
+fetch counter advance, so the CPU is healthy and the machine is sitting in an
+alert, not wedged on the bus. `PDCD` reads `rxHs=IDLE txState=TX_IDLE
+cmdFSM=C_IDLE` with `/HSHK` released and `reply-abandoned-in-TX_WAIT=1`: the
+escape fired and the drive recovered, and what is left on screen is the Mac's
+own reaction. That is step 4 of the review's chain observed rather than
+inferred.
+
+**WHAT THIS DOES NOT YET ESTABLISH, and the trial that would.** The two
+conditions run differ in TWO ways, not one: the control was launched from the
+keyboard AND held still, the treatment was launched by mouse AND moved. Launch
+method was therefore confounded with movement, and a single trial each could
+not separate them.
+
+**D SETTLED IT, AND IT CAME BACK CLEAN.** Double-click to launch, then hands off
+the mouse: `abandoned=0`, no stall, no bomb, and `commands=3+` /
+`drive->Mac=255+` so the trial was valid. D differs from the failing condition
+by MOVEMENT ALONE and from the passing control by LAUNCH METHOD alone. Launch
+method is excluded. **What breaks the link is the mouse being in motion during
+the transfer, nothing else about how the read was started.**
+
+**ARM B FAILED TOO, AND THE ARM WAS BADLY DESIGNED -- it could not have
+discriminated whatever the answer was.** It was set up to separate "an SCC
+interrupt causes the hold-off" from "mouse tracking costs CPU time", on the
+prediction that slow movement would fail far less often than fast sweeps. That
+prediction rested on an unexamined assumption: that "slow" would push the
+expected number of hold-offs per transfer below about one. It does not. Even
+slow movement yields tens to hundreds of quadrature transitions per second, and
+a MacWrite launch spans many frames over hundreds of milliseconds, so BOTH arms
+saturate at one-or-more hold-offs per transfer under either hypothesis. B and C
+were always going to look alike. **B's failure is therefore consistent with both
+readings and evidence for neither** -- it is a null result from a test that
+could not have come out any other way, which is precisely the trap this plan
+pre-registered a warning about, walked into anyway, one arm later.
+
+**MECHANISM SETTLES IT WHERE THE DOSE-RESPONSE COULD NOT, and it was already on
+the table.** The Mac drives state 0 mid-frame from exactly one place:
+`$41991C tst.b (a0)` reads SCC RR3 at byte 1 of every group and asserts HOFF
+from it. There is no path by which cursor-redraw CPU cost causes the driver to
+assert a hold-off -- CPU load can make the machine slow, it cannot make the
+polling loop drive a phase line. And `reply-abandoned-in-TX_WAIT` is not a
+generic distress flag: `TX_WAIT` is where the rewind parks the reply, so the bit
+firing IS the hold-off path being taken. The CPU-load alternative fails on
+mechanism rather than on data.
+
+**A ZERO-COMPILE CONFIRMATION, if one is wanted: AppleTalk ON in the Chooser,
+mouse held still.** That is an SCC interrupt source with no mouse and no
+tracking cost. A FAILURE there would be decisive -- SCC interrupts alone
+suffice. A clean result would be weak, because it would not distinguish "SCC is
+not the trigger" from "this core's AppleTalk never generates SCC traffic in the
+first place". Worth two minutes; not worth blocking the fix on. **NOT AVAILABLE: there is no
+AppleTalk on the boot disk (checked 2026-09-05), so this confirmation cannot be
+run on the current rig. Do not propose it again without putting AppleTalk on the
+volume first.** The mechanism argument above is what carries the point.
+
+**THE EXPERIMENT HAS DELIVERED WHAT IT WAS FOR: A RELIABLE REPRODUCER.** Any
+mouse movement during an HD20 transfer stalls it and then bombs, on demand.
+A bug that was intermittent for days is now switchable, which is what makes a
+before/after test of the fix meaningful. Further trials of A/B/C/D would refine
+a rate nobody needs. Go and fix it.
+
+### Phase 5: the hold-off fix, applied 2026-09-05. BENCHES GREEN, NOT COMPILED
+
+Items 1-5 of the fix shape above, written against the reproducer the mouse
+experiment produced. Item 6 (the `$7F` NAK) is deliberately left out: it is the
+one the review itself called low priority, `bad-checksum=0` in every capture,
+and it would be untestable against hardware that never provokes it.
+
+**`rtl/dcd_link.v` -- the transmit side no longer rewinds.**
+
+- `TX_DATA`/`TX_LSB` on state 0 set a `txHoff` flag and KEEP SENDING. The group
+  is finished; `txAddr`, `txSent` and `txSum` are untouched, so the finished
+  group stays in the checksum. The three `*Grp` shadow registers existed only to
+  rewind to and are DELETED rather than left dangling -- this project has been
+  bitten by a dead port that read as live wiring once already this phase.
+- A new `TX_HOFF` state acts on the flag AT THE GROUP BOUNDARY, which is the
+  only place the ROM, the firmware and the March-85 timing figure all permit:
+  release /HSHK to acknowledge, wait for state 1, re-assert, and re-enter
+  `TX_SYNC` so a fresh `$AA` precedes the NEXT group. No filler byte -- the Mac
+  hunts for the sync at `$419992` and would skip one anyway.
+- `readData` now presents `txByte` in STATE 0 as well as state 1. Without this
+  a transmitter that kept clocking would still have handed the Mac
+  `{senseBit, 7'b0}` = `$00` for the four bytes it reads after asserting HOFF.
+  Two separate bugs behind one symptom; the bench names them separately.
+- `TX_DATA`/`TX_LSB` now ABORT on states 2, 3 and >= 4. That is the ROM's error
+  exit (1 -> 3 -> 2), and without it the transmitter clocked bytes into a bus
+  nobody was reading and `TX_WAIT` held /HSHK low in state 2 for ever.
+- The receiver returns `rxState` to `RX_SYNC` when the handshake enters
+  `RXH_READY`. State 3 out of state 2 is always a fresh command, so anything
+  left over is stale by definition.
+
+**`rtl/dcd.v` -- an abandoned frame is now distinguishable from a finished one.**
+
+- New `txAbort`, a one-clock pulse from the link at all five abandon points.
+  `txBusy` falls either way, so the command layer could not tell them apart and
+  armed the next block of a multiblock read into a bus the Mac had already left.
+  `C_SENDING` now drops `txArm` and returns to `C_IDLE`, cleared one state ahead
+  of the link's `TX_IDLE` re-arm so the phantom-request trap cannot fire.
+- **`replyStat` on failure is `$81`, not `$80`.** `$4197DA btst #24,d0` is on the
+  LONGWORD at `$19E`, so it names BIT 0 of the status byte; the firmware agrees
+  (`Op_Failed EQU 001h`). With `$80` a refused write was reported to the Mac as
+  SUCCESS. `$81` satisfies the ROM and the document both. The wrong claim was
+  also in `dcd.v`'s file header and in a comment beside the assignment, and both
+  are corrected -- a comment asserting a hardware fact is exactly what this plan
+  has learned to distrust.
+
+**`sim/tb_dcd_link.v` -- the bench that could not have caught this.** Test 5
+asserted the bug BY NAME ("the interrupted group RESTARTS, not continues") and
+the file header taught it as a property. Both rewritten from
+`$4198C4`-`$419998`. The new test 5 runs a FOUR-GROUP frame -- the old one had a
+single group, and the Mac never holds off on the last group, so it posed a
+question real hardware does not ask -- and holds off on a middle group and again
+on the second-to-last, checking that the rest of the interrupted group still
+arrives IN STATE 0 and is data rather than the sense bit, that a fresh `$AA`
+follows, and that what comes next is the NEXT group. Tests 9 and 10 cover
+`txAbort` and the receiver re-sync.
+
+**MUTATION SWEEP, four mutants, all killed:** the rewind restored (6 fails), the
+`TX_DATA` abort removed (3), `txAbort` left as a level (2), the `rxState`
+re-sync removed (2). Two of the new assertions were themselves wrong first time
+and were caught the same way: `check`'s name field truncated at 64 characters,
+and "those bytes are DATA" PASSED VACUOUSLY because a timed-out `getByteTO`
+leaves `X`, and `X !== 8'h00`. Both fixed before the RTL was touched.
+
+**Benches: `tb_dcd_link` 89/89, `tb_dcd_read` 40/40, `tb_dcd_status` 75/75,
+`tb_dcd_write` 133/133, `tb_dcd_disk` 41/41.** `scripts/read_probes.tcl` learns
+`TX_HOFF` so it does not decode as `?6`.
+
+**NEXT STEP IS THE QUARTUS COMPILE, gated, with `build_tag.v` stamped from HEAD
+first.** The hardware test is already written and needs no design work: repeat
+condition C -- launch MacWrite by mouse and keep sweeping -- which currently
+fails on demand. That is the first time in this phase a fix has had a
+before/after test that can actually fail.
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`

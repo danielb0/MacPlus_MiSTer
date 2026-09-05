@@ -233,10 +233,12 @@ for {set n 0} {$n < $samples} {incr n} {
 		set d_rxin  [expr {($pdc2 >> 18) & 0x3F}]
 		set d_txmax [expr {($pdc2 >> 15) & 0x7}]
 		set d_hsmax [expr {($pdc2 >> 12) & 0x7}]
-		set d_ring  [expr { $pdc2        & 0xFFF}]
+		set d_unop  [expr {($pdc2 >>  4) & 0xFF}]
+		set d_uncnt [expr {($pdc2 >>  2) & 0x3}]
+		set d_unwhy [expr { $pdc2        & 0x3}]
 
 		set rxhsname {IDLE ARMED READY DATA DONE ?5 ?6 ?7}
-		set txstname {TX_IDLE TX_WAIT TX_SYNC TX_DATA TX_LSB TX_END ?6 ?7}
+		set txstname {TX_IDLE TX_WAIT TX_SYNC TX_DATA TX_LSB TX_END TX_HOFF ?7}
 		set cstname  {C_IDLE C_FETCH C_FETCH_GO C_WAIT C_SEND C_SENDING ?6 ?7}
 
 		set states ""
@@ -259,11 +261,18 @@ for {set n 0} {$n < $samples} {incr n} {
 		             [expr {$d_txout >= 255 ? "255+ (SAT)" : $d_txout}]]
 		puts [format "  PDC2  furthest reached: txState=%s  rxHs=%s" \
 		             [lindex $txstname $d_txmax] [lindex $rxhsname $d_hsmax]]
-		set ringstr ""
-		for {set s 0} {$s < 4} {incr s} {
-			append ringstr "[lindex $rxhsname [expr {($d_ring >> (3 * $s)) & 0x7}]] "
+		# A command the drive took in and never replied to. The Mac's driver
+		# has no way to distinguish that from a dead drive: it times out and
+		# then resets us, which is what sets PDCD's abandoned bit. So this
+		# line is upstream of that one -- read it first.
+		if {$d_uncnt == 0} {
+			puts "  PDC2  unanswered commands: none -- every command decoded was dispatched"
+		} else {
+			set why [lindex {"?" "not dispatched from C_IDLE (opcode not implemented, or a guard failed)" \
+			                 "arrived while the command layer was still busy" "?"} $d_unwhy]
+			puts [format "  PDC2  UNANSWERED COMMAND: first opcode \$%02X, %s seen, reason: %s" \
+			             $d_unop [expr {$d_uncnt >= 3 ? "3+" : $d_uncnt}] $why]
 		}
-		puts [format "  PDC2  handshake ring (newest first): %s" $ringstr]
 
 		# The verdict. Each line rules out one of the readings that the
 		# instruction-fetch sampler could not separate -- see MAC128K_PLAN.md,

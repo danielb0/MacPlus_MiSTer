@@ -208,6 +208,13 @@ module dcd_link
 	input       [9:0] txLen,
 	output reg        txBusy,
 
+	// ONE-CLOCK PULSE: a frame was ABANDONED in flight, as opposed to
+	// finishing. The command layer cannot tell the two apart from txBusy alone
+	// - it falls either way - so without this an abandoned read frame looks
+	// like a completed one and the next block of a multiblock read is armed
+	// into a bus the Mac has already walked away from. See dcd.v's C_SENDING.
+	output reg        txAbort,
+
 	// ---- JTAG telemetry, decoded by rtl/dbg_probes.sv as PDCD/PDC2 --------
 	// LIVE RAW STATE ONLY. Every counter, sticky bit and epoch lives in the
 	// probe deck, which is the same division `scsi_dbg` already uses: a module
@@ -292,7 +299,13 @@ module dcd_link
 	// In data mode the byte is on the bus; everywhere else bit 7 is the sense
 	// line, mirroring floppy.v's dual use of readData.
 	reg [7:0] txByte;
-	assign readData = (state == 3'd1 && txBusy) ? txByte : {senseBit, 7'b0000000};
+	// STATE 0 PRESENTS DATA TOO, not just state 1. The Mac asserts the hold-off
+	// (state 0) and then goes on reading the rest of the group - $419926-$419964
+	// poll for four more bytes and raise error $22 if they do not come. Gating
+	// on state 1 alone handed those reads {senseBit, 7'b0} = $00 instead, so
+	// even a transmitter that kept clocking would have fed the Mac zeros.
+	assign readData = ((state == 3'd1 || state == 3'd0) && txBusy)
+	                  ? txByte : {senseBit, 7'b0000000};
 
 	// ------------------------------------------------------------------
 	// Receive: Mac -> drive
@@ -347,7 +360,8 @@ module dcd_link
 	// Transmit: drive -> Mac
 	// ------------------------------------------------------------------
 	localparam TX_IDLE = 3'd0, TX_WAIT = 3'd1, TX_SYNC = 3'd2,
-	           TX_DATA = 3'd3, TX_LSB  = 3'd4, TX_END  = 3'd5;
+	           TX_DATA = 3'd3, TX_LSB  = 3'd4, TX_END  = 3'd5,
+	           TX_HOFF = 3'd6;
 
 	reg  [2:0] txState;
 	reg  [7:0] txTick;
@@ -356,13 +370,12 @@ module dcd_link
 	reg  [7:0] txSum;
 	reg  [9:0] txSent;       // payload bytes emitted, including the checksum
 
-	// Saved at each group boundary so a hold-off can rewind exactly. The
-	// interrupted group is RESENT, and the specification is explicit that it
-	// "will not be included in the checksum" - so the running sum has to go
-	// back too, not just the address.
-	reg  [9:0] txAddrGrp;
-	reg  [9:0] txSentGrp;
-	reg  [7:0] txSumGrp;
+	// A hold-off seen mid-group. The group is FINISHED anyway, and the flag is
+	// acted on at the group BOUNDARY - the only place the Plus ROM, the HD20's
+	// own firmware and TashTwenty all agree it may be acted on. There are
+	// deliberately no saved-at-the-boundary copies of txAddr/txSent/txSum here
+	// any more: nothing rewinds, so there is nothing to restore.
+	reg        txHoff;
 
 	reg        txGo;         // the payload is ready; see txArm/txReq above
 
@@ -397,11 +410,10 @@ module dcd_link
 			txSum        <= 0;
 			txSent       <= 0;
 			txAddr       <= 0;
-			txAddrGrp    <= 0;
-			txSentGrp    <= 0;
-			txSumGrp     <= 0;
+			txHoff       <= 0;
 			txByte       <= 0;
 			txBusy       <= 0;
+			txAbort      <= 0;
 			newByteReady <= 0;
 			hshk_n       <= 1'b1;
 			rxHs         <= RXH_IDLE;
@@ -411,6 +423,7 @@ module dcd_link
 			rxValid      <= 0;
 			rxBad        <= 0;
 			rxStb        <= 0;
+			txAbort      <= 0;
 
 			// NEWBYTEREADY MUST BE HELD UNTIL THE NEXT cen, NOT CLEARED ON
 			// EVERY CLOCK. It is set below inside `if (cen)`, so an
@@ -464,6 +477,14 @@ module dcd_link
 						if (state == 3'd3) begin
 							hshk_n <= 1'b0;      // "ready to receive"
 							rxHs   <= RXH_READY;
+							// RE-SYNC THE BYTE FSM HERE. State 3 out of state 2
+							// is always the start of a FRESH command, so any
+							// rxState left over from a frame the Mac abandoned
+							// mid-way is stale by definition. Without this the
+							// receiver carries that state into the new frame and
+							// never finds its sync again - which does not cause
+							// the first error, but turns one into a reset cycle.
+							rxState <= RX_SYNC;
 						end
 
 					RXH_READY:
@@ -640,9 +661,7 @@ module dcd_link
 							txSum     <= 0;
 							txTick    <= 0;
 							txLsbAcc  <= 8'h80;
-							txAddrGrp <= 0;
-							txSentGrp <= 0;
-							txSumGrp  <= 0;
+							txHoff    <= 1'b0;
 					end
 				end
 
@@ -666,6 +685,7 @@ module dcd_link
 						hshk_n  <= 1'b1;
 						txBusy  <= 1'b0;
 						txGo    <= 1'b0;
+						txAbort <= 1'b1;
 						txState <= TX_IDLE;
 					end
 
@@ -680,6 +700,7 @@ module dcd_link
 						hshk_n  <= 1'b1;
 						txBusy  <= 1'b0;
 						txGo    <= 1'b0;
+						txAbort <= 1'b1;
 						txState <= TX_IDLE;
 					end
 					else if (cen && txGo) begin
@@ -695,20 +716,49 @@ module dcd_link
 					end
 
 				// Seven data bytes, then the LSB byte, on this direction.
-				TX_DATA:
-					// A hold-off can arrive anywhere in a group. That group is
-					// abandoned, excluded from the checksum, and RESENT from
-					// its start once HOFF releases - preceded by a fresh sync,
-					// because the Mac hunts for one before re-decoding. Not
-					// "continued": the specification and the ROM's resync path
-					// are both explicit.
-					if (state == 3'd0) begin
-						txState  <= TX_WAIT;
-						txAddr   <= txAddrGrp;
-						txSent   <= txSentGrp;
-						txSum    <= txSumGrp;
-						txIdx    <= 0;
-						txLsbAcc <= 8'h80;
+				// A HOLD-OFF ARRIVING MID-GROUP DOES NOT ABANDON THE GROUP.
+				// This rewound until 2026-09-05, on the strength of 1.2a pages
+				// 4-5 ("that group will be ignored and will not be included in
+				// the checksum ... restarts reading data with the group that
+				// was interrupted"). Nothing real behaves that way, and the
+				// prose is simply wrong:
+				//
+				//   Plus ROM  $41991C asserts HOFF only AFTER four bytes of the
+				//             next group are already read; $419926-$419964 go on
+				//             polling for the remaining four under an ~265 us
+				//             budget and raise error $22 if they stop arriving.
+				//             $41997A's `subq.w #1,d7` is the decrement the
+				//             skipped `dbne` would have done, so nothing is
+				//             backed up, and $419998 decodes the group in hand
+				//             and reads the NEXT one - checksum included.
+				//   firmware  L1f4c-L1fac tests the hold-off line only after
+				//             the LSB byte of the group.
+				//   TashTwenty XSuspend: "Resume transmission after interrupted
+				//             group."
+				//
+				// The March-85 timing figure agrees in its own words at t3. So
+				// remember the hold-off and keep sending; it is acted on at the
+				// group boundary in TX_LSB.
+				//
+				// On hardware the rewind cost a stall and then a System Error,
+				// reproducible on demand by moving the mouse during a transfer:
+				// the mouse quadrature is on the SCC's DCD inputs, and the
+				// driver asserts HOFF from SCC RR3 at byte 1 of every group.
+				TX_DATA: begin
+					if (state == 3'd0) txHoff <= 1'b1;
+					// THE MAC'S ERROR EXIT LEAVES 3, THEN 2. Neither is
+					// legitimate mid-group: the Mac reads in state 1 and only
+					// goes to 3 once it has taken the whole frame, by which
+					// time TX_END owns the release. Seeing either here means it
+					// has walked away, and without this the transmitter went on
+					// clocking bytes into a bus nobody was reading.
+					if (!selected || state == 3'd2 || state == 3'd3 || state >= 3'd4) begin
+						hshk_n  <= 1'b1;
+						txBusy  <= 1'b0;
+						txGo    <= 1'b0;
+						txHoff  <= 1'b0;
+						txAbort <= 1'b1;
+						txState <= TX_IDLE;
 					end
 					else if (cen) begin
 						if (txTick != 0) txTick <= txTick - 8'd1;
@@ -724,15 +774,17 @@ module dcd_link
 							else               txIdx   <= txIdx + 3'd1;
 						end
 					end
+				end
 
-				TX_LSB:
-					if (state == 3'd0) begin
-						txState  <= TX_WAIT;
-						txAddr   <= txAddrGrp;
-						txSent   <= txSentGrp;
-						txSum    <= txSumGrp;
-						txIdx    <= 0;
-						txLsbAcc <= 8'h80;
+				TX_LSB: begin
+					if (state == 3'd0) txHoff <= 1'b1;
+					if (!selected || state == 3'd2 || state == 3'd3 || state >= 3'd4) begin
+						hshk_n  <= 1'b1;
+						txBusy  <= 1'b0;
+						txGo    <= 1'b0;
+						txHoff  <= 1'b0;
+						txAbort <= 1'b1;
+						txState <= TX_IDLE;
 					end
 					else if (cen) begin
 						if (txTick != 0) txTick <= txTick - 8'd1;
@@ -742,15 +794,52 @@ module dcd_link
 							txTick       <= BYTE_TICKS;
 							txIdx        <= 0;
 							txLsbAcc     <= 8'h80;
-							// Group boundary: this is the point a hold-off
-							// rewinds to.
-							txAddrGrp    <= txAddr;
-							txSentGrp    <= txSent;
-							txSumGrp     <= txSum;
-							if (txSent >= txTotal) txState <= TX_END;
-							else                   txState <= TX_DATA;
+							// THE GROUP BOUNDARY, and the only place a hold-off
+							// is acted on. txAddr, txSent and txSum are left
+							// exactly where they are: the group that just
+							// finished counts, and it stays in the checksum.
+							//
+							// The last group is never held off - $4198EC's
+							// `tst.w d7 / beq` feeds the `sne` that drives ph0L
+							// - so TX_END wins the race if both are true.
+							if (txSent >= txTotal)                txState <= TX_END;
+							else if (txHoff || state == 3'd0)     txState <= TX_HOFF;
+							else                                  txState <= TX_DATA;
 						end
 					end
+				end
+
+				// ACKNOWLEDGE THE HOLD-OFF, then resume with the NEXT group.
+				// The March-85 timing figure puts the acknowledgement here and
+				// nowhere else ("Rene will acknowledge the holdoff immediately
+				// after the last byte of the group is sent"), and the firmware
+				// does the same: release /HSHK, wait for the Mac to drop the
+				// hold-off, re-assert, send a fresh $AA. The Mac hunts for that
+				// sync at $419992 and then carries straight on, which is why
+				// TX_SYNC is the right place to come back to - it emits the
+				// sync and clears txIdx/txLsbAcc for the new group.
+				//
+				// The escapes matter as much as the resume. The ROM's error
+				// exit leaves state 2 or 3 behind, and without these the
+				// transmitter would hold /HSHK low there for ever - one half of
+				// the $28 wedge, and what put `reply-abandoned-in-TX_WAIT` in
+				// every crashed capture.
+				TX_HOFF:
+					if (!selected || state >= 3'd4 || state == 3'd2 || state == 3'd3) begin
+						hshk_n  <= 1'b1;
+						txBusy  <= 1'b0;
+						txGo    <= 1'b0;
+						txHoff  <= 1'b0;
+						txAbort <= 1'b1;
+						txState <= TX_IDLE;
+					end
+					else if (state == 3'd1) begin
+						hshk_n  <= 1'b0;
+						txHoff  <= 1'b0;
+						txState <= TX_SYNC;
+						txTick  <= BYTE_TICKS;
+					end
+					else hshk_n <= 1'b1;
 
 				// THE `cen` HERE IS WHAT SAVES THE LAST BYTE OF EVERY FRAME.
 				// readData only presents txByte while txBusy is set, and the

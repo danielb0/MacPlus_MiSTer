@@ -71,9 +71,17 @@
 
    AN ERROR IS ONE GROUP, NOT A SHORT DATA FRAME. TashTwenty answers a failed
    command by "setting the MSB of the status byte and sending only the header
-   group", which is what this does: status $80, txLen 6, one group. Bit 7 of
-   the status byte is exactly what the ROM tests at $4197DA `btst #$18,d0` on
-   the longword at $19E.
+   group", which is the shape this uses: txLen 6, one group.
+
+   THE STATUS BYTE IS $81, NOT $80, AND THE REASON IS BIT 0. This file used to
+   send $80 and this header used to say bit 7 "is exactly what the ROM tests at
+   $4197DA". It is not. That `btst #24,d0` operates on the LONGWORD at $19E, so
+   the bit it names is BIT 0 of the status byte. The drive's own firmware says
+   the same (`Op_Failed EQU 001h`, DefsHD20.inc:291). 1.2a's $80 and
+   TashTwenty's `bsf TX_STAT,7` are both invisible to this ROM, so with $80 a
+   refused write - a read-only mount, an address out of range - was reported to
+   the Mac as SUCCESS. $81 carries bit 0 for the ROM and bit 7 for everything
+   that follows the document.
 
    THIS IS THE MAY 1985 REVISION OF THE PROTOCOL, 1.2a, NOT THE MARCH ONE.
    An earlier version of this file was built from
@@ -242,6 +250,7 @@ module dcd
 	reg         txReq;
 	reg  [9:0]  txLen;
 	wire        txBusy;
+	wire        txAbort;
 	reg  [7:0]  txData;
 
 	// /HSHK has to be claimed the moment a command is accepted, not when the
@@ -269,7 +278,7 @@ module dcd
 		.dcdReset(dcdReset),
 		.txArm(txArm),
 		.txReq(txReq), .txData(txData), .txAddr(txAddr), .txLen(txLen),
-		.txBusy(txBusy),
+		.txBusy(txBusy), .txAbort(txAbort),
 		.dbg_link(dbg_link)
 	);
 
@@ -501,9 +510,20 @@ module dcd
 			C_WAIT:
 				if (!diskBusy) begin
 					// A failed fetch is answered, not dropped. TashTwenty
-					// sends "only the header group" with the status MSB set,
-					// which is one group and exactly what the ROM's
-					// btst #$18 at $4197DA looks for.
+					// sends "only the header group" with the status MSB set.
+					//
+					// BUT THE MSB IS NOT WHAT THIS ROM TESTS, and the comment
+					// here used to claim it was. `$4197DA btst #24,d0` operates
+					// on the LONGWORD at $19E, so bit 24 of that longword is
+					// BIT 0 of the status byte, not bit 7 - and the drive's own
+					// firmware agrees (`Op_Failed EQU 001h`, DefsHD20.inc:291).
+					// 1.2a's $80, TashTwenty's `bsf TX_STAT,7` and the $80 that
+					// used to be written here are all invisible to it, so a
+					// refused write was being reported to the Mac as SUCCESS.
+					//
+					// $81 carries both readings: bit 0 for the ROM, bit 7 for
+					// the C_SENDING test below and for any host that follows
+					// the document.
 					// blksLeft is deliberately NOT reset here. The ROM checks
 					// the reply's block byte against its own counter first
 					// ($41978C, error $31) and only then looks at the status,
@@ -511,7 +531,7 @@ module dcd
 					// leaves TX_BLKS alone on its error path for the same
 					// reason.
 					if (diskErr) begin
-						replyStat <= 8'h80;
+						replyStat <= 8'h81;
 						// A write reply is one group already, so only the
 						// read's 77-group frame needs shortening.
 						if (replyKind == K_READ) txLen <= 10'd6;
@@ -529,7 +549,24 @@ module dcd
 				// txBusy rises a clock after txReq and falls when the frame is
 				// done, so this state has two phases: wait for it up, then
 				// wait for it down. `sending` marks the second.
-				if (!sending) begin
+				//
+				// AN ABANDONED FRAME IS NOT A FINISHED ONE, and txBusy alone
+				// cannot tell them apart - it falls either way. The link now
+				// says which, and a multiblock read must NOT arm the next block
+				// into a bus the Mac has already left: that armed an
+				// unsolicited frame, the Mac saw a drive talking out of turn,
+				// and the recovery was a reset. Drop txArm and go back to
+				// C_IDLE instead, and let the Mac re-issue.
+				//
+				// txArm is a LEVEL, so it is cleared HERE, one state before
+				// the link's TX_IDLE can look at it again - the phantom-request
+				// trap recorded in dcd_link.v's TX_IDLE comment.
+				if (txAbort) begin
+					sending <= 1'b0;
+					txArm   <= 1'b0;
+					cstate  <= C_IDLE;
+				end
+				else if (!sending) begin
 					if (txBusy) sending <= 1'b1;
 				end
 				else if (!txBusy) begin

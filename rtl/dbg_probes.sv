@@ -37,7 +37,8 @@
 //   PDM2  sticky evidence bits + a ring of the last 8 target phases
 //   PDCD  the DCD (HD20) link: states the Mac drove, /HSHK, both handshake
 //         FSMs, the last opcode -- see "the DCD probe" below
-//   PDC2  DCD byte counts, how far a reply got, and the rxHs sequence
+//   PDC2  DCD byte counts, how far a reply got, and the opcode of the
+//         first command the drive received and never answered
 //
 // THE DECK IS AT THE ~20 HUB-NODE CEILING MacLC MEASURED, above which the name
 // table reads back corrupted. PDCD and PDC2 came in, so PRG2 and PRG3 went
@@ -598,15 +599,40 @@ module dbg_probes (
 	reg  [7:0] dcd_bytes_out   = 0;   // saturating
 	reg  [2:0] dcd_txmax       = 0;   // highest txState reached
 	reg  [2:0] dcd_rxhs_max    = 0;   // highest rxHs reached
-	reg [11:0] dcd_rxhs_ring   = 0;   // last 4 rxHs values, newest in [2:0]
 	reg  [2:0] dcd_rxhs_d      = 0;
 	reg  [2:0] dcd_txstate_d   = 0;
 	reg        dcd_txbyte_d    = 0;
+
+	// A COMMAND THE DRIVE RECEIVED AND NEVER ANSWERED. dcd.v dispatches only
+	// from C_IDLE and does it on the SAME edge rxValid is asserted, so one
+	// clock later an accepted command has moved cstate off C_IDLE and a
+	// dropped one has not. That is the whole test, and it deliberately does
+	// NOT restate dcd.v's dispatch conditions: a probe that mirrored them
+	// would agree with the RTL by construction and measure nothing.
+	//
+	// The FIRST such opcode is kept, not the newest. A driver that gives up
+	// on a command retries and then resets, so the newest would be whatever
+	// the recovery path sent last. dcd_last_op is the opposite by design and
+	// that is exactly why it could never show this -- every capture so far
+	// ends with the $00 of an ordinary read.
+	//
+	// why: 1 = arrived in C_IDLE and was not dispatched (an opcode dcd.v
+	// does not implement, or a guard it failed); 2 = arrived while the
+	// command layer was still busy with the previous one.
+	reg  [7:0] dcd_unans_op    = 0;
+	reg  [1:0] dcd_unans_cnt   = 0;   // saturating
+	reg  [1:0] dcd_unans_why   = 0;
+	reg        dcd_rxv_d       = 0;
+	reg  [7:0] dcd_op_at_rx    = 0;
+	reg  [2:0] dcd_cst_at_rx   = 0;
 
 	always @(posedge clk) begin
 		dcd_rxhs_d    <= dcd_rxhs;
 		dcd_txstate_d <= dcd_txstate;
 		dcd_txbyte_d  <= dcd_txbyte;
+		dcd_rxv_d     <= dcd_rxvalid;
+		dcd_op_at_rx  <= dcd_opcode;
+		dcd_cst_at_rx <= dcd_cstate;
 
 		if (dcd_clr) begin
 			dcd_states_seen <= 8'd0;
@@ -618,7 +644,9 @@ module dbg_probes (
 			dcd_bytes_out   <= 8'd0;
 			dcd_txmax       <= 3'd0;
 			dcd_rxhs_max    <= 3'd0;
-			dcd_rxhs_ring   <= 12'd0;
+			dcd_unans_op    <= 8'd0;
+			dcd_unans_cnt   <= 2'd0;
+			dcd_unans_why   <= 2'd0;
 		end
 		else begin
 			// State 5 is the discriminator that says a DCD and not a Sony
@@ -661,7 +689,25 @@ module dbg_probes (
 			// rxHs rather than the raw phase lines, because rxHs is already
 			// the debounced reading of them: a ring of raw states would fill
 			// with the one-line-at-a-time intermediates and show nothing.
-			if (dcd_rxhs != dcd_rxhs_d) dcd_rxhs_ring <= {dcd_rxhs_ring[8:0], dcd_rxhs};
+			// dcd_cst_at_rx is cstate as it was WHEN the command landed;
+			// dcd_cstate here is cstate one clock later, i.e. after the edge
+			// that would have dispatched it.
+			if (dcd_rxv_d) begin
+				if (dcd_cst_at_rx != 3'd0) begin
+					if (dcd_unans_cnt == 2'd0) begin
+						dcd_unans_op  <= dcd_op_at_rx;
+						dcd_unans_why <= 2'd2;
+					end
+					if (~&dcd_unans_cnt) dcd_unans_cnt <= dcd_unans_cnt + 2'd1;
+				end
+				else if (dcd_cstate == 3'd0) begin
+					if (dcd_unans_cnt == 2'd0) begin
+						dcd_unans_op  <= dcd_op_at_rx;
+						dcd_unans_why <= 2'd1;
+					end
+					if (~&dcd_unans_cnt) dcd_unans_cnt <= dcd_unans_cnt + 2'd1;
+				end
+			end
 		end
 	end
 
@@ -682,9 +728,18 @@ module dbg_probes (
 		//   [31:24] bytes sent to the Mac (sat 255)
 		//   [23:18] bytes taken from the Mac (sat 63 -- a command frame is 11)
 		//   [17:15] highest txState reached  [14:12] highest rxHs reached
-		//   [11:0]  the last 4 rxHs values, newest in [2:0]
+		//   [11:4]  opcode of the FIRST command received and not answered
+		//   [3:2]   how many such commands (saturating at 3)
+		//   [1:0]   why: 1 = not dispatched from C_IDLE, 2 = arrived busy
+		//
+		// These twelve bits were the last-4-rxHs ring. It read IDLE ARMED
+		// IDLE DONE in every capture taken, healthy and crashed alike, so it
+		// was carrying no signal, and the deck is at MacLC's ~20 hub-node
+		// ceiling -- a new instance would corrupt the whole name table, so a
+		// new field has to come out of an old one.
 		pdc2_r <= {dcd_bytes_out, dcd_bytes_in,
-		           dcd_txmax, dcd_rxhs_max, dcd_rxhs_ring};
+		           dcd_txmax, dcd_rxhs_max,
+		           dcd_unans_op, dcd_unans_cnt, dcd_unans_why};
 	end
 
 	// ---- which bitstream is this? -----------------------------------------

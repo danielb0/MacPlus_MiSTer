@@ -36,17 +36,29 @@
 //      that always passes is the classic silent failure, and it would not show
 //      up until real data corrupted.
 //
-//   4. HOLD-OFF IS NOT THE SAME IN BOTH DIRECTIONS, and reading the ROM both
-//      ways is the only way to know. Drive to Mac, the interrupted group is
-//      RESENT from its start behind a fresh sync and excluded from the
-//      checksum ($419974 backs the group counter up and re-decodes). Mac to
-//      drive, it is NOT: $419B5A drops ca0 mid-group, the Mac sends the rest
-//      of the group anyway, adds one filler byte, and after a fresh $AA
-//      carries straight on with the NEXT group - $419BC8's `subq.w #1,d6`
-//      replaces the `dbra` it skipped, so nothing is resent. The HD20's own
-//      firmware receives it that way at L1e53. A receiver that ignored bytes
-//      arriving in state 0, or that expected a retransmission, loses a group
-//      of a write the first time an SCC interrupt lands.
+//   4. HOLD-OFF IS THE SAME IN BOTH DIRECTIONS: the interrupted group is
+//      FINISHED and the NEXT one follows. This header said the opposite until
+//      2026-09-05, and so did test 5, and so does the RTL - all three from the
+//      same misreading of 1.2a pages 4-5, which is why the bench could not
+//      catch it.
+//
+//      Drive to Mac: $41991C asserts HOFF only after four bytes of the group
+//      are already read, $419926-$419964 keep polling for the remaining four,
+//      and $41997A's `subq.w #1,d7` is the decrement the skipped `dbne` would
+//      have done - so nothing is backed up and $419998 goes on to the NEXT
+//      group with the finished one still in the checksum. Mac to drive is the
+//      same shape at $419B5A/$419BC8. The earlier reading of $419974 as
+//      "backs the group counter up" was wrong in exactly the way the transmit
+//      side had already been corrected once.
+//
+//      Three independent sources agree, and the 1.2a prose is the odd one out:
+//      the ROM, the HD20's own firmware (L1f4c-L1fac, which tests P2.7 only
+//      after the LSB byte), and TashTwenty's XSuspend ("Resume transmission
+//      after interrupted group"). The March-85 timing figure agrees too, in
+//      its own words at t3. A transmitter that rewinds, or a receiver that
+//      ignored bytes arriving in state 0, loses a group the first time an SCC
+//      interrupt lands - and on hardware that is a stall and then a bomb,
+//      reproducible on demand by moving the mouse during a transfer.
 //
 module tb_dcd_link;
 
@@ -71,6 +83,13 @@ module tb_dcd_link;
 	wire [9:0]  rxStbAddr;
 	wire [9:0]  txAddr;
 	wire        txBusy;
+	wire        txAbort;
+
+	// txAbort is a ONE-CLOCK pulse, so it has to be latched exactly as rxValid
+	// and rxBad are - sampling it with a plain @(posedge clk); #1 reads the
+	// clock after the pulse and always sees zero.
+	reg         sawAbort;
+	always @(posedge clk) if (txAbort) sawAbort <= 1'b1;
 
 	// Everything the payload stream hands up, so a frame longer than rxBuf can
 	// be checked end to end. 600 covers a write's 538 payload bytes.
@@ -101,13 +120,13 @@ module tb_dcd_link;
 		.rxStb(rxStb), .rxStbData(rxStbData), .rxStbAddr(rxStbAddr),
 		.txArm(txArm),
 		.txReq(txReq), .txData(txData), .txAddr(txAddr), .txLen(txLen),
-		.txBusy(txBusy)
+		.txBusy(txBusy), .txAbort(txAbort)
 	);
 
 	always #10 clk = ~clk;   // 50 MHz-ish; only the enables matter here
 
 	task check;
-		input [511:0] name;
+		input [1023:0] name;
 		input cond;
 		begin
 			if (cond) begin
@@ -228,6 +247,46 @@ module tb_dcd_link;
 	reg [7:0] chk;
 	reg [7:0] expTx [0:7];
 	reg ok;
+
+	// Multi-group frame state, for the hold-off test. A hold-off is only
+	// LEGITIMATE on a group that is not the last one - $4198EC's `tst.w d7/beq`
+	// feeds the `sne` that drives ph0L, so the Mac never holds off on the final
+	// group - and the old single-group test therefore posed a question the real
+	// Mac never asks. Four groups gives a middle one and a second-to-last one.
+	localparam GROUPS  = 4;
+	localparam TXPAY   = 7*GROUPS - 1;      // module appends the checksum byte
+	reg [7:0] src  [0:7*GROUPS-1];          // payload ++ checksum, as sent
+	reg [7:0] expG [0:8*GROUPS-1];          // expected on the wire, 8 per group
+	reg [7:0] strm [0:15];
+	reg [7:0] lsbAcc;
+	integer   g, gi;
+	reg       gotIt;
+	reg       gotAll;
+
+	// getByte with a bound. The RTL as built REWINDS on a hold-off and parks in
+	// TX_WAIT, emitting nothing until the Mac returns to state 1 - so a plain
+	// getByte would block and the whole bench would die on the global timeout
+	// with no indication of which assertion failed. Bounded, the miss is
+	// reported as a FAIL on the line that cares and the rest of the run
+	// continues.
+	task getByteTO;
+		output [7:0] b;
+		output       okd;
+		integer      n;
+		begin
+			n = 0; okd = 1'b0; b = 8'hXX;
+			@(posedge clk);
+			while (!newByteReady && n < 4000) begin
+				@(posedge clk);
+				n = n + 1;
+			end
+			if (newByteReady) begin
+				b   = readData;
+				okd = 1'b1;
+			end
+			#1;
+		end
+	endtask
 
 	initial begin
 		_reset = 0; ca0 = 0; ca1 = 1; ca2 = 0;  // state 2, idle
@@ -514,33 +573,158 @@ module tb_dcd_link;
 		check("/HSHK released at end of transmission", readData[7] === 1'b1);
 
 		// ---------------------------------------------------------------
-		// 5. Hold-off rewinds to the start of the group
+		// 5. HOLD-OFF, DRIVE->MAC: the interrupted group is FINISHED and the
+		//    NEXT one follows. Rewritten 2026-09-05 from $4198C4-$419998.
 		// ---------------------------------------------------------------
+		// This test used to assert the opposite, BY NAME ("the interrupted
+		// group RESTARTS, not continues"), because it was written from the
+		// same reading of 1.2a pages 4-5 as the RTL. A bench that shares the
+		// implementation's misreading cannot disagree with it, which is the
+		// third time this project has paid for that and is recorded at the
+		// 1.1/1.2a STOP and the LSB STOP.
+		//
+		// Three independent sources say CONTINUE:
+		//   Plus ROM $41991C  asserts HOFF only AFTER reading four bytes of
+		//                     the group, then $419926-$419964 keep polling for
+		//                     the remaining four; $41997A's `subq.w #1,d7` is
+		//                     the decrement the skipped `dbne` would have done,
+		//                     so nothing is backed up; $419998 `bra $4198C4`
+		//                     decodes the group in hand and reads the NEXT one.
+		//                     The finished group stays in the checksum.
+		//   HD20 firmware     L1f4c-L1fac tests P2.7 only after the LSB byte.
+		//   TashTwenty        XSuspend: "Resume transmission after interrupted
+		//                     group".
+		// The March-85 timing figure agrees in its own words (t3). The prose in
+		// 1.2a is simply wrong, and the ROM outranks the document.
+		sum = 0;
+		for (i = 0; i < TXPAY; i = i + 1) begin
+			// Deliberately NOT a palindrome in the LSBs: a reversed bit order
+			// has to be visible here too.
+			payload[i] = 8'h41 + 3*i[7:0];
+			sum = sum + payload[i];
+			src[i] = payload[i];
+		end
+		chk = -sum;
+		src[TXPAY] = chk;
+
+		for (g = 0; g < GROUPS; g = g + 1) begin
+			lsbAcc = 8'h80;
+			for (gi = 0; gi < 7; gi = gi + 1) begin
+				expG[g*8 + gi] = 8'h80 | (src[g*7 + gi] >> 1);
+				lsbAcc = lsbAcc | (src[g*7 + gi][0] << gi);
+			end
+			expG[g*8 + 7] = lsbAcc;
+		end
+
 		setState(3'd2);
 		@(posedge clk); #1;
-		txLen = 10'd6;
+		txLen = TXPAY[9:0];
 		txReq = 1'b1;
 		@(posedge clk); #1;
 		txReq = 1'b0;
 		setState(3'd1);
-		getByte(got[0]);                  // sync
-		getByte(got[1]);                  // first data byte of the group
-		check("hold-off test: group started", got[1] === expTx[0]);
 
-		setState(3'd0);                   // HOFF asserted mid-group
-		repeat (8) @(posedge clk);
-		setState(3'd1);                   // release
+		getByteTO(strm[0], gotIt);
+		check("HOFF: frame opens with the $AA sync", gotIt && strm[0] === 8'hAA);
 
-		getByte(got[2]);
-		check("hold-off: a FRESH sync is sent on resume", got[2] === 8'hAA);
-		getByte(got[3]);
-		check("hold-off: the interrupted group RESTARTS, not continues",
-		      got[3] === expTx[0]);
-		for (i = 1; i < 8; i = i + 1) getByte(got[i+3]);
+		// Group 0 runs clean, so a later failure cannot be blamed on the
+		// multi-group frame itself.
 		ok = 1;
-		for (i = 1; i < 8; i = i + 1)
-			if (got[i+3] !== expTx[i]) ok = 0;
-		check("hold-off: the resent group is byte-identical and checksums the same", ok);
+		for (i = 0; i < 8; i = i + 1) begin
+			getByteTO(strm[i], gotIt);
+			if (!gotIt || strm[i] !== expG[i]) ok = 0;
+		end
+		check("HOFF: group 0 arrives intact with no hold-off", ok);
+
+		// ---- group 1, a MIDDLE group: HOFF after four bytes ----
+		ok = 1;
+		for (i = 0; i < 4; i = i + 1) begin
+			getByteTO(strm[i], gotIt);
+			if (!gotIt || strm[i] !== expG[8 + i]) ok = 0;
+		end
+		check("HOFF: four bytes of the middle group arrive before the hold-off", ok);
+
+		setState(3'd0);                   // $41991C asserts HOFF here
+
+		ok = 1;
+		gotAll = 1;
+		for (i = 4; i < 8; i = i + 1) begin
+			getByteTO(strm[i], gotIt);
+			if (!gotIt) gotAll = 0;
+			if (!gotIt || strm[i] !== expG[8 + i]) ok = 0;
+		end
+		check("HOFF: the rest of the interrupted group STILL ARRIVES in state 0", ok);
+		// readData gates txByte on state 1 only, so a DUT that kept clocking
+		// but did not widen that gate would hand the Mac the sense bit ($00)
+		// instead of data. That is a DIFFERENT bug from stopping and needs its
+		// own name - but the check is only meaningful if the bytes arrived at
+		// all. Gated on gotAll, because an X from a timed-out getByteTO is
+		// !== 8'h00 and passed this vacuously the first time it ran.
+		check("HOFF: those state-0 bytes are DATA, not the sense bit",
+		      gotAll && strm[4] !== 8'h00 && strm[5] !== 8'h00 &&
+		      strm[6] !== 8'h00 && strm[7] !== 8'h00);
+
+		setState(3'd1);                   // $419986: ph0H 0 -> 1, no state 3
+
+		getByteTO(strm[0], gotIt);
+		check("HOFF: a fresh $AA follows the FINISHED group",
+		      gotIt && strm[0] === 8'hAA);
+
+		// ---- group 2, the SECOND-TO-LAST: the next group, then HOFF again ----
+		ok = 1;
+		for (i = 0; i < 4; i = i + 1) begin
+			getByteTO(strm[i], gotIt);
+			if (!gotIt || strm[i] !== expG[16 + i]) ok = 0;
+		end
+		check("HOFF: what follows is the NEXT group, not a resend of the interrupted one", ok);
+
+		setState(3'd0);                   // a second hold-off, second-to-last group
+
+		ok = 1;
+		for (i = 4; i < 8; i = i + 1) begin
+			getByteTO(strm[i], gotIt);
+			if (!gotIt || strm[i] !== expG[16 + i]) ok = 0;
+		end
+		check("HOFF: a second hold-off, on the second-to-last group, also finishes it", ok);
+
+		setState(3'd1);
+
+		getByteTO(strm[0], gotIt);
+		check("HOFF: fresh $AA after the second hold-off",
+		      gotIt && strm[0] === 8'hAA);
+
+		// ---- group 3, the last: no hold-off is legitimate here ----
+		ok = 1;
+		for (i = 0; i < 8; i = i + 1) begin
+			getByteTO(strm[i], gotIt);
+			if (!gotIt || strm[i] !== expG[24 + i]) ok = 0;
+		end
+		check("HOFF: the final group arrives intact after two hold-offs", ok);
+		check("HOFF: the checksum byte survived both hold-offs",
+		      strm[6] === expG[30]);
+
+		@(posedge clk);
+		while (txBusy) @(posedge clk);
+		setState(3'd3);
+		@(posedge clk); #1;
+		check("HOFF: /HSHK released at end of a held-off frame", readData[7] === 1'b1);
+		setState(3'd2);
+		@(posedge clk); #1;
+
+		// Restore the single-group expectations that tests 6 and 8 below use.
+		sum = 0;
+		for (i = 0; i < 6; i = i + 1) begin
+			payload[i] = 8'h41 + 2*i[7:0];
+			sum = sum + payload[i];
+		end
+		chk = -sum;
+		expTx[7] = 8'h80;
+		for (i = 0; i < 6; i = i + 1) begin
+			expTx[i] = 8'h80 | (payload[i] >> 1);
+			expTx[7] = expTx[7] | (payload[i][0] << i);
+		end
+		expTx[6] = 8'h80 | (chk >> 1);
+		expTx[7] = expTx[7] | (chk[0] << 6);
 
 		// ---------------------------------------------------------------
 		// 6. State 4 is RESET
@@ -759,6 +943,100 @@ module tb_dcd_link;
 		check("an armed frame the Mac abandons releases the bus",
 		      readData[7] === 1'b1);
 		check("  ...and clears txBusy", txBusy === 1'b0);
+
+		// ---------------------------------------------------------------
+		// 9. AN ABANDONED FRAME SAYS SO. txAbort, added 2026-09-05.
+		// ---------------------------------------------------------------
+		// The command layer cannot tell "finished" from "abandoned" by
+		// watching txBusy, because it falls either way. On a multiblock read
+		// that difference decides whether the NEXT block is armed into a bus
+		// the Mac has already left - an unsolicited frame, which the Mac
+		// answers with a reset. The ROM's error exit is 1 -> 3 -> 2, so that
+		// is what this drives.
+		setState(3'd2);
+		@(posedge clk); #1;
+		txLen = 10'd20;                   // 3 groups: long enough to leave mid-frame
+		txReq = 1'b1;
+		@(posedge clk); #1;
+		txReq = 1'b0;
+		setState(3'd1);
+		getByteTO(strm[0], gotIt);
+		check("abort: the frame started", gotIt && strm[0] === 8'hAA);
+		for (i = 0; i < 4; i = i + 1) getByteTO(strm[i], gotIt);
+
+		sawAbort = 1'b0;
+		@(posedge clk); #1;
+		setState(3'd3);                   // the ROM's error exit, first half
+		repeat (4) @(posedge clk); #1;
+		check("abort: leaving to state 3 mid-group raises txAbort", sawAbort === 1'b1);
+		check("abort: ...and clears txBusy", txBusy === 1'b0);
+		setState(3'd2);
+		@(posedge clk); #1;
+		check("abort: ...and releases /HSHK", readData[7] === 1'b1);
+
+		// It must be a PULSE, not a level: a level would re-abort the next
+		// frame the instant the command layer armed it.
+		sawAbort = 1'b0;
+		repeat (8) @(posedge clk); #1;
+		check("abort: txAbort is a one-clock pulse, not a level", sawAbort === 1'b0);
+
+		// And a frame that ENDS NORMALLY must never raise it, or the command
+		// layer would tear down every good multiblock read after one block.
+		sawAbort = 1'b0;
+		setState(3'd2);
+		@(posedge clk); #1;
+		txLen = 10'd6;
+		txReq = 1'b1;
+		@(posedge clk); #1;
+		txReq = 1'b0;
+		setState(3'd1);
+		for (i = 0; i < 9; i = i + 1) getByteTO(strm[i], gotIt);
+		@(posedge clk);
+		while (txBusy) @(posedge clk);
+		setState(3'd3);
+		@(posedge clk); #1;
+		check("abort: a frame that COMPLETES does not raise txAbort", sawAbort === 1'b0);
+		check("abort: the completed frame still released /HSHK", readData[7] === 1'b1);
+		setState(3'd2);
+		@(posedge clk); #1;
+
+		// ---------------------------------------------------------------
+		// 10. A NEW COMMAND RE-SYNCS THE RECEIVER. Added 2026-09-05.
+		// ---------------------------------------------------------------
+		// State 3 out of state 2 is ALWAYS the start of a fresh command, so
+		// any rxState left over from a frame the Mac abandoned part-way is
+		// stale by definition. The handshake FSM used to reset itself on an
+		// abandon while the BYTE FSM kept its place, so the next command was
+		// decoded as though it were the middle of the last one and never found
+		// its sync again. That does not cause the first error - but it turns
+		// one error into a reset cycle, which is how a single hold-off became
+		// a bomb.
+		//
+		// Leave the receiver deliberately mid-frame, then send a good command
+		// and require it to decode.
+		armRx;
+		macRequestToSend;
+		macByte(8'hAA);                   // sync
+		macByte(8'h81);                   // group count
+		macByte(8'h81);
+		macByte(8'h80);                   // LSB byte, then abandon mid-group
+		macByte(8'h80); macByte(8'h80);
+		setState(3'd2);                   // the Mac walks away, mid-group
+		repeat (8) @(posedge clk); #1;
+		check("resync: the abandoned command did not decode", sawValid !== 1'b1);
+
+		armRx;
+		macRequestToSend;                 // a FRESH command, properly handshaked
+		macByte(8'hAA);
+		macByte(8'h81);
+		macByte(8'h81);
+		macByte(8'h80);
+		macByte(8'h80); macByte(8'h80); macByte(8'h80);
+		macByte(8'h80); macByte(8'h80); macByte(8'h80);
+		macByte(8'h80);
+		macEndOfCommand;
+		check("resync: the NEXT command decodes after an abandoned one", sawValid === 1'b1);
+		check("resync: ...and is not reported bad", sawBad !== 1'b1);
 
 		$display("tb_dcd_link: %0d/%0d", pass, pass + fail);
 		if (fail != 0) $display("FAILED");
