@@ -703,39 +703,86 @@ module tb_dbg_probes;
 		   probes.pdc2_r[31:24] == 8'd255);
 
 		// ---- the unanswered-command field ------------------------------
-		// rtl/dcd.v answers $00/$01/$02/$03 (and $41/$42) and DROPS anything
-		// else with no reply at all. The Mac cannot tell that from a dead
-		// drive: it times out and resets us, which is what sets PDCD's
-		// abandoned bit -- so that bit is downstream of this one and reading
-		// it first sent one investigation to the wrong layer entirely.
-		// dcd_last_op cannot serve here because it keeps the NEWEST opcode
-		// and every real capture ends with the $00 of an ordinary read.
+		// rtl/dcd.v answers $00/$01/$02/$03 (and $41/$42), REFUSES a write
+		// whose guard fails, and since b8dedd0 ACKNOWLEDGES any opcode it
+		// does not implement with an empty block. Only the refusal is silent
+		// on the wire, and the Mac cannot tell that from a dead drive: it
+		// times out and resets us, which is what sets PDCD's abandoned bit --
+		// so that bit is downstream of this one, and reading it first sent one
+		// investigation to the wrong layer entirely. dcd_last_op cannot serve
+		// here because it keeps the NEWEST opcode and every real capture ends
+		// with the $00 of an ordinary read.
+		//
+		// $19 USED TO BE THIS TEST'S UNANSWERED OPCODE and no longer can be:
+		// it is acknowledged now, so driving it with cstate 0 would model an
+		// outcome the RTL cannot produce. A refused write is the case that
+		// genuinely still lands here.
 		dcd_clear;
 		dcd_cmd(8'h03, 3'd4);     // Status, dispatched to C_SEND
 		ok("probe - an answered command leaves the unanswered fields clear",
 		   probes.pdc2_r[3:2] == 2'd0);
 
-		dcd_cmd(8'h19, 3'd0);     // one the Plus ROM sends and dcd.v drops
+		dcd_cmd(8'h01, 3'd0);     // a write the guard refused: no reply at all
 		ok("probe - an unanswered command is counted",
 		   probes.pdc2_r[3:2] == 2'd1);
 		ok("probe - and its OPCODE is recorded, not just the fact of it",
-		   probes.pdc2_r[11:4] == 8'h19);
+		   probes.pdc2_r[11:4] == 8'h01);
 		ok("probe - and the reason is 'not dispatched from C_IDLE'",
 		   probes.pdc2_r[1:0] == 2'd1);
 
 		// THE FIRST OPCODE IS KEPT, NOT THE NEWEST. A driver that gives up on
 		// a command retries and then resets, so the newest would name the
 		// recovery path rather than what started it.
-		dcd_cmd(8'h1A, 3'd0);
+		dcd_cmd(8'h01, 3'd0);
 		ok("probe - a second unanswered command does NOT overwrite the first",
-		   probes.pdc2_r[11:4] == 8'h19);
+		   probes.pdc2_r[11:4] == 8'h01);
 		ok("probe - but it is counted",
 		   probes.pdc2_r[3:2] == 2'd2);
 
-		dcd_cmd(8'h1A, 3'd0);
-		dcd_cmd(8'h1A, 3'd0);
+		dcd_cmd(8'h01, 3'd0);
+		dcd_cmd(8'h01, 3'd0);
 		ok("probe - the unanswered counter saturates rather than wrapping",
 		   probes.pdc2_r[3:2] == 2'd3);
+
+		// ---- reason 3: answered by the generic ack ----------------------
+		// The case b8dedd0 created and this field could not see. An acked
+		// command LEAVES C_IDLE, so it passes both tests above; C_SEND with
+		// an opcode that is not $03 is what names it.
+		dcd_clear;
+		dcd_cmd(8'h19, 3'd4);
+		ok("probe - an opcode answered by the generic ack is recorded, not silent",
+		   probes.pdc2_r[3:2] == 2'd1);
+		ok("probe - with reason 3, distinct from a refusal and from busy",
+		   probes.pdc2_r[1:0] == 2'd3);
+		ok("probe - and its opcode",
+		   probes.pdc2_r[11:4] == 8'h19);
+
+		// $19 then $1A is one Erase Disk. The pair must not read as two
+		// separate discoveries, so the second does not displace the first.
+		dcd_cmd(8'h1A, 3'd4);
+		ok("probe - the second half of an Erase Disk does not displace the first",
+		   probes.pdc2_r[11:4] == 8'h19);
+
+		// THE POINT OF THE WHOLE FIELD. A routine format ack must not hide an
+		// opcode we have never seen -- $3F is the Mac's mishandled-hold-off
+		// response and would otherwise sit behind $19 for ever.
+		dcd_cmd(8'h3F, 3'd4);
+		ok("probe - but an ack of anything OTHER than $19/$1A takes the slot",
+		   probes.pdc2_r[11:4] == 8'h3F && probes.pdc2_r[1:0] == 2'd3);
+
+		// ...and a genuinely unanswered command outranks a stored routine ack.
+		dcd_clear;
+		dcd_cmd(8'h19, 3'd4);
+		dcd_cmd(8'h01, 3'd0);
+		ok("probe - a command left unanswered displaces a stored routine ack",
+		   probes.pdc2_r[11:4] == 8'h01 && probes.pdc2_r[1:0] == 2'd1);
+
+		// A non-routine ack, once stored, is NOT displaced by a later one.
+		dcd_clear;
+		dcd_cmd(8'h3F, 3'd4);
+		dcd_cmd(8'h2B, 3'd4);
+		ok("probe - and a non-routine ack, once stored, keeps the slot",
+		   probes.pdc2_r[11:4] == 8'h3F);
 
 		// The other reason, and it must not be confused with the first: the
 		// opcode is one we implement, but it arrived while the layer was busy.

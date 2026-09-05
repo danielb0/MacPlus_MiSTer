@@ -266,11 +266,12 @@ for {set n 0} {$n < $samples} {incr n} {
 		# then resets us, which is what sets PDCD's abandoned bit. So this
 		# line is upstream of that one -- read it first.
 		if {$d_uncnt == 0} {
-			puts "  PDC2  unanswered commands: none -- every command decoded was dispatched"
+			puts "  PDC2  unanswered/unimplemented commands: none -- every command decoded was dispatched and implemented"
 		} else {
-			set why [lindex {"?" "not dispatched from C_IDLE (a guard refused it -- e.g. a write with no sector behind it; an UNKNOWN opcode is acknowledged, not dropped, so it cannot land here)" \
-			                 "arrived while the command layer was still busy" "?"} $d_unwhy]
-			puts [format "  PDC2  UNANSWERED COMMAND: first opcode \$%02X, %s seen, reason: %s" \
+			set why [lindex {"?" "not dispatched from C_IDLE (a guard refused it -- e.g. a write with no sector behind it; an opcode dcd.v does not implement is acknowledged rather than dropped, so it lands under reason 3, not here)" \
+			                 "arrived while the command layer was still busy" \
+			                 "answered by the generic empty-block ack -- an opcode dcd.v does not implement. \$19/\$1A are Erase Disk and are ROUTINE. Anything else is not: \$3F in particular is what the Mac sends after a hold-off it could not follow, and it expects a real reply -- a wrong one draws a \$7F NAK (TashTwenty's author, 68kMLA). A routine \$19/\$1A here is displaced by any other event, so if this line names \$19 or \$1A that IS the whole story"} $d_unwhy]
+			puts [format "  PDC2  UNANSWERED/UNIMPLEMENTED COMMAND: first opcode \$%02X, %s seen, reason: %s" \
 			             $d_unop [expr {$d_uncnt >= 3 ? "3+" : $d_uncnt}] $why]
 		}
 

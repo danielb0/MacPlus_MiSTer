@@ -5669,6 +5669,87 @@ Neither finding changes behaviour; both are comment corrections to fold into
 the next edit of those files. Nothing here has been compiled and the gate is
 unchanged.
 
+### The generic ack blinded PDC2, and TashTwenty's author named the opcode it hides
+
+**Source, 2026-09-05: the TashTwenty author's own errata list for the May 1985
+document, posted on 68kMLA.** Two posts, both supplied by Daniel. They are the
+best third-party DCD source there is -- a working independent implementation
+plus a logic-analyser capture -- and they arbitrate against the specification
+wherever the two disagree, exactly as the source hierarchy above already says.
+
+**Every hold-off clause in that errata is already satisfied by this core.**
+Checked line by line against `rtl/dcd_link.v` rather than against our own notes:
+
+| errata clause | where we do it |
+|---|---|
+| initiated by the Mac going state 1 -> 0, **either direction** | `TX_DATA`/`TX_LSB` latch `txHoff` on state 0 |
+| ended by 0 -> 1, and **there is no negotiation** | `TX_HOFF`, `else if (state == 3'd1)` |
+| Mac finishes its group; that data is valid | the RX block at `dcd_link.v:313` |
+| **DCD must finish its group; the Mac treats it as valid** | `TX_LSB` leaves `txAddr`, `txSent` and `txSum` alone -- this is `f157fcc` |
+| **DCD resumes with `$AA`, then the NEXT group** | `TX_HOFF` -> `TX_SYNC` |
+| sync is always `$AA`, `$96` is never used | already read out of both ROM builds |
+| the two count bytes are `$80 +` group count, command then expected reply | `RX_CNT1`/`RX_CNT2`, `askedLen = groups*7 - 1` |
+
+The errata also confirms the Controller Status block independently: 343 bytes
+in 49 groups, a 256-byte icon as bitmap-then-mask in ICON format, and a Pascal
+string that drives the **"Where:"** field of Get Info -- which is `3eced6c`'s
+photographed finding arrived at from the other side. Our reply length comes
+from the Mac's own request rather than a constant, so none of that needs a
+change. One nuance worth keeping: the errata sizes that string field at **16**
+bytes where `dcd.v`'s `trailerChar` covers 12 and zero-fills. Harmless, since
+the Plus ROM asks for only 332 identity bytes, but it caps how long a drive
+name could ever be.
+
+**What is NEW is a failure signature.** When their firmware mishandled a
+hold-off, the Mac sent an **opcode `$3F` carrying a data payload**, and a
+reply of the right length but the wrong content drew a **`$7F` NAK**. Neither
+opcode is in 1.2a, in the 1.2a diagnostic table, or in `dcd.v`. So `$3F` is not
+a command to implement -- it is *evidence that hold-off handling has broken*.
+
+**And `b8dedd0` had just made it invisible.** The generic ack answers any
+unimplemented opcode with an empty block, so a `$3F` would be answered -- with
+exactly the "dumb reply of the correct length" that earns the NAK -- and leave
+no trace: `dbg_probes.sv`'s unanswered-command field only records a command
+that **arrived in `C_IDLE` and was not dispatched**, and an acked command
+leaves `C_IDLE`. `dcd_last_op` cannot cover for it, because it keeps the newest
+opcode and every capture ends with the `$00` of an ordinary read. The probe
+that exists to answer "did the Mac send something we do not implement" had been
+disconnected from that question by the change that made the answer matter more.
+
+**Fixed with no new probe bits.** `dcd_unans_why` had an unused code, so reason
+**3 = answered by the generic ack**. An ack is told apart from a real dispatch
+*without* restating `dcd.v`'s guards -- which the field's own comment forbids,
+since a probe that mirrors the RTL agrees with it by construction: an ack and a
+Status are the only replies that go straight to `C_SEND` with no disk fetch, so
+`C_SEND` one clock on with the opcode not `$03` **is** the ack.
+
+**One deliberate exception to first-wins.** Erase Disk acks `$19` then `$1A` on
+every format, so a strict first-wins slot fills with `$19` and hides everything
+after it -- including the `$3F` this is for. A stored `$19`/`$1A` ack therefore
+yields to any later event; every other entry still keeps the first, because a
+driver that gives up retries and then resets.
+
+**Gates.** `tb_dbg_probes` **82/82** (was 75) and `test_read_probes` **55/55**
+(was 50). Note `tb_dbg_probes` reports 1 failing against the working tree,
+because `rtl/build_tag.v` is committed as 0 by design; it is 82/82 built
+against a stamped tag, which is the state any real compile runs in.
+
+**Mutation: 3 built, 3 killed.** Dropping the `$19`/`$1A` overwrite rule kills
+exactly the two tests that encode it (the `$3F` displacement and the
+unanswered-outranks-ack case) and nothing else. Dropping the `$03` exclusion
+kills 6 -- every Status would be reported as unimplemented. Watching `C_FETCH`
+instead of `C_SEND` kills 6 -- no ack is ever seen.
+
+**Two bench facts `b8dedd0` had already invalidated, fixed here.**
+`sim/tb_dbg_probes.v` still said `dcd.v` "DROPS anything else with no reply at
+all", and drove `$19` with `cstate` 0 -- an outcome the RTL can no longer
+produce, so the test modelled a fiction that happened to pass. A refused write
+is what genuinely still reaches reason 1, and that is what it drives now. The
+same correction lands in `sim/test_read_probes.tcl`.
+
+**Still not compiled.** This rides the same pending build as `b8dedd0`.
+
+
 ## Verification
 
 House ladder applies unchanged: a failing test before the fix, iverilog

@@ -240,20 +240,42 @@ ok "reader names the high-water marks of both handshake FSMs" \
 # printed nothing for the healthy case would let a stale deck read as a
 # clean bill of health.
 ok "reader reports no unanswered commands on a healthy capture" \
-   [string match "*unanswered commands: none*" $out]
+   [string match "*unanswered/unimplemented commands: none*" $out]
 # The capture this probe was built for: a command decoded, never
-# dispatched, and the Mac's driver left to time out. The opcode must reach
-# the reader intact -- $19 and $1A are the two the Plus ROM can send that
-# rtl/dcd.v does not implement, and naming the wrong one would send the
-# next investigation to the wrong branch of the driver.
-set probeval(PDC2) [mkpdc2 40 11 5 4 0x19 1 1]
+# dispatched, and the Mac's driver left to time out. Since b8dedd0 an opcode
+# dcd.v does not implement is ACKNOWLEDGED rather than dropped, so it lands
+# under reason 3 below; a write whose guard refused it is what still reaches
+# reason 1, and naming the wrong one would send the next investigation to the
+# wrong branch of the driver.
+set probeval(PDC2) [mkpdc2 40 11 5 4 0x01 1 1]
 set out [capture]
 ok "reader names the opcode of an unanswered command" \
-   [string match {*UNANSWERED COMMAND: first opcode $19*} $out]
+   [string match {*UNANSWERED/UNIMPLEMENTED COMMAND: first opcode $01*} $out]
 ok "reader says WHY it went unanswered" \
    [string match "*not dispatched from C_IDLE*" $out]
 ok "reader reports how many were unanswered" \
    [string match "*1 seen*" $out]
+
+# Reason 3, and the reader must GRADE it rather than just name it. An Erase
+# Disk acks $19 then $1A on every format, so a deck that cried wolf there
+# would be ignored by the time it mattered.
+set probeval(PDC2) [mkpdc2 40 11 5 4 0x19 1 3]
+set out [capture]
+ok "reader names an opcode answered by the generic ack" \
+   [string match {*UNANSWERED/UNIMPLEMENTED COMMAND: first opcode $19*} $out]
+ok "reader explains the generic ack rather than calling it a failure" \
+   [string match "*answered by the generic empty-block ack*" $out]
+ok "reader says a \$19 ack is ROUTINE, so a reader does not chase it" \
+   [string match "*ROUTINE*" $out]
+
+# ...and the one this field exists to catch. $3F is what the Mac sends after
+# a hold-off it could not follow; it must not read like a routine format.
+set probeval(PDC2) [mkpdc2 40 11 5 4 0x3F 1 3]
+set out [capture]
+ok "reader names a \$3F ack, the mishandled-hold-off signature" \
+   [string match {*UNANSWERED/UNIMPLEMENTED COMMAND: first opcode $3F*} $out]
+ok "reader warns that a wrong reply to it draws a NAK" \
+   [string match "*7F NAK*" $out]
 
 # The other reason, which is a different bug with the same symptom: the
 # command was one we implement, but it landed while the layer was busy.

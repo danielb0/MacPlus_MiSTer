@@ -622,6 +622,36 @@ module dbg_probes (
 	reg  [7:0] dcd_unans_op    = 0;
 	reg  [1:0] dcd_unans_cnt   = 0;   // saturating
 	reg  [1:0] dcd_unans_why   = 0;
+
+	// A COMMAND ANSWERED BY THE GENERIC ACK (reason 3). b8dedd0 made dcd.v
+	// answer any opcode it does not implement with an empty block. That is
+	// right for $19/$1A, but it SILENCED this probe: an acked command leaves
+	// C_IDLE, so neither test below can see it, and dcd_last_op keeps only
+	// the newest, which every capture so far ends with as the $00 of an
+	// ordinary read. Without this the deck cannot answer "did the Mac send
+	// something we do not implement", which is the whole question the field
+	// was added for.
+	//
+	// Told apart WITHOUT restating dcd.v's dispatch conditions: an ack and a
+	// Status are the only replies that go straight to C_SEND with no disk
+	// fetch (a read or a write goes to C_FETCH first), so C_SEND one clock
+	// on, with the opcode not $03, IS the ack. That is the observable path
+	// taken, not a copy of the guard that chose it.
+	//
+	// WHY THIS ONE MAY OVERWRITE, where nothing else does. Erase Disk sends
+	// $19 then $1A and both are now acked, so a strict first-wins slot would
+	// fill with $19 on the first format and hide everything afterwards. Those
+	// two are expected and harmless; any OTHER acked opcode is not -- $3F in
+	// particular is what the Mac sends when a hold-off has been mishandled
+	// (TashTwenty's author, 68kMLA, 2026). So a stored $19/$1A ack yields to
+	// any later event, and every other entry still keeps the first.
+	wire       dcd_unans_isack = (dcd_cstate == 3'd4) && (dcd_op_at_rx != 8'h03);
+	wire       dcd_unans_newok = dcd_unans_isack &&
+	                             ((dcd_op_at_rx == 8'h19) || (dcd_op_at_rx == 8'h1a));
+	wire       dcd_unans_oldok = (dcd_unans_why == 2'd3) &&
+	                             ((dcd_unans_op == 8'h19) || (dcd_unans_op == 8'h1a));
+	wire       dcd_unans_take  = (dcd_unans_cnt == 2'd0) ||
+	                             (dcd_unans_oldok && !dcd_unans_newok);
 	reg        dcd_rxv_d       = 0;
 	reg  [7:0] dcd_op_at_rx    = 0;
 	reg  [2:0] dcd_cst_at_rx   = 0;
@@ -694,16 +724,23 @@ module dbg_probes (
 			// that would have dispatched it.
 			if (dcd_rxv_d) begin
 				if (dcd_cst_at_rx != 3'd0) begin
-					if (dcd_unans_cnt == 2'd0) begin
+					if (dcd_unans_take) begin
 						dcd_unans_op  <= dcd_op_at_rx;
 						dcd_unans_why <= 2'd2;
 					end
 					if (~&dcd_unans_cnt) dcd_unans_cnt <= dcd_unans_cnt + 2'd1;
 				end
 				else if (dcd_cstate == 3'd0) begin
-					if (dcd_unans_cnt == 2'd0) begin
+					if (dcd_unans_take) begin
 						dcd_unans_op  <= dcd_op_at_rx;
 						dcd_unans_why <= 2'd1;
+					end
+					if (~&dcd_unans_cnt) dcd_unans_cnt <= dcd_unans_cnt + 2'd1;
+				end
+				else if (dcd_unans_isack) begin
+					if (dcd_unans_take) begin
+						dcd_unans_op  <= dcd_op_at_rx;
+						dcd_unans_why <= 2'd3;
 					end
 					if (~&dcd_unans_cnt) dcd_unans_cnt <= dcd_unans_cnt + 2'd1;
 				end
