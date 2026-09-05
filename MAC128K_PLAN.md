@@ -4324,6 +4324,64 @@ fail. Two things to watch beyond pass/fail:
   `RX_RESYNC` path has only ever run in simulation. Copy a large file TO the
   HD20 while sweeping, then reconcile with `scripts/hfs_integrity.py`.
 
+### The 512K route: the HD20 startup diskette. PROCEDURE, being tested 2026-09-05
+
+The artefact table above has always listed `HD_20_Startup.img` as "the 512K
+route -- driver arrives as a `.Sony` patch from floppy", and no procedure or
+result was ever recorded against it. Written down here so the result has
+somewhere to land.
+
+**WHY THE 512K IS DIFFERENT.** HD20 support in ROM arrived with the 128K ROM
+(512Ke, Plus, SE, Classic, IIci, Portable). The plain 512K has the 64K ROM and
+no DCD driver at all, so it comes from floppy: the file **`Hard Disk 20`** on
+the startup disk, type/creator `ZSYS/MACS`, and a **`PTCH` carrier rather than
+an INIT** -- it patches `.Sony` at boot. So **a 512K cannot boot FROM the
+HD20**: code that loads after boot cannot boot you. The floppy boots, the patch
+installs, the HD20 mounts, and the Mac continues from it.
+
+**Procedure.** Model = Macintosh 512K (NOT 512Ke -- that boots an HD20 from ROM
+and would not test this path). HD20 image on slot 5, `HD_20_Startup.img`
+(`C:/temp/Mac/HD20/`, 409,600 bytes, raw 400K MFS, mounts as-is) as the floppy,
+left WRITABLE because the MFS volume wants its DeskTop file. Mount first, then
+reset.
+
+**Expected, from the period documentation:** "Hard Disk 20 Startup." beneath
+"Welcome to Macintosh."; after about 14 seconds the Mac EJECTS THE FLOPPY BY
+ITSELF and carries on from the hard disk. Holding the mouse button at the
+Welcome screen keeps it on the floppy. (System 3.0 showed "Using External
+Drive." instead.)
+
+**WHY THIS IS THE MOST INFORMATIVE UNTESTED THING LEFT.** Every byte of Phase
+5's hardware validation so far was against the PLUS ROM's driver. The floppy
+patch is a different implementation of the Mac side of the same protocol, and it
+may use opcodes, timings or hold-off patterns the ROM driver never touches --
+including the two the review found unreachable from the ROM (`$19`/`$1A`, whose
+probe is now in the build and expected to print "none"). If it prints an opcode
+here, that is the probe earning its place.
+
+Two specifics with no prior coverage:
+
+- **The auto-eject at ~14 s** is the Mac ejecting a floppy on its own
+  initiative. Nothing tested so far has exercised that; the eject paths this
+  project has touched were OSD-driven or the DCD-medium case from `2e5171e`.
+- **Our DCD is ready immediately** -- there is no spin-up delay in `dcd.v`,
+  where a real HD20 self-tests for ~15 s. That is more forgiving than real
+  hardware rather than less, so it should not bite; but "too fast" is a
+  direction with no coverage either. Unrelated to the ~4.1 s NOT READY window,
+  which is the CD.
+
+**Not model-gated:** the DCD lives in `iwm.v` on the external floppy port for
+every model, keyed only off a mounted image, so a 512K gets the same device a
+Plus does. Nothing in the RTL needs to change for this test.
+
+| model | HD20 | status |
+|---|---|---|
+| 128K | no -- the patch will not load in 128K of RAM; `HD Diag` still exercises the link | not applicable |
+| **512K** | **via the startup diskette** | **being tested 2026-09-05** |
+| 512Ke / Plus | from ROM | confirmed, `f157fcc8` |
+
+**RESULT:** not yet recorded.
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
