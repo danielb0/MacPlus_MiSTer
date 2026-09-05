@@ -601,10 +601,12 @@ module dbg_probes (
 	reg [11:0] dcd_rxhs_ring   = 0;   // last 4 rxHs values, newest in [2:0]
 	reg  [2:0] dcd_rxhs_d      = 0;
 	reg  [2:0] dcd_txstate_d   = 0;
+	reg        dcd_txbyte_d    = 0;
 
 	always @(posedge clk) begin
 		dcd_rxhs_d    <= dcd_rxhs;
 		dcd_txstate_d <= dcd_txstate;
+		dcd_txbyte_d  <= dcd_txbyte;
 
 		if (dcd_clr) begin
 			dcd_states_seen <= 8'd0;
@@ -639,8 +641,14 @@ module dbg_probes (
 			// gets its own bit rather than being inferred from txmax.
 			if (dcd_txstate == 3'd0 && dcd_txstate_d == 3'd1) dcd_st_abort <= 1'b1;
 
+			// The inbound event is the IWM's one-clock writeReq. The outbound
+			// one is dcd_link's newByteReady, which is HELD from one cen tick
+			// to the next so iwm.v's cen-gated latch can see it -- four clk at
+			// 32 MHz -- so it has to be counted on its edge, not its level.
+			// Counted as a level it read four bytes per byte.
 			if (dcd_rxbyte && ~&dcd_bytes_in)  dcd_bytes_in  <= dcd_bytes_in  + 6'd1;
-			if (dcd_txbyte && ~&dcd_bytes_out) dcd_bytes_out <= dcd_bytes_out + 8'd1;
+			if (dcd_txbyte && !dcd_txbyte_d && ~&dcd_bytes_out)
+				dcd_bytes_out <= dcd_bytes_out + 8'd1;
 
 			// Both FSMs advance monotonically through one exchange, so the
 			// high-water mark says how far it got without needing a ring:

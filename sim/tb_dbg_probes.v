@@ -143,6 +143,18 @@ module tb_dbg_probes;
 		end
 	endtask
 
+	// The same, held across `n` posedges. rtl/dcd_link.v's newByteReady is
+	// held from one cen tick to the next -- four clk -- and a counter that
+	// takes it as a level rather than an edge is only caught by a pulse that
+	// is actually that wide. A one-clock pulse passes both.
+	task dcd_pulse_wide(input integer b, input integer n);
+		begin
+			@(negedge clk); dcd_stim[b] = 1'b1;
+			repeat (n) @(negedge clk);
+			dcd_stim[b] = 1'b0;
+		end
+	endtask
+
 	// The deck registers its stickies on one clock and pdcd_r/pdc2_r on the
 	// next, so a capture needs two edges to be true. Three, to be sure.
 	task dcd_settle; begin repeat (3) @(posedge clk); end endtask
@@ -567,6 +579,12 @@ module tb_dbg_probes;
 		   probes.pdcd_r[1:0] == 2'd0);
 		ok("probe - PDC2 counted the bytes the drive sent",
 		   probes.pdc2_r[31:24] == 8'd40);
+		// What the real dcd_link.v drives: newByteReady held for four clk.
+		// The deck once counted that as a level and reported four bytes per
+		// byte, and the one-clock pulses above could not tell.
+		dcd_pulse_wide(13, 4); dcd_settle;
+		ok("probe - PDC2 counts a four-clock newByteReady as ONE byte, not four",
+		   probes.pdc2_r[31:24] == 8'd41);
 		ok("probe - PDC2 counted the bytes the Mac sent",
 		   probes.pdc2_r[23:18] == 6'd11);
 		ok("probe - PDC2 says the reply ran all the way to TX_END",
