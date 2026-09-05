@@ -4376,7 +4376,7 @@ Plus does. Nothing in the RTL needs to change for this test.
 
 | model | HD20 | status |
 |---|---|---|
-| 128K | no -- the patch will not load in 128K of RAM; `HD Diag` still exercises the link | not applicable |
+| 128K | no -- the `Hard Disk 20` patch will not load (source says so; it does not say why); `HD Diag` still exercises the link | not applicable |
 | **512K** | **via the startup diskette** | **CONFIRMED 2026-09-05, `f157fcc8`** |
 | 512Ke / Plus | from ROM | confirmed, `f157fcc8` |
 
@@ -4540,8 +4540,20 @@ Setup) is the other. Both correspond to the `diag/` floppies on bitsavers.
 
 **Machines the author tested with a real HD20:** 512Ke, Plus, Classic and
 Classic II worked; an SE/30 did not. A 128K with a Plus ROM fitted -- a "128Ke"
--- fully supports it, which is a configuration this core could trivially offer
-and which real hardware apparently supported too.
+-- fully supports it.
+
+**DECIDED 2026-09-05: we are NOT offering a "128Ke". Do not re-propose it.**
+This paragraph used to call it "a configuration this core could trivially offer",
+which is true and beside the point. It was never a shipped model -- it is a
+128K board with the Plus ROM swapped in, a user upgrade -- and the model selector
+exists to offer machines people actually had. A 128K that behaves like a Plus is
+a Plus with less RAM. [[period-authenticity-matters]].
+
+It stays in the record for one reason only, and it is an ANALYTICAL one: it is
+the data point that falsifies "128K of RAM is too small for an HD20". Same
+128 KB, and it works -- so the barrier for the plain 128K is not RAM as such but
+the RAM-RESIDENT PATCH, whose bulk (the ~24 KB TFS resource) is HFS in RAM,
+needed only because the 64K ROM has none.
 
 ### Borrowing from the Lisa core (Daniel's suggestion, 2026-09-04)
 
