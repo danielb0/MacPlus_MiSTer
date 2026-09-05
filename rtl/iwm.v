@@ -135,6 +135,10 @@ module iwm
 	wire [7:0] readDataExt;
 	// senseExt is muxed with the DCD's line below, next to the readData mux it
 	// belongs with - see readDataExtSel.
+	// A DCD image is mounted (rtl/dcd.v's `present`). Declared up here because
+	// floppyExt's enable below uses it; the DCD itself is instantiated further
+	// down, after both floppies.
+	wire dcdPresent;
 
 	// write path: which drive's data register a CPU write targets follows
 	// selectExternalDriveNext, mirroring q7Next/q6Next's use below for the
@@ -235,7 +239,16 @@ module iwm
 		.ca2(ca2),
 		.SEL(SEL),
 		.lstrb(lstrb),
-		._enable(~diskEnableExt),
+		// HELD DISABLED WHILE A DCD IMAGE IS MOUNTED. The DCD takes over the
+		// readData/newByteReady/sense mux below, but writeReqExt and the PH3
+		// strobes would still reach this floppy: with an external floppy image
+		// inserted and its write-protect off, the DCD's command bytes would be
+		// written onto that floppy's track 0, and the ROM's chain walk (PH3 in
+		// state 7, SEL=0 = EJECT with ca2=1) would eject it at boot. floppy.v
+		// refuses a writeReq, clears its own write-busy and ignores lstrb while
+		// _enable is high, so this one term closes all three. With no DCD
+		// mounted it reduces to ~diskEnableExt exactly.
+		._enable(~(diskEnableExt & ~dcdPresent)),
 		.writeData(dataInLo), // see floppyInt's writeData comment above
 		.readData(readDataExt),
 		.advanceDriveHead(advanceDriveHead),
@@ -285,7 +298,12 @@ module iwm
 	// external drive slot" - and it keeps the far more important property that
 	// with NO DCD image mounted the external port is bit-identical to what it
 	// has always been, so nothing that works today can regress.
-	wire        dcdPresent;
+	//
+	// "Replaces" is enforced at floppyExt's _enable above, not only at the
+	// read mux below: while dcdPresent the external floppy never sees /ENBL2,
+	// so it takes no data-register writes and no PH3 strobes. _iwmBusy on the
+	// external branch is still the floppy's writeBusyExt, which floppy.v holds
+	// at 0 while disabled - i.e. "ready", which is what a DCD wants to see.
 	wire  [7:0] readDataDcd;
 	wire        newByteReadyDcd;
 

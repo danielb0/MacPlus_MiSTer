@@ -3603,6 +3603,43 @@ too, and fx68k was there to be read. `rtl/build_tag.v` in the working tree
 was stamped `072b90fe`; it is restored to the committed unstamped value, and
 must be re-stamped from HEAD before the compile.
 
+### Two more from the same review, both in this build
+
+**`PDC2`'s outbound byte count was four per byte.** Fix 2 above holds
+`newByteReady` from one `cen` to the next, which is four `clk` at 32 MHz, and
+`rtl/dbg_probes.sv` counted it as a level. The plan item said to check exactly
+this and it was not done. `sim/tb_dbg_probes.v` drove the bit as a one-clock
+pulse, so it could not see it -- the bench-gap shape once more. The deck now
+counts the rising edge, and the bench drives one four-clock pulse and asserts
+it counts once (67/67). The inbound event (`writeReq`), `rxValid` and `rxBad`
+are still single-clock and are unchanged. The bench's documented file list in
+`SCSI_UPGRADE_PLAN.md` needs `rtl/cd_audio.sv` added now that `scsi.v`
+instantiates it.
+
+**`floppyExt` is now held disabled while a DCD image is mounted** (item 4 of
+the fix plan, previously optional). `writeReqExt` still reached it, and
+`floppy.v` accepts a write whenever it has an inserted, unprotected disk -- so
+an external floppy image inserted after boot with the OSD write toggle on
+would have had the DCD's command bytes written onto its track 0. With the
+enable forced off, `floppy.v` refuses the write, clears its own busy, does not
+fire the PH3 eject the ROM's chain walk would otherwise trigger, and `_iwmBusy`
+on that branch reads ready as before. With no DCD mounted the expression
+reduces to `~diskEnableExt` exactly, so the external port stays bit-identical.
+`tb_iwm_dcd` asserts the enable both ways and that a PH3 pulse in state 7 with
+the DCD mounted ejects nothing. One existing check moved with it: a disabled
+floppy reads `$FF` in every state, so state 7 no longer separates the two
+sense sources and the "DCD's line, not the floppy's" check now uses state 5,
+which is the ROM's own discriminator. 33/33.
+
+The post-RESET /HSHK window and the phantom states after PH3 remain optional
+and undone; HD Diag's hard reset will still report `$24`.
+
+**Gates at this point:** `tb_iwm_dcd` 33/33, `tb_dbg_probes` 67/67,
+`tb_iwm_latch` PASS, `quartus_map --analyze_file` clean on `iwm.v` and
+`dbg_probes.sv`. The other DCD benches do not instantiate `iwm` and none of
+this touches what they cover. **Next step is the Quartus compile, gated, with
+`build_tag.v` stamped from HEAD first.**
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`

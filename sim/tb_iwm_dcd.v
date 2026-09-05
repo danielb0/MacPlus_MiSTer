@@ -603,6 +603,7 @@ module tb_iwm_dcd;
 		iwm_set(4'hB);   // extDrive
 		iwm_set(4'h9);   // mtrOn
 
+		check("no DCD: /ENBL2 reaches the external floppy", dut.floppyExt._enable === 1'b0);
 		idProbe;
 		check("no DCD: the status sense is still the external floppy's, exactly",
 		      (st7[7] === fx7) && (st6[7] === fx6) && (st5[7] === fx5));
@@ -622,10 +623,28 @@ module tb_iwm_dcd;
 		check("BUG 1: state 6 sense is 1",                            st6[7] === 1'b1);
 		check("BUG 1: state 5 sense is 0 (not a Superdrive)",         st5[7] === 1'b0);
 		// Not a restatement of the three above: it pins WHERE the bit came
-		// from. State 7 is the one where the two sources disagree, so a mux
-		// left on the floppy cannot pass it by luck.
+		// from. State 5 is the one where the two sources disagree - the DCD
+		// answers 0 and the floppy 1 (a disabled floppy reads $FF in every
+		// state, floppy.v's `_enable ? 8'hFF`, and an enabled one has
+		// SUPERDR = 1 there) - so a mux left on the floppy cannot pass it by
+		// luck. It is also the state the ROM itself discriminates on.
 		check("BUG 1: and that is the DCD's line, not the floppy's",
-		      (st7[7] === dc7) && (st7[7] !== fx7));
+		      (st5[7] === dc5) && (st5[7] !== fx5));
+
+		// The DCD REPLACES the external floppy, and that has to hold at the
+		// floppy's enable, not just at the read mux: writeReqExt and the PH3
+		// strobes still go to it. The ROM's chain walk pulses PH3 in state 7
+		// with SEL=0, which is {ca1,ca0,SEL} = 110 = EJECT with ca2=1 - so with
+		// the floppy still enabled, mounting an HD20 ejected the external
+		// floppy image at every boot.
+		check("with a DCD mounted the external floppy is held disabled",
+		      dut.floppyExt._enable === 1'b1);
+		setState(3'd7);
+		iwm_set(4'h7);   // ph3H
+		iwm_set(4'h6);   // ph3L
+		cpu_gap(8);
+		check("a PH3 strobe in state 7 with a DCD mounted ejects no floppy",
+		      diskEject[1] === 1'b0);
 
 		// ------------------------------------------------------------------
 		$display("");
