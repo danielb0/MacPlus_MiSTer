@@ -4377,10 +4377,33 @@ Plus does. Nothing in the RTL needs to change for this test.
 | model | HD20 | status |
 |---|---|---|
 | 128K | no -- the patch will not load in 128K of RAM; `HD Diag` still exercises the link | not applicable |
-| **512K** | **via the startup diskette** | **being tested 2026-09-05** |
+| **512K** | **via the startup diskette** | **CONFIRMED 2026-09-05, `f157fcc8`** |
 | 512Ke / Plus | from ROM | confirmed, `f157fcc8` |
 
-**RESULT:** not yet recorded.
+**RESULT: IT WORKED, first attempt, exactly as the period documentation
+describes it** (Daniel, 2026-09-05). The startup floppy boots, the `Hard Disk
+20` patch installs, the Mac ejects the floppy by itself and carries on from the
+hard disk.
+
+**What that closes, and it is more than one thing:**
+
+- **The DCD device is right against a SECOND, INDEPENDENT Mac-side driver.**
+  Everything before this was the Plus ROM's `SonyDCD`. The floppy `PTCH` is
+  Apple's other implementation of the same protocol, written for a machine with
+  no DCD ROM at all, and our drive satisfied it with no RTL change. That is much
+  stronger evidence that the device model is correct than any amount of further
+  soak testing against the one driver would have been.
+- **The Mac's own auto-eject works** -- a floppy ejected on the machine's
+  initiative rather than from the OSD, which nothing had exercised.
+- **A drive that is ready immediately is acceptable.** A real HD20 self-tests
+  for ~15 s; `dcd.v` has no spin-up delay, and the patch did not mind.
+- **The 512K gains a hard disk**, which makes it a materially more useful
+  machine in this core than the bare floppy-only model Phase 3 delivered.
+
+**Not captured:** the probe deck was not read during this run, so `PDC2`'s
+unanswered-command line is unrecorded for the floppy driver. Worth one `arm` /
+`take` next time a 512K is booted this way -- if that driver calls an opcode the
+Plus ROM never does, this is the only configuration that would show it.
 
 ### Do we need the firmware?
 
