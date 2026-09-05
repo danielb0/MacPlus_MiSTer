@@ -4508,6 +4508,107 @@ where a SCSI disk shows its driver identity
 fingerprint). If it appears there too, it is worth a line in the readme so users
 know what they are looking at.
 
+### Opcode $19: format is unsupported, and it fails GRACEFULLY. Found 2026-09-05
+
+**The probe earned its place on its first real outing.** Erase Disk on the
+mounted HD20, System 6 booted from floppy, build `f157fcc8`:
+
+```
+PDC2  UNANSWERED COMMAND: first opcode $19, 2 seen,
+      reason: not dispatched from C_IDLE (opcode not implemented, or a guard failed)
+PIFA  fetch# 68  PC=402422
+PDCD  present=1 selected=1 /HSHK=released  commands=3+  last op=$19
+PDCD  now: rxHs=ARMED  txState=TX_IDLE  cmdFSM=C_IDLE
+PDCD  sticky: bad-checksum=0  reply-abandoned-in-TX_WAIT=0
+```
+
+`PC=402422` is the decoded landmark `$402420`-`$402426`: **a driver call
+spinning on `ioResult`** ([[macplus-rom-pc-landmarks]]). The link is healthy in
+every respect -- checksum clean, nothing abandoned, /HSHK released, command FSM
+idle. `dcd.v` simply drops `$19`, so the reply never comes.
+
+**IT IS NOT A HANG, and this document said it was for about ten minutes.** The
+Mac's own timeout expires and it reports **"Initialization failed"** cleanly.
+The drive is never wedged and the disk is not touched -- it booted again
+afterwards. So the accurate statement is: **formatting an HD20 is unsupported
+and fails gracefully after a long pause.** NOT release-blocking. One line in the
+readme ("HD20 images must be pre-formatted") is a complete answer if we choose
+not to implement it.
+
+**THIS OVERTURNS THE DEMOTION OF [[macplus-dcd-unimplemented-opcodes]].** That
+note was demoted the previous evening because no caller of `$419CEC`/`$419CF0`
+exists anywhere in `$417D30`-`$41A800`. Hardware says a caller exists. The
+resolution is almost certainly that **the Disk Initialization Package is
+`PACK 2`, a resource loaded from the System file, not ROM code** -- so the
+caller is in RAM and no ROM disassembly could ever have found it. The plan had
+already written the lesson at its own line 1630: *"Negative searches over
+hand-written 68000 code are weak evidence."* We made the mistake anyway.
+
+To be fair to that review, it was right about what it was arguing: the hold-off
+WAS the System Error, and fixing it fixed that. `$19` is a SECOND, SEPARATE bug
+the same negative search wrongly buried. Two faults, not one.
+
+**WHAT $19 IS, from the drive's own firmware.** `342-0343-B.asm:122`'s command
+vector table indexes in HEX, and `$19`/`$1A` are its last two entries -- real
+commands, which the reassembler never named:
+
+```
+DW D_RdTrack   ; 17 Read Track
+DW D_WrTrack   ; 18 Write Track
+DW L17e4       ; 19
+DW L17ee       ; 1A
+```
+
+Both `Bank_Call` into a banked routine and then `jp Rd_Leave`, the READ exit
+path that assembles a status word. The bodies are in a bank the reassembly does
+not cover, so it cannot give the semantics -- the documented limit of that
+source. It does correct one thing: `Read Device ID` and `Controller Status` are
+`$04` and `$05`, NOT `$19`/`$1A` as an earlier note guessed.
+
+**NEITHER SPECIFICATION DOCUMENTS IT, and that is now checked rather than
+assumed.** Both 1.2a and the Mar85 protocol document scope themselves in their
+own words to "the formats for Status, MultiBlock Read, and MultiBlock Write".
+Searching both for initialize/format/verify/erase finds nothing Mac-facing.
+
+**BUT THE ROM SPECIFIES THE WIRE FORMAT COMPLETELY**, which is all we need:
+
+```
+419CE8  moveq  #$3,  d3        ; three adjacent entry points into one sender
+419CEC  moveq  #$1a, d3
+419CF0  moveq  #$19, d3
+419D08  andi.b #$3f, $19c(a1)  ; reply opcode must be ($19 & $3F) | $80 = $99
+419D0E  suba.l a4, a4          ; NO receive buffer
+419D16  moveq  #$0, d7         ; NO data expected
+419D18  move.w #$64,   $1c0(a1); timeouts 100 / 18000 -- MUCH longer than
+419D1E  move.w #$4650, $1c2(a1); Status's 10 / 10000
+419D24  cmpi.b #$3, $19c(a1)   ; only Status is special-cased (a4=buffer, d7=332)
+419D42  bsr.w  $4196ac         ; then the ordinary send / wait / validate path
+```
+
+So `$19` wants a **one-group, header-only reply with opcode `$99`** -- exactly
+the shape of our MultiBlock Write reply, with a different opcode. `$1A` is
+presumably the sibling at `$9A`. The long timeout corroborates a command that
+does physical work.
+
+**Three adjacent entry points is suggestive** -- the Disk Initialization Package
+has exactly three operations, DIFormat / DIVerify / DIZero -- but that is a
+guess and nothing should be built on it.
+
+**FIX SHAPE (not applied):** answer `$19`/`$1A` from `C_IDLE` with a header-only
+group, `replyOp = opcode | $80`, status byte, pads. A handful of lines in
+`dcd.v`'s dispatch, reusing `K_WRITE`'s reply shape.
+
+**WHAT THE ROM CANNOT TELL US, and how to settle it:** whether acknowledging
+`$19` with success -- doing nothing physical -- lets Initialize proceed to a
+valid HFS volume. An HFS initialise is mostly boot blocks, MDB, bitmap and
+catalog written through ORDINARY block writes, and the low-level `Format Track`
+is `$13`, a different command, so a bare acknowledgement may well be enough.
+That is behavioural, not documentary. **Answer it and try it: the reproducer
+takes seconds, the failure path has been watched to completion twice, and the
+test disk is a disposable backup (Daniel).** If it fails, THEN fetch TashTwenty
+and the Floppy Emu sources -- both authors solved this exact problem and a
+second implementation is the right arbiter.
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
@@ -4865,7 +4966,9 @@ conversion (`dc2dsk`, `releases/bin2dsk.sh`).
   Nothing further needs to be found or built before implementation starts.
 - Which models can boot it. HD20 boot support is believed to live in the 128K
   ROM, i.e. Plus and 512Ke; the 64K-ROM machines would need the HD20 system
-  software from floppy, if at all. Confirm from the ROM.
+  software from floppy, if at all. Confirm from the ROM. **ANSWERED: 512Ke and
+  Plus from ROM, 512K from the startup diskette, all three confirmed on hardware
+  2026-09-05; 128K not applicable.**
 
 **Shape.** A new protocol engine on the external floppy port -- different
 framing and command set, sharing only the physical lines -- plus a storage
