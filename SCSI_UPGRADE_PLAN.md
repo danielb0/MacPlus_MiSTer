@@ -2867,9 +2867,18 @@ pulse. Cosmetic, outside the path changed here, and recorded rather than fixed.
 disk first. The last two cover the instrument, not the core:
 
 ```
-C:/iverilog/bin/iverilog.exe -g2005-sv -o sim/out/tb_dbg_probes.vvp sim/tb_dbg_probes.v rtl/dbg_probes.sv rtl/ncr5380.sv rtl/scsi.v rtl/build_tag.v && C:/iverilog/bin/vvp.exe sim/out/tb_dbg_probes.vvp
+C:/iverilog/bin/iverilog.exe -g2005-sv -I rtl -o sim/out/tb_dbg_probes.vvp sim/tb_dbg_probes.v rtl/dbg_probes.sv rtl/ncr5380.sv rtl/scsi.v rtl/cd_audio.sv rtl/build_tag.v && C:/iverilog/bin/vvp.exe sim/out/tb_dbg_probes.vvp
 tclsh sim/test_read_probes.tcl
 ```
+
+`-I rtl` is not optional and neither is `rtl/cd_audio.sv`. `scsi.v`
+instantiates `cd_audio` inside `generate if (CDROM != 0)`, and
+`ncr5380.sv` passes `CDROM=1` for `i == CD_DEV`, which this bench sets to
+1 -- so the branch elaborates and `cd_audio.sv` pulls in `cd_vol_lut.vh`.
+Icarus resolves an include against the include path and the working
+directory, NOT against the directory of the file doing the including, so
+the flag is needed by any bench that reaches a `` `include `` -- including
+every DCD bench, via `rtl/dcd.v`'s `dcd_icon.vh`.
 
 ### Soak: System 7.1 installed from CD onto a 20 MB disk (2026-08-22)
 
