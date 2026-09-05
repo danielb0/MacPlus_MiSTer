@@ -4405,6 +4405,63 @@ unanswered-command line is unrecorded for the floppy driver. Worth one `arm` /
 `take` next time a 512K is booted this way -- if that driver calls an opcode the
 Plus ROM never does, this is the only configuration that would show it.
 
+### MacWrite's free-space figure and its crash: a 1984 application, not a core defect
+
+**Observed 2026-09-05 on `f157fcc8`.** On the ~32 MB HD20 volume, MacWrite
+reports **16377K remaining** where the Finder reports **31540K available**.
+Pointed at a large SCSI disk instead, **MacWrite itself crashes** -- the
+application, not the system, and the Mac carries on.
+
+**Daniel's reading, and it is the right one: an early application not coping
+with later system and hardware.** MacWrite 1.x/2.x predate HFS entirely -- MFS
+only, 400K floppies -- and are being asked about volumes eighty times larger
+than anything that existed when they were written.
+
+**Three independent supports, so this is not merely the comfortable answer:**
+
+1. **Only MacWrite is affected.** The Finder reads the SAME volume through the
+   SAME File Manager and gets it right. Nothing in the storage stack can give
+   one application a wrong answer and another a correct one: by the time either
+   asks, both are reading the same MDB fields.
+2. **It is monotonic in volume size.** ~32 MB gives a wrong number but works;
+   ~80 MB crashes. That is arithmetic degrading with magnitude. A device or
+   driver fault would be size-independent, or would fail at a BLOCK ADDRESS
+   rather than at a CAPACITY.
+3. **The two symptoms unify.** The 16 MB figure and the crash are plausibly one
+   overflow at two severities. One fault explaining both beats positing two.
+
+**The number itself kills the first hypothesis considered.** 16377K is 16.0 MB
+(16384K less 7K), not 20 MB (20480K). So it is not the HD20's size hard-coded
+into MacWrite, and therefore not anything the drive reported. Our capacity
+reporting is correct independently: `dcd_disk.v:116` gives
+`blockCount = img_size >> 9` and `dcd.v:317` `Num_Blocks = blockCount - 1`.
+
+**NO PRECISE ARITHMETIC IS OFFERED HERE ON PURPOSE.** Several plausible
+mechanisms land near 16377K -- allocation-block-size assumptions, signed versus
+unsigned free-block counts -- and none reproduces BOTH observed numbers exactly.
+Any one of them written up here would be a plausible-sounding story rather than
+an explanation, which is the habit this project has paid for repeatedly. If it
+ever matters, disassemble MacWrite; until then the class of fault is enough.
+
+**RULED OUT, and it was the one mechanism that could have linked the crash to
+Phase 5: shared HPS sector-buffer corruption.** Every consumer of the shared
+`sd_buff_wr` is gated on its own slot -- `dcd_disk.v:127`
+`hps_we = sd_buff_wr & sd_ack`, `ncr5380.sv:603` `sd_buff_wr & io_ack[i]`,
+`floppy_loader.v:114` `sd_buff_wr && sd_ack`. `ncr5380.sv:578` documents that
+exact corruption being fixed on 2026-08-26 after it destroyed two mounted
+volumes; the guard is hard-won and intact.
+
+**Also confirmed incidentally: the HD20 and SCSI disks mount SIMULTANEOUSLY on
+the Plus**, and MacWrite runs from the HD20. That co-existence had never been
+stated as tested.
+
+**Open, and cheap:** (a) which MacWrite version -- 1.x/2.x makes the story
+airtight, 4.5/5.x is HFS-aware and a crash there would be more surprising;
+(b) reproduce the SCSI crash with the HD20 UNMOUNTED, which exonerates the DCD
+outright. Worth having in hand because a forum tester will ask.
+
+**Not release-blocking, and nothing to fix.**
+
 ### Do we need the firmware?
 
 **No, not to build it.** `firmware/` holds the drive's Z8 code -- four 8K `.bin`
