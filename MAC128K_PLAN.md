@@ -2772,7 +2772,7 @@ implementations agree with the ROM and not with the paper.
 | 10 | `Num_BadBlocks` | word | 0 |
 | 12 | `Manuf_Reserved` | 52 | 0 |
 | 64 | `Icon` | 256 | 128 icon + 128 mask |
-| 320 | trailer | 12 | `\pMiSTer HD20`, where TashTwenty puts its credits |
+| 320 | trailer | 12 | `\pMiSTer HD20` -- the DRIVE NAME the Finder shows; see below |
 
 = 332. Header `<$83><blks><stat><pad><pad><pad>`, then 4 pad, then `CHK` in the
 **final slot of the final group**: 6+332+4+1 = 343 = 49*7.
@@ -4461,6 +4461,52 @@ airtight, 4.5/5.x is HFS-aware and a crash there would be more surprising;
 outright. Worth having in hand because a forum tester will ask.
 
 **Not release-blocking, and nothing to fix.**
+
+### The identity trailer is the DRIVE NAME, and it is user-visible
+
+**Photographed 2026-09-05, System 6 booted from floppy, Erase Disk on the
+mounted HD20:**
+
+```
+Completely erase disk named "3.2 32MB (P)" (MiSTer HD20)?
+```
+
+Volume name first, then the **12-byte trailer at identity offset 320** as the
+drive. That string is ours: `rtl/dcd.v`'s `trailerChar`, a Pascal string --
+length byte 11, then `MiSTer HD20`.
+
+**This falsifies two comments we wrote.** `dcd.v:122` called the field "a Pascal
+string; nothing reads it", and the function's own comment said "nothing in the
+ROM reads them". The second was true OF THE ROM and wrong about the machine: the
+system software reads it and shows it to the user. Both are corrected in place.
+The assumption came from the other implementations -- BMOW's Floppy Emu treats
+those bytes as frame padding and TashTwenty puts its credits there -- which is
+reasonable evidence that nothing *needs* them, and no evidence at all that
+nothing *displays* them. [[feedback-read-the-spec-for-historical-hardware]],
+pointed at our own prose again: the two are not the same claim.
+
+**IT ALSO CONFIRMS A GUESS, which is the better half of the finding.** The
+format was inferred, and the comment said so honestly: "A Pascal string is the
+shape 1.2a's neighbouring fields suggest, so that is what goes in." The Mac has
+now rendered it correctly -- right length byte, right offset, no leading garbage
+and no truncation. That is independent confirmation that the identity block is
+byte-accurate all the way out to offset 320, obtained from a field nobody
+expected to be read. A wrong length byte or a C string would have shown up as
+mangled text in that dialog.
+
+**CONSEQUENCE: it is a product name, not padding.** Whatever goes in those 12
+bytes is what users see in Erase Disk, and presumably anywhere else the system
+names the drive. `MiSTer HD20` is a good choice -- honest about what the device
+is, and it will not be mistaken for Apple's own -- but it is now a
+user-facing string and should be changed only deliberately. 11 characters is the
+maximum the length byte and the field allow.
+
+**Open, and cheap to answer next time a Get Info is to hand:** where else does
+it surface? Get Info's `Where:` field is the obvious candidate, since that is
+where a SCSI disk shows its driver identity
+([[macplus-test-disk-driver-incompat]] uses exactly that field as its `RM 1.0`
+fingerprint). If it appears there too, it is worth a line in the readme so users
+know what they are looking at.
 
 ### Do we need the firmware?
 

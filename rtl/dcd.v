@@ -119,7 +119,7 @@
       10     2  Num_BadBlocks      0
       12    52  Manuf_Reserved     0
       64   256  Icon               rtl/dcd_icon.vh
-     320    12  trailer            a Pascal string; nothing reads it
+     320    12  trailer            a Pascal string -- and it is USER-VISIBLE
 
    Device_Character is $F6 on a writable mount and $DE on a locked one: the
    fixed bits are Mountable + Readable + Ejectable + Icon_Included +
@@ -290,9 +290,21 @@ module dcd
 	// drive that trusts the count byte necessarily does.
 
 	// The 12-byte trailer at identity offset 320. BMOW's Floppy Emu treats
-	// these as frame padding and TashTwenty puts its credits there; nothing in
-	// the ROM reads them. A Pascal string is the shape 1.2a's neighbouring
-	// fields suggest, so that is what goes in.
+	// these as frame padding and TashTwenty puts its credits there, and this
+	// said "nothing in the ROM reads them" -- which was true of the ROM and
+	// WRONG about the machine.
+	//
+	// IT IS THE DRIVE NAME, AND IT IS USER-VISIBLE. Photographed 2026-09-05
+	// under System 6: the Finder's Erase Disk alert reads
+	//     Completely erase disk named "3.2 32MB (P)" (MiSTer HD20)?
+	// -- volume name first, then THIS string as the drive. So it is a product
+	// name shown to users, not padding, and changing it changes what they see.
+	//
+	// It also settles the format, which the next line used to hedge about: a
+	// Pascal string was inferred from the shape of 1.2a's neighbouring fields,
+	// and the Mac has now rendered it correctly, length byte and all, at this
+	// exact offset. That is independent confirmation the identity block is
+	// byte-accurate this far in -- from a field nothing was meant to read.
 	function [7:0] trailerChar;
 		input [3:0] i;
 		begin
