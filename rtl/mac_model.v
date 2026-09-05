@@ -57,6 +57,14 @@ module mac_model
 	output reg       machineType,   // 0 = Plus-like, 1 = SE
 	output reg [1:0] romSlot,       // which bootN.rom to read: MacPlus.sv:1050
 	output reg       drive800k,     // 1 = drive can use 800K double-sided media
+	// 1 = RAM is soldered down and `mem_big` is ignored for this model. It is
+	// the SIMM-socket fact that the RAM derivation above already depends on,
+	// published so the OSD can GREY OUT the Memory option instead of offering
+	// a choice the model cannot honour. Stated once, here, rather than as a
+	// second list of models in MacPlus.sv: two independently written encodings
+	// of one fact drift apart silently, which is the whole reason this module
+	// exists.
+	output reg       ramSoldered,
 	// 1 = this machine has a SCSI bus. Consumed by rtl/addrDecoder.v, which
 	// uses it TWICE, and the first use is the one that matters:
 	//
@@ -106,6 +114,7 @@ module mac_model
 				romSlot       = ROM_SLOT_SE;
 				drive800k     = 1'b1;
 				scsiPresent   = 1'b1;
+				ramSoldered   = 1'b0;                     // SIMM sockets
 			end
 
 			// The 512K and 128K run the 64K ROM in slot 2 (boot2.rom, the
@@ -130,6 +139,7 @@ module mac_model
 				romSlot       = ROM_SLOT_64K;
 				drive800k     = 1'b0;
 				scsiPresent   = 1'b0;
+				ramSoldered   = 1'b1;
 			end
 
 			MODEL_128K: begin
@@ -139,6 +149,7 @@ module mac_model
 				romSlot       = ROM_SLOT_64K;
 				drive800k     = 1'b0;
 				scsiPresent   = 1'b0;
+				ramSoldered   = 1'b1;
 			end
 
 			// A 512Ke is a Plus with 512K soldered in and no SCSI. It shipped
@@ -156,6 +167,7 @@ module mac_model
 				romSlot       = ROM_SLOT_PLUS;
 				drive800k     = 1'b1;
 				scsiPresent   = 1'b0;   // the whole point of the model
+				ramSoldered   = 1'b1;
 			end
 
 			// MODEL_PLUS, and every reserved encoding. Falling back to the
@@ -168,6 +180,7 @@ module mac_model
 				romSlot       = ROM_SLOT_PLUS;
 				drive800k     = 1'b1;
 				scsiPresent   = 1'b1;
+				ramSoldered   = 1'b0;                     // SIMM sockets
 			end
 		endcase
 	end

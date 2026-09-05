@@ -236,6 +236,73 @@ module tb_dcd_status;
 		end
 	endfunction
 
+	// ------------------------------------------------------------------
+	// An opcode with no implementation: the empty-block acknowledgement
+	// ------------------------------------------------------------------
+	// $419CEC / $419CF0 enter the ordinary sender with d3 = $1A / $19, and the
+	// path they share settles the whole shape without any drive-side document:
+	//
+	//   $419D08  andi.b #$3f,$19c(a1)   the reply opcode is (op & $3F) | $80
+	//   $419D0E  suba.l a4,a4           no receive buffer
+	//   $419D16  moveq  #$0,d7          no data expected -> macGroups(0) = 1
+	//
+	// so the reply is ONE group: six header bytes and the checksum. The
+	// opcode byte is COMPUTED here from that `andi.b`, never typed as $99, so
+	// agreeing with the RTL is evidence rather than a copy. Tashtari's logic
+	// analyser capture off a real HD20 (68kMLA, 2022-04-26) shows the same two
+	// exchanges, which is the independent confirmation.
+	task runAck;
+		input [7:0] op;
+		begin
+			sendCommand(op, 0);
+			setState(3'd2);
+			repeat (8) @(posedge clk); #1;
+			check("an unimplemented opcode is ANSWERED, not dropped",
+			      readData[7] === 1'b0);
+			// Without this guard a drive that does not answer hangs the bench
+			// in getByte instead of reporting, and the run ends in TIMEOUT
+			// with no score. Blank the group so the checks below cannot pass
+			// on stale bytes from the previous reply.
+			//
+			// FILLED WITH $01, NOT WITH X. X blanking made the checksum check
+			// pass VACUOUSLY -- it compares rsp[6] against the negated sum of
+			// the others, and X === X is TRUE, so the one assertion that is
+			// self-referential sailed through a drive that had answered
+			// nothing at all. $01 fails every check here deterministically:
+			// the sum is 7 rather than 0, the opcode is not $99, the block
+			// count is not zero and status bit 0 is set.
+			if (readData[7] !== 1'b0) begin
+				for (i = 0; i < 7; i = i + 1) rsp[i] = 8'h01;
+			end
+			else begin
+				setState(3'd3);
+				@(posedge clk); #1;
+				setState(3'd1);
+				getByte(sync);
+				check("the acknowledgement opens with the $AA sync", sync === 8'hAA);
+				recvGroups(macGroups(0));
+			end
+		end
+	endtask
+
+	// A command we DO implement and then refuse must keep its own failure
+	// path. The generic ack is bounded to opcodes with no implementation at
+	// all; if it ever widens to cover a write that arrived without its sector,
+	// the Mac would be told a write succeeded that never happened.
+	task expectNoReply;
+		input [7:0] op;
+		begin
+			sendCommand(op, 0);
+			setState(3'd2);
+			ok = 1'b1;
+			for (i = 0; i < 2000; i = i + 1) begin
+				@(posedge clk); #1;
+				if (readData[7] === 1'b0) ok = 1'b0;
+			end
+			check("a REFUSED command is still not answered", ok);
+		end
+	endtask
+
 	task runStatus;
 		begin
 			sendCommand(8'h03, STATUS_LEN);
@@ -453,16 +520,28 @@ module tb_dcd_status;
 		repeat (4) @(posedge clk);
 
 		// ---------------------------------------------------------------
-		// An unimplemented opcode must NOT be answered. The Mac sees its own
-		// handshake timeout, which is what a real drive does when it cannot
-		// reply - answering with a malformed frame would be worse.
+		// THIS TEST ASSERTED THE DEFECT BY NAME and is rewritten. It read:
+		//
+		//     "An unimplemented opcode must NOT be answered. The Mac sees its
+		//      own handshake timeout, which is what a real drive does when it
+		//      cannot reply - answering with a malformed frame would be worse."
+		//
+		// A real drive does no such thing, and the example it used was $04.
+		// TashTwenty answers an unknown command with an empty block, and that
+		// is what makes Erase Disk work; the false half of the old reasoning
+		// is "malformed", because a header-only group of the length the Mac
+		// asked for is perfectly well formed. Dropping $19 is what made
+		// Initialize fail. The positive property now lives in the
+		// "unimplemented opcodes are acknowledged" section at the end.
+		//
+		// What survives, and is the real property, is the BOUND: a command we
+		// DO implement and then refuse must still not be answered, or the Mac
+		// would be told a write happened that did not. $01 with no sector
+		// behind it is that case.
 		// ---------------------------------------------------------------
 		setState(3'd2);
 		repeat (4) @(posedge clk);
-		sendCommand(8'h04, 32'd0);         // Diagnostic, not implemented
-		setState(3'd2);
-		repeat (64) @(posedge clk); #1;
-		check("an unimplemented opcode is not answered", readData[7] === 1'b1);
+		expectNoReply(8'h01);              // Write, but no sector arrived
 
 		// ---------------------------------------------------------------
 		// THE WEDGE HD DIAG FOUND ON HARDWARE, as error $28.
@@ -586,6 +665,66 @@ module tb_dcd_status;
 		recvGroups(49);
 		setState(3'd3);
 		repeat (4) @(posedge clk);
+
+		// ------------------------------------------------------------------
+		// Unimplemented opcodes: $19 format, $1A verify-format, $04 diagnostic
+		// ------------------------------------------------------------------
+		// Erase Disk / Initialize sends $19 then $1A. Dropping them made the
+		// Mac sit through the long timeout $419D18 sets for these commands and
+		// report "Initialization failed".
+		$display("-- unimplemented opcodes are acknowledged --");
+
+		runAck(8'h19);
+		check("reply opcode is the ROM's (op & $3F) | $80, i.e. $99 for $19",
+		      rsp[0] === ((8'h19 & 8'h3F) | 8'h80));
+		check("the block-count byte is zero -- no blocks were transferred",
+		      rsp[1] === 8'h00);
+		check("the status byte reports success",   rsp[2] === 8'h00);
+		check("  ...and specifically bit 0, which is the ROM's Op_Failed test",
+		      rsp[2][0] === 1'b0);
+		check("three pads complete the six-byte header",
+		      rsp[3] === 8'h00 && rsp[4] === 8'h00 && rsp[5] === 8'h00);
+		sum = 0;
+		for (i = 0; i < 7; i = i + 1) sum = sum + rsp[i];
+		check("the acknowledgement checksums to zero including CHK",
+		      sum === 8'h00);
+		check("the checksum is the last slot of the one group",
+		      rsp[6] === (-(rsp[0] + rsp[1] + rsp[2] + rsp[3] + rsp[4] + rsp[5])));
+		setState(3'd3);
+		repeat (4) @(posedge clk); #1;
+		check("/HSHK released after the acknowledgement", readData[7] === 1'b1);
+
+		runAck(8'h1A);
+		check("reply opcode is $9A for $1A, by the same arithmetic",
+		      rsp[0] === ((8'h1A & 8'h3F) | 8'h80));
+		sum = 0;
+		for (i = 0; i < 7; i = i + 1) sum = sum + rsp[i];
+		check("the $1A acknowledgement also checksums to zero", sum === 8'h00);
+		setState(3'd3);
+		repeat (4) @(posedge clk); #1;
+
+		// $04 is Read Device ID on the drive's diagnostic side and is equally
+		// unimplemented here. It is tested to prove the answer is GENERIC and
+		// not two hand-written special cases for $19 and $1A.
+		runAck(8'h04);
+		check("the ack is generic: $04 is answered $84 too",
+		      rsp[0] === ((8'h04 & 8'h3F) | 8'h80));
+		sum = 0;
+		for (i = 0; i < 7; i = i + 1) sum = sum + rsp[i];
+		check("the $04 acknowledgement also checksums to zero", sum === 8'h00);
+		setState(3'd3);
+		repeat (4) @(posedge clk); #1;
+
+		// Status still decodes as Status, not as a generic ack: its reply is
+		// 49 groups and carries the identity block, which the ack shape cannot
+		// produce. Re-checked here because the dispatch order changed.
+		runStatus;
+		check("Status is still dispatched as Status, not swallowed by the ack",
+		      rsp[0] === 8'h83 && nDecoded === 343);
+		check("  ...and still carries the identity block",
+		      identity(2) === 8'h00 && identity(3) === 8'h01);
+		setState(3'd3);
+		repeat (4) @(posedge clk); #1;
 
 		$display("tb_dcd_status: %0d/%0d", pass, pass + fail);
 		if (fail != 0) $display("FAILED");

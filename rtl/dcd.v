@@ -339,26 +339,27 @@ module dcd
 	wire writeProtected = ~WRITE_IMPLEMENTED | readonly;
 	wire [7:0] deviceChar = 8'hD6 | (writeProtected ? 8'h08 : 8'h20);
 
-	// The three replies share a six-byte header and differ after it. The kind
+	// The four replies share a six-byte header and differ after it. The kind
 	// is latched when the command is decoded rather than derived from the
 	// opcode register, because a read answers N times and the opcode is long
 	// gone by the last of them.
-	localparam K_STATUS = 2'd0, K_READ = 2'd1, K_WRITE = 2'd2;
+	localparam K_STATUS = 2'd0, K_READ = 2'd1, K_WRITE = 2'd2, K_ACK = 2'd3;
 	reg [1:0] replyKind;
 	reg [7:0] replyOp;
 	reg [7:0] replyStat;
 	reg [7:0] blksLeft;
 
 	always @(*) begin
-		// ---- the six-byte header, common to all three ----
+		// ---- the six-byte header, common to all four ----
 		if      (txAddr == 10'd0)  txData = replyOp;
-		else if (txAddr == 10'd1)  txData = (replyKind == K_STATUS) ? 8'h00
-		                                                            : blksLeft;
+		else if (txAddr == 10'd1)  txData = (replyKind == K_READ ||
+		                                     replyKind == K_WRITE) ? blksLeft
+		                                                           : 8'h00;
 		else if (txAddr == 10'd2)  txData = replyStat;
 		else if (txAddr <  10'd6)  txData = 8'h00;  // three pads complete the header
 
-		// ---- MultiBlock Write: the header IS the reply, one group ----
-		else if (replyKind == K_WRITE) txData = 8'h00;
+		// ---- MultiBlock Write, and the generic ack: the header IS the reply ----
+		else if (replyKind == K_WRITE || replyKind == K_ACK) txData = 8'h00;
 
 		// ---- MultiBlock Read: 20 tag bytes then the sector ----
 		else if (replyKind == K_READ)
@@ -388,10 +389,40 @@ module dcd
 	// Dispatch
 	// ------------------------------------------------------------------
 	// A command arrives with its checksum already verified by the link layer.
-	// A command we do not implement is dropped rather than answered, which the
-	// Mac sees as its $11/$13 handshake timeout - the same thing a real drive
-	// does when it cannot reply. Answering with a malformed frame would be
-	// worse than not answering.
+	//
+	// AN OPCODE WE DO NOT IMPLEMENT IS ANSWERED WITH AN EMPTY BLOCK, not
+	// dropped. The Mac states an expected reply length with every command, so
+	// a header-only group of that length is a well-formed answer to anything,
+	// and it is what TashTwenty does: "respond to commands it doesn't know
+	// with an empty block, which seems to frequently get interpreted as 'yup,
+	// yeah, did the thing you said, everything's fine'. It certainly works for
+	// Erase Disk, anyway." (Tashtari, 68kMLA "Deciphering DCD (Hard Disk 20)",
+	// 2022-04-26 -- the author of the second implementation, posting a logic
+	// analyser capture off a real HD20.)
+	//
+	// That capture is exactly this case, and it fixes the reply opcode:
+	//
+	//     Mac: 19 01 00 00 00 00      Mac: 1A 00 00 00 00 00
+	//     DCD: 99 00 00 00 00 00      DCD: 9A 00 00 00 00 8A
+	//
+	// $19 is format and $1A is verify-format, the two operations behind
+	// Initialize / Erase Disk. Neither is in the 1.2a diagnostic list or in
+	// the Dec-84 Nisha firmware spec -- they postdate both -- but the Plus ROM
+	// specifies the wire format completely at $419D08, whose
+	// `andi.b #$3f,$19c(a1)` makes the expected reply opcode (op & $3F) | $80.
+	// {2'b10, cmdOp} is that byte, and it agrees with the capture on both
+	// commands. Before this, dropping $19 made Erase Disk sit through the
+	// Mac's (deliberately long, $419D18) timeout and report "Initialization
+	// failed"; the drive was never wedged and the disk was never touched.
+	//
+	// THE LIE IS BOUNDED ON PURPOSE. Saying "fine" to work we did not do is
+	// harmless for $19/$1A specifically -- there are no sector boundaries to
+	// lay down on an image file -- and it must not spread to anything that
+	// ought to report a genuine failure. So the ack covers ONLY opcodes we do
+	// not implement at all. A command we DO implement and then refuse still
+	// takes its own path: a write that did not bring a full sector, or a
+	// continued write with nothing to continue from, is still not answered
+	// here, and the refused-write path still reports $81.
 	//
 	// A reply is exactly as long as the Mac asked for. txLen excludes the
 	// checksum, so groups*7-1 puts CHK in the final slot of the final group.
@@ -411,6 +442,11 @@ module dcd
 	wire  [5:0] cmdOp     = opcode[5:0];
 	wire        cmdCont   = opcode[6];
 	wire        cmdIsWr   = (cmdOp == 6'h01) || (cmdOp == 6'h02);
+
+	// Opcodes with a real implementation below: Read, the two Writes, Status.
+	// Tested on cmdOp rather than the whole byte so a continued form ($40/$41/
+	// $42) counts as known too and cannot fall through to the generic ack.
+	wire        cmdKnown  = (cmdOp == 6'h00) || cmdIsWr || (cmdOp == 6'h03);
 
 	// A write command must have brought a whole sector with it. Without this
 	// a truncated or malformed frame would commit whatever the buffer happened
@@ -503,6 +539,20 @@ module dcd
 						txLen     <= askedLen;
 						txArm     <= 1'b1;
 						cstate    <= C_FETCH;
+					end
+					// Anything with no implementation at all: header-only
+					// group of the length the Mac asked for, success status,
+					// no disk access. See the note above the FSM for why this
+					// is bounded to unknown opcodes and cannot swallow a
+					// refused write.
+					else if (!cmdKnown) begin
+						replyKind <= K_ACK;
+						replyOp   <= {2'b10, cmdOp};
+						replyStat <= 8'h00;
+						txLen     <= askedLen;
+						txArm     <= 1'b1;
+						lastLba_valid <= 1'b0;
+						cstate    <= C_SEND;
 					end
 				end
 

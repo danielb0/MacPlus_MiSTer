@@ -1,4 +1,4 @@
-// GENERATED — do not edit by hand. See docs/cd_volume_law_2026-07-30.md.
+// GENERATED -- do not edit by hand.
 // CD-DA volume: gain = (vol/255)^5 in Q15 (32768 = unity).
 //
 // Real Apple CD-ROM hardware applies the page-0x0E volume byte as roughly
@@ -10,9 +10,31 @@
 // 5.20, 4.91, 4.92, 4.76 -> exponent 5.
 //
 // Q15 keeps vol=255 EXACTLY unity (32768>>15 = 1.0) so full volume is a
-// bit-perfect passthrough, and vol=0 exactly mute. A case statement (not an
-// array) guarantees Quartus builds this as logic, never an M10K — RAM blocks
-// are the scarce resource in this design.
+// bit-perfect passthrough, and vol=0 exactly mute.
+//
+// READ THIS TABLE INTO A REGISTER, NEVER STRAIGHT INTO A WIRE. A combinational
+// output cannot be a memory read, so it forces the whole 256-way 16-bit mux
+// into logic -- and it did, twice, once per channel. Measured 2026-08-30 with
+// standalone quartus_map + quartus_fit on this device and version, two
+// harnesses around this IDENTICAL table differing only in that:
+//
+//     form                          ALMs   RAM blocks   mem bits
+//     combinational (what shipped)   109            0          0
+//     registered (same table)          5            2      8,192
+//
+// Given a registered output Quartus 17.0 infers the ROM by itself
+// (altsyncram). rtl/cd_audio.sv does that; do the same at any new point of
+// use. The case statement was never the cost -- the missing register was.
+//
+// The justification that used to stand here -- "a case guarantees Quartus
+// builds this as logic, never an M10K -- RAM blocks are the scarce resource
+// in this design" -- was wrong twice over. It is not what a case guarantees,
+// and RAM blocks are not scarce in THIS core: 133/553 blocks (24%) and
+// 931,781/5,662,720 memory bits (16%), measured in
+// output_files/MacPlus.fit.summary for the f157fcc8 build, 2026-09-05. The
+// claim arrived with this file from MacLC, where the device really does sit
+// at 513/553 (93%). Trading 104 ALMs for 2 of the 420 free blocks is the
+// right way round here.
 function [15:0] cd_vol_gain;
 	input [7:0] v;
 	begin

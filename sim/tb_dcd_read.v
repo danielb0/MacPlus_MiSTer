@@ -241,6 +241,45 @@ module tb_dcd_read;
 		end
 	endtask
 
+	// The same frame with an arbitrary opcode and a one-group reply, which is
+	// what $419CE8-$419D16 sends for the commands with no data: `moveq #0,d7`
+	// makes macGroups(0) = 1.
+	task sendOpcode;
+		input [7:0] op;
+		begin
+			cmd[0] = op;
+			for (i = 1; i < 6; i = i + 1) cmd[i] = 8'h00;
+			sum = 0;
+			for (i = 0; i < 6; i = i + 1) sum = sum + cmd[i];
+			cmd[6] = -sum;
+			setState(3'd2);
+			@(posedge clk); #1;
+			setState(3'd3);
+			hsWait = 0;
+			while (readData[7] !== 1'b0 && hsWait < 8000) begin
+				@(posedge clk); hsWait = hsWait + 1;
+			end
+			check("the drive acknowledged the command with /HSHK",
+			      readData[7] === 1'b0);
+			setState(3'd1);
+			macByte(8'hAA);
+			macByte(8'h80 | macGroups(0));          // command groups
+			macByte(8'h80 | macGroups(0));          // reply groups: one
+			macByte(8'h80 |  cmd[0][0]        | (cmd[1][0] << 1) | (cmd[2][0] << 2) |
+			                (cmd[3][0] << 3)  | (cmd[4][0] << 4) | (cmd[5][0] << 5) |
+			                (cmd[6][0] << 6));
+			for (i = 0; i < 7; i = i + 1) macByte(8'h80 | (cmd[i] >> 1));
+			setState(3'd3);
+			hsWait = 0;
+			while (readData[7] !== 1'b1 && hsWait < 8000) begin
+				@(posedge clk); hsWait = hsWait + 1;
+			end
+			check("the drive released /HSHK at the end of the command",
+			      readData[7] === 1'b1);
+			setState(3'd2);
+		end
+	endtask
+
 	// Wait for the drive to ask for the bus, then walk 2 -> 3 -> 1 and decode
 	// `n` groups. Returns immediately after the last byte of the frame.
 	task recvFrame;
@@ -340,6 +379,33 @@ module tb_dcd_read;
 		check("the fetches walked consecutive blocks",
 		      (fetched[0] === 32'd70000) && (fetched[1] === 32'd70001) &&
 		      (fetched[2] === 32'd70002));
+
+		// ---------------------------------------------------------------
+		// An acknowledgement's block byte must be zero BY CONSTRUCTION, and
+		// this is the only place that can prove it. The multiblock read above
+		// leaves the drive's block counter at 1, so a reply that echoed that
+		// counter would put 1 here. In tb_dcd_status the counter is 0 at this
+		// point in the run, so the same check passes there whether the ack
+		// excludes it or not -- a mutation sweep caught exactly that, the
+		// mutant "header byte 1 = blksLeft for an ack" surviving with zero
+		// failures. This test is what kills it.
+		// ---------------------------------------------------------------
+		setState(3'd2);
+		repeat (4) @(posedge clk);
+		fetches = 0;
+		sendOpcode(8'h19);                  // format: no implementation
+		recvFrame(1);
+		check("an unimplemented opcode is acknowledged in one group",
+		      nDecoded === 7);
+		check("  ...with the ROM's (op & $3F) | $80 reply opcode",
+		      rsp[0] === ((8'h19 & 8'h3F) | 8'h80));
+		check("  ...and a block count of ZERO, not the read's leftover 1",
+		      rsp[1] === 8'h00);
+		check("  ...reporting success",  rsp[2] === 8'h00);
+		sum = 0;
+		for (i = 0; i < 7; i = i + 1) sum = sum + rsp[i];
+		check("  ...and it checksums to zero", sum === 8'h00);
+		check("  ...having touched no sector", fetches === 0);
 
 		// ---------------------------------------------------------------
 		// A block past the end is answered with an error frame, not dropped

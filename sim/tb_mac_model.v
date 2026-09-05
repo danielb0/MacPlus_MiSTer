@@ -41,6 +41,7 @@ module tb_mac_model;
 	wire [1:0] romSlot;
 	wire       drive800k;
 	wire       scsiPresent;
+	wire       ramSoldered;
 
 	integer tests = 0;
 	integer fails = 0;
@@ -87,10 +88,13 @@ module tb_mac_model;
 		.machineType   ( machineType   ),
 		.romSlot       ( romSlot       ),
 		.drive800k     ( drive800k     ),
-		.scsiPresent   ( scsiPresent   )
+		.scsiPresent   ( scsiPresent   ),
+		.ramSoldered   ( ramSoldered   )
 	);
 
 	integer m;
+	reg [1:0] ramLo, ramHi;
+	reg       soldered;
 
 	initial begin
 		$display("");
@@ -188,6 +192,35 @@ module tb_mac_model;
 		model = 3'd2; #1; ok("512K has no SCSI",    scsiPresent === 1'b0);
 		model = 3'd3; #1; ok("128K has no SCSI",    scsiPresent === 1'b0);
 		model = 3'd4; #1; ok("512Ke has no SCSI",   scsiPresent === 1'b0);
+
+		// ---- 11. ramSoldered, and the drift check that gives it its value --
+		// This output exists so MacPlus.sv can grey out the Memory item. Its
+		// row could be typed wrong in exactly the way a second table in
+		// MacPlus.sv could, so it is NOT tested against a list of models --
+		// it is tested against the BEHAVIOUR it claims to describe. For every
+		// model, ramSoldered must be true if and only if configRAMSize
+		// actually ignores mem_big. Sweeping the whole encoding space means a
+		// model added later cannot get one of the two right and the other
+		// wrong: whichever is edited alone, this fails.
+		for (m = 0; m < 8; m = m + 1) begin
+			model = m[2:0];
+			mem_big = 1'b0; #1; ramLo = configRAMSize; soldered = ramSoldered;
+			mem_big = 1'b1; #1; ramHi = configRAMSize;
+			ok("ramSoldered iff mem_big changes nothing",
+			   soldered === ((ramLo === ramHi) ? 1'b1 : 1'b0));
+			ok("  ...and it does not depend on mem_big itself",
+			   ramSoldered === soldered);
+		end
+
+		// The rows themselves, so a reader can see the intent as well as the
+		// invariant. The Plus and SE had SIMM sockets; the other three had
+		// their RAM soldered down and were not expandable.
+		mem_big = 1'b0;
+		model = 3'd0; #1; ok("Plus has sockets",   ramSoldered === 1'b0);
+		model = 3'd1; #1; ok("SE has sockets",     ramSoldered === 1'b0);
+		model = 3'd2; #1; ok("512K is soldered",   ramSoldered === 1'b1);
+		model = 3'd3; #1; ok("128K is soldered",   ramSoldered === 1'b1);
+		model = 3'd4; #1; ok("512Ke is soldered",  ramSoldered === 1'b1);
 
 		$display("");
 		$display("MAC-MODEL: %0d of %0d failing", fails, tests);

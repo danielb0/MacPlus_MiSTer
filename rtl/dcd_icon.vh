@@ -52,12 +52,20 @@
 // The mask is the solid silhouette of that box, which is what lets the Finder
 // drag and highlight the icon as one shape.
 //
-// A CASE STATEMENT, AND BY ROW RATHER THAN BY BYTE, for the same reason
-// rtl/cd_vol_lut.vh gives: a case guarantees Quartus builds this as logic and
-// never as an M10K, and RAM blocks are the scarce resource in this design. By
-// row costs 32 entries instead of 256, and only five of the 32 image rows and
-// two of the 32 mask rows are distinct, so the minimiser collapses nearly all
-// of it.
+// A CASE STATEMENT, AND BY ROW RATHER THAN BY BYTE. The reason once given here
+// cited rtl/cd_vol_lut.vh -- "a case guarantees Quartus builds this as logic
+// and never as an M10K, and RAM blocks are the scarce resource in this design"
+// -- and BOTH HALVES OF THAT WERE WRONG. A case guarantees no such thing: what
+// forces a table into logic is reading it combinationally, and cd_vol_lut cost
+// 109 ALMs for exactly that reason until its output was registered. And RAM
+// blocks are not scarce in this core -- 133/553 (24%), measured in
+// output_files/MacPlus.fit.summary for the f157fcc8 build, 2026-09-05; the
+// 93% figure that sentence rested on is MacLC's device, not ours.
+//
+// By row is still right, but on its own arithmetic: 32 entries instead of 256,
+// and only five of the 32 image rows and two of the 32 mask rows are distinct,
+// so the minimiser collapses nearly all of it and there is no mux tree left to
+// pay for. That is a measurement of THIS table, not an inherited slogan.
 
 function [31:0] dcd_icon_row;
 	input [4:0] row;

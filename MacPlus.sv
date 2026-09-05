@@ -66,8 +66,8 @@ localparam CONF_STR = {
 	"S2,DSK,Mount Pri Floppy;",
 	"S3,DSK,Mount Sec Floppy;",
 	"-;",
-	"SC0,IMGVHD,Mount SCSI-6;",
-	"SC1,IMGVHD,Mount SCSI-5;",
+	"D0SC0,IMGVHD,Mount SCSI-6;",
+	"D0SC1,IMGVHD,Mount SCSI-5;",
 	"-;",
 	// CD-ROM (SCSI ID 3). CUE/BIN/CHD/TOAST are translated host-side by
 	// Main_MiSTer's support/mac into a flat 2048-byte-sector view of the data
@@ -77,9 +77,18 @@ localparam CONF_STR = {
 	// Phase 3B/3C (SCSI_UPGRADE_PLAN.md Phase 3A).
 	// Extension list is MacLC.sv:81 verbatim - the host-side translation is
 	// keyed off the file, not the core, so the lists must agree.
-	// No conditional-visibility prefix here - MacLC_MiSTer declares its
-	// equivalent slot plainly, and an `h` prefix hid the item outright.
-	"SC4,ISOTO*CUEBINCHD,Mount CD-ROM;",
+	// The D0 prefix here and on SC0/SC1/OI/OFG GREYS these items out on a
+	// model with no SCSI bus, from status_menumask bit 0 below.
+	//
+	// The comment that used to sit here said an `h` prefix "hid the item
+	// outright", offered as a reason not to use a prefix at all. The
+	// convention was never wrong -- lowercase `h` hides when the mask bit
+	// is ZERO, and nothing drove status_menumask, so every bit was zero
+	// and every `h` item vanished. The mask was simply unconnected.
+	// Main_MiSTer menu.cpp:1958-1968: uppercase D greys when the bit is
+	// SET, lowercase d when it is clear, and prefixes chain two chars at
+	// a time.
+	"D0SC4,ISOTO*CUEBINCHD,Mount CD-ROM;",
 	// Apple HD20 on the external floppy port (MAC128K_PLAN.md Phase 5). A hard
 	// disk image like the SCSI slots above, so it takes their SC form and their
 	// extension list rather than the floppies' S/DSK.
@@ -89,13 +98,13 @@ localparam CONF_STR = {
 	// machines: the 64K ROMs carry no DCD engine at all, so on a 128K or 512K
 	// the slot mounts and nothing ever talks to it.
 	"SC5,IMGVHD,Mount HD20;",
-	"OI,CD-ROM Drive,Enabled,Disabled;",
+	"D0OI,CD-ROM Drive,Enabled,Disabled;",
 	// Index 0 MUST be Full: `status` defaults to zero and unity is the wanted
 	// default. Independent of the Mac's volume control on purpose -- on real
 	// hardware the Mac's setting had no effect on the drive, which had its own
 	// knob; this is the honest equivalent of that knob, and without it there is
 	// no way to balance the two sources at all. Bits 15-16 (F,G) were free.
-	"OFG,CD Volume,Full,3/4,1/2,Off;",
+	"D0OFG,CD Volume,Full,3/4,1/2,Off;",
 	"-;",
 	"O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
@@ -113,7 +122,7 @@ localparam CONF_STR = {
 	"O5,Speed,8MHz,16MHz;",
 	"O6,Floppy Write,Off,On;",
 	"ODE,CPU,68000,68010,68020;",
-	"O4,Memory,1MB,4MB;",
+	"D1O4,Memory,1MB,4MB;",
 	"-;",
 	//"OA,Serial,Off,On;",
 	//"-;",
@@ -125,6 +134,11 @@ localparam CONF_STR = {
 };
 
 wire status_turbo = status[5];
+
+// Which OSD items are unavailable on the selected model. Declared here
+// because hps_io below consumes it; it is DRIVEN further down, beside the
+// mac_model instance it is derived from.
+wire [15:0] status_menumask;
 
 ////////////////////   CLOCKS   ///////////////////
 
@@ -258,6 +272,7 @@ hps_io #(.CONF_STR(CONF_STR), .VDNUM(VDNUM), .WIDE(1)) hps_io
 
 	.buttons(buttons),
 	.status(status),
+	.status_menumask(status_menumask),
 
 	.sd_lba(sd_lba),
 	.sd_rd(sd_rd),
@@ -390,8 +405,47 @@ mac_model mac_model
 	.configRAMSize ( configRAMSize ),
 	.machineType   ( machineType   ),
 	.romSlot       ( romSlot       ),
-	.drive800k     ( drive800k     )
+	.drive800k     ( drive800k     ),
+	.ramSoldered   (               )
 );
+
+// A 128K or 512K offers two SCSI slots, a CD-ROM slot, a CD volume and a
+// Memory option, and every one of them is inert on that machine. Grey them
+// out rather than letting the user pick something the core will ignore.
+//
+// A SECOND mac_model INSTANCE, and deliberately so. The mask is derived
+// from the model table rather than from a second list of models written
+// here: two independently written encodings of one fact drift apart
+// silently, which is the whole reason rtl/mac_model.v exists. It is a
+// five-entry combinational case and costs a handful of LEs.
+//
+// It is fed from the LIVE status bits, NOT from the latched status_model
+// the hardware straps use. Greying is a menu affordance, not a strap: it
+// should follow what the user just picked, not wait for Reset & Apply.
+// mem_big is tied off because nothing the mask needs depends on it --
+// ramSoldered is a property of the model, which sim/tb_mac_model.v checks
+// by sweeping mem_big against configRAMSize for every encoding.
+//
+// Cosmetic on purpose: greying prevents a NEW mistake, it does not unmount
+// an image a saved config already carries. The core ignores it either way.
+wire menu_scsiPresent;
+wire menu_ramSoldered;
+
+mac_model mac_model_menu
+(
+	.model         ( status[3:1]       ),
+	.mem_big       ( 1'b0              ),
+	.configROMSize (                   ),
+	.scsiPresent   ( menu_scsiPresent  ),
+	.configRAMSize (                   ),
+	.machineType   (                   ),
+	.romSlot       (                   ),
+	.drive800k     (                   ),
+	.ramSoldered   ( menu_ramSoldered  )
+);
+
+// Bit set = item unavailable, which is what uppercase D reads as.
+assign status_menumask = {14'd0, menu_ramSoldered, ~menu_scsiPresent};
 			  
 //
 // Serial Ports

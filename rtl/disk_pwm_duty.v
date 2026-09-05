@@ -34,8 +34,16 @@ module disk_pwm_duty
 );
 
 	// Conversion table, per the 400KB drive specification (values as used by
-	// MAME's sonydriv). Written as a case so it synthesises to logic, never an
-	// M10K -- RAM blocks are the scarce resource in this design.
+	// MAME's sonydriv). The justification once written here -- "a case so it
+	// synthesises to logic, never an M10K -- RAM blocks are the scarce resource
+	// in this design" -- was quoted from rtl/cd_vol_lut.vh and is not true of
+	// this core: 133/553 blocks (24%), measured in
+	// output_files/MacPlus.fit.summary for the f157fcc8 build, 2026-09-05.
+	// It does not matter here either way. This table is 64 entries of 6 bits
+	// and it already feeds a REGISTER through the deliberate three-stage
+	// pipeline below, which exists because the combinational form missed setup
+	// by 3.945 ns -- so it is registered for TIMING, and the shape it
+	// synthesises to is the fitter's business, not a claim to defend.
 	function [5:0] pwm_convert(input [5:0] v);
 		case (v)
 		6'd0 : pwm_convert = 6'd0;

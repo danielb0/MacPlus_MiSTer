@@ -268,7 +268,7 @@ for {set n 0} {$n < $samples} {incr n} {
 		if {$d_uncnt == 0} {
 			puts "  PDC2  unanswered commands: none -- every command decoded was dispatched"
 		} else {
-			set why [lindex {"?" "not dispatched from C_IDLE (opcode not implemented, or a guard failed)" \
+			set why [lindex {"?" "not dispatched from C_IDLE (a guard refused it -- e.g. a write with no sector behind it; an UNKNOWN opcode is acknowledged, not dropped, so it cannot land here)" \
 			                 "arrived while the command layer was still busy" "?"} $d_unwhy]
 			puts [format "  PDC2  UNANSWERED COMMAND: first opcode \$%02X, %s seen, reason: %s" \
 			             $d_unop [expr {$d_uncnt >= 3 ? "3+" : $d_uncnt}] $why]

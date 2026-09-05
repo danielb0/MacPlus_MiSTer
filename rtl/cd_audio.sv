@@ -1352,9 +1352,18 @@ wire signed [15:0] ap_src_l = (ap_ch0 == 8'h01) ? sum_l[15:0] :
                               (ap_ch0 == 8'h02) ? sum_r[15:0] : 16'sd0;
 wire signed [15:0] ap_src_r = (ap_ch1 == 8'h02) ? sum_r[15:0] :
                               (ap_ch1 == 8'h01) ? sum_l[15:0] : 16'sd0;
+//
+// The gain is REGISTERED, not read into a wire, and that register is the whole
+// reason the table is cheap: combinationally it cost 109 ALMs and 0 memory
+// bits, registered it costs 5 ALMs and 2 inferred M10K blocks (measured
+// 2026-08-30; the numbers and the method are in rtl/cd_vol_lut.vh). The added
+// cycle is free -- ap_vol0/1 only move on a MODE SELECT of page 0x0E.
 `include "cd_vol_lut.vh"
-wire [15:0] ap_gain_l = cd_vol_gain(ap_vol0);
-wire [15:0] ap_gain_r = cd_vol_gain(ap_vol1);
+reg [15:0] ap_gain_l, ap_gain_r;
+always @(posedge clk) begin
+	ap_gain_l <= cd_vol_gain(ap_vol0);
+	ap_gain_r <= cd_vol_gain(ap_vol1);
+end
 wire signed [31:0] ap_scl_l = ap_src_l * $signed({1'b0, ap_gain_l});
 wire signed [31:0] ap_scl_r = ap_src_r * $signed({1'b0, ap_gain_r});
 reg  [2:0] odiv;
@@ -1415,12 +1424,17 @@ endmodule
 // MLAB variant for the small (2 Kbit) planes. Same contract as cd_sdp; the
 // forced-M10K recipe above exists because AUTO turned these into ~2000
 // registers each — MLAB is the third option that recipe predates: ALM-based
-// distributed RAM, zero M10K blocks. Motivation (2026-08-03): the device is
-// at 513/553 M10K blocks (93%) while only 71% of memory BITS are used —
-// M10K placement pressure is the per-seed fit-marginality driver, and the
-// twelve 256x8 planes burned 12 whole blocks at 20% fill. Their ping-pong
-// usage never reads a plane being written (write one half, read the other),
-// so MLAB read-during-write semantics are safe with no_rw_check.
+// distributed RAM, zero M10K blocks. Motivation (2026-08-03), AND THE NUMBER
+// IN IT IS MacLC's, NOT THIS CORE's: there the device sat at 513/553 M10K
+// blocks (93%) while only 71% of memory BITS were used, so M10K placement
+// pressure was the per-seed fit-marginality driver and the twelve 256x8
+// planes burned 12 whole blocks at 20% fill. THIS core fits at 133/553 (24%)
+// and 16% of bits (output_files/MacPlus.fit.summary, f157fcc8, 2026-09-05),
+// so that pressure does not exist here and MLAB is no longer load-bearing;
+// it is kept because it is hardware-proven and costs nothing to keep, not
+// because blocks are scarce. Their ping-pong usage never reads a plane being
+// written (write one half, read the other), so MLAB read-during-write
+// semantics are safe with no_rw_check.
 module cd_sdp_mlab #(parameter DW = 16, AW = 12)
 (
 	input           clock,

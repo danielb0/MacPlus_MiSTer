@@ -4632,9 +4632,13 @@ does physical work.
 has exactly three operations, DIFormat / DIVerify / DIZero -- but that is a
 guess and nothing should be built on it.
 
-**FIX SHAPE (not applied):** answer `$19`/`$1A` from `C_IDLE` with a header-only
-group, `replyOp = opcode | $80`, status byte, pads. A handful of lines in
-`dcd.v`'s dispatch, reusing `K_WRITE`'s reply shape.
+**FIX SHAPE -- APPLIED 2026-09-05, benches green, NOT YET COMPILED.** Built as
+the GENERIC answer the 68kMLA section argues for, not as two special cases: a
+new `K_ACK` reply kind (the fourth encoding of the 2-bit `replyKind` was free)
+answers any opcode with no implementation at all from `C_IDLE` with a
+header-only group of `askedLen`, `replyOp = {2'b10, cmdOp}`, status `$00`, and
+no disk access. See the section below for what it cost and what nearly went
+wrong in the bench.
 
 **WHAT THE ROM CANNOT TELL US -- ANSWERED 2026-09-05 by TashTwenty's author, see
 the 68kMLA section below: an empty acknowledgement IS enough, and Erase Disk
@@ -5399,21 +5403,60 @@ reads as fussing applies to questions as well as to patches.
 
 ### Order of work
 
-1. `cd_vol_lut` output register -- six lines, measured, known win.
-2. The four false justifications -- comments only, no RTL.
-3. `cd_vol_lut.vh` encoding, taken from `master`'s copy.
+1. `cd_vol_lut` output register -- six lines, measured, known win. **DONE.**
+2. The four false justifications -- comments only, no RTL. **DONE.**
+3. `cd_vol_lut.vh` encoding, taken from `master`'s copy. **DONE.**
 4. MEASURE `rev_lookup`; fix only if the number justifies the timing work.
+   **MEASURED AND DEFERRED -- see below.**
 5. The `mac128k`-versus-`master` cleanup reconciliation, before any PR.
+   **STILL OPEN.**
 
 Items 1 to 3 are one compile between them, and 1 is the only one that changes
 anything at all about behaviour. **The gate is unchanged: benches, then ask
 before compiling.**
 
-## Deferred: grey out the menu items a model cannot use
+**AND ONE CORRECTION MADE WHILE WRITING ITEM 2, WHICH IS THE POINT OF ITEM 2.**
+The replacement comment first drafted for `cd_vol_lut.vh` kept the words "never
+an M10K" and merely fixed the scarcity claim. That is FALSE ONCE ITEM 1 LANDS:
+the measurement in section 1 above says the registered form infers an
+`altsyncram` and uses **2 M10K blocks and 8,192 memory bits**. Registering the
+table is precisely what turns it from logic into a block. Correcting a comment
+by leaving its wrong half intact is the same failure the section is about, and
+it was caught by reading the measurement table rather than the prose.
 
-**Daniel's idea, 2026-09-04, and DEFERRED ON HIS INSTRUCTION: do not spend a
-compile on this alone -- fold it into the next stage's build.** Recorded in full
-here so the OSD research is not repeated.
+### 4, MEASURED: `rev_lookup` is BOUNDED, not isolated -- and it is deferred
+
+From `output_files/MacPlus.fit.rpt` for the `f157fcc8` build, Fitter Resource
+Utilization by Entity:
+
+| entity | ALMs |
+|---|---|
+| `floppy_track_decoder:dec` (internal drive) | 146.2 |
+| `floppy_track_decoder:dec` (external drive) | 150.9 |
+
+**That is the WHOLE decoder each time -- the GCR state machine, the group
+buffering and the table together -- so it bounds `rev_lookup` from above at
+~148 ALMs per instance and cannot isolate it.** Quartus does not break down
+within an entity, so an exact figure needs a build with the table registered,
+which is the very work the measurement was supposed to justify.
+
+**Deferred, and the bound is enough to say why.** `cd_vol_lut` returned 104 ALMs
+for six lines and no timing work. Here the entire module -- table and logic
+both -- is 297 ALMs across both instances, so the table alone is some fraction
+of that; and unlike `cd_vol_lut` the table is not dense. It is 64 named entries
+out of 256 with a shared `default`, 8 bits in and 7 out, so 192 of the 256
+inputs collapse to one constant and the minimiser has far more to eat than it
+did with 256 distinct 16-bit values. Registering it means finding a cycle in a
+decoder whose timing is hardware-proven for floppy writes. **The plan's own
+instruction was to let the measurement decide, and the measurement says the
+upside is small and the risk is not.** Revisit only if a fit ever goes marginal.
+
+## Grey out the menu items a model cannot use -- APPLIED 2026-09-05
+
+**Daniel's idea, 2026-09-04, deferred on his instruction (do not spend a compile
+on this alone -- fold it into the next stage's build), and folded into that
+build 2026-09-05. Built as designed below; see "The next build" for what
+changed.** The research is kept in full so it is not repeated.
 
 A 128K offers Mount CD-ROM, two SCSI slots, CD Volume and a Memory option, and
 every one of them is inert on that machine. They should be greyed out.
@@ -5465,6 +5508,108 @@ Three decisions already taken:
 **Limit worth stating:** greying is cosmetic. It prevents a new mistake; it does
 not unmount an image a saved config already carries. The core ignores it either
 way, which is what the hardware tests showed.
+
+## The next build: five parts, one compile (2026-09-05, NOT YET COMPILED)
+
+Everything below is applied, benched and mutation-swept in the working tree.
+**The gate holds: nothing here has been through Quartus, and the compile is
+Daniel's to authorise.**
+
+| # | part | RTL? | benches |
+|---|---|---|---|
+| 1 | `cd_vol_lut` output register | yes | `tb_scsi_cdrom` 43/43, `tb_dbg_probes` 75/75 |
+| 2 | the four false justifications | comments only | -- |
+| 3 | `cd_vol_lut.vh` encoding from `master` | no | -- |
+| 4 | grey out the items a model cannot use | yes | `tb_mac_model` 48/48 |
+| 5 | `$19`/`$1A`: acknowledge unimplemented opcodes | yes | `tb_dcd_status` 105/105, `tb_dcd_read` 48/48 |
+
+Full sweep, all green: `tb_dcd_link` 89/89, `tb_dcd_read` 48/48,
+`tb_dcd_write` 133/133, `tb_dcd_disk` 41/41, `tb_dcd_status` 105/105,
+`tb_iwm_dcd` 33/33, `tb_dbg_probes` 75/75, `tb_scsi_cdrom` 43/43,
+`tb_cd_mix` 18/18, `tb_mac_model` 48/48, `tb_disk_pwm_duty` 12/12,
+`test_read_probes.tcl` 50/50.
+
+### Part 5: the generic acknowledgement, and the bench trap it walked into
+
+Built as ONE arm, not two special cases, per the 68kMLA section above: a fourth
+`replyKind` (`K_ACK` -- the 2-bit field had a free encoding) answers any opcode
+with no implementation from `C_IDLE` with a header-only group of `askedLen`,
+`replyOp = {2'b10, cmdOp}`, status `$00`, no disk access.
+
+**The bound is enforced in the RTL, not left to comments.** `cmdKnown` is
+tested on `cmdOp`, not on the whole byte, so a continued form (`$40`/`$41`/
+`$42`) counts as known and cannot fall through to the ack. A command we DO
+implement and then refuse -- a write with no sector behind it, a continued write
+with nothing to continue from -- still takes its own path and is still not
+answered. The refused-write path still reports `$81`.
+
+**A BENCH ASSERTED THE DEFECT BY NAME, FOR THE SECOND TIME IN THIS PHASE.**
+`tb_dcd_status` carried *"An unimplemented opcode must NOT be answered... a real
+drive does when it cannot reply - answering with a malformed frame would be
+worse"*, and its example was `$04` -- the very opcode the new test acknowledges.
+Rewritten in place with the old text quoted and both of its errors named: a real
+drive answers, and a header-only group of the requested length is not malformed.
+Exactly `tb_dcd_link` test 5's shape ([[macplus-core-conventions]], "test the
+seams"), and the reason to rewrite rather than delete is that the false property
+is the thing worth recording.
+
+**MUTATION SWEEP, four mutants. THREE KILLED IMMEDIATELY, ONE SURVIVED:**
+
+| mutant | killed by |
+|---|---|
+| `replyOp` hardcoded to `$99` | 2 fails (`$1A` and `$04` reply opcodes) |
+| ack status `$81` instead of `$00` | 2 fails |
+| the `!cmdKnown` guard removed | 1 fail (the refused write got answered) |
+| header byte 1 = `blksLeft` for an ack | **0 fails -- SURVIVED** |
+
+**The survivor is the interesting one and it was a vacuous pass.** `tb_dcd_status`
+checks that the ack's block byte is zero, but at that point in that run the
+drive's block counter IS zero, so the check passed whether the ack excluded it
+or not. The discriminating test can only live where a multiblock read has just
+left the counter non-zero, so it went in `tb_dcd_read` after the three-block
+read (counter = 1): a `$19` there must still report block count 0. That kills it.
+
+**A SECOND VACUOUS PASS, IN THE NEW BENCH CODE ITSELF.** The guard that stops
+the bench hanging when the drive does not answer first blanked the group with
+`X`. The checksum assertion compares `rsp[6]` against the negated sum of the
+others -- and `X === X` is TRUE, so the one self-referential assertion sailed
+through a drive that had answered nothing at all. Filled with `$01` instead,
+which fails every check there deterministically. **This is the same `X`-blanking
+trap recorded at the hold-off fix ("those bytes are DATA" passing vacuously),
+hit again three weeks later in freshly written code.**
+
+**One thing the benches CANNOT distinguish, stated rather than left implied:**
+`txLen <= askedLen` versus a hardcoded `10'd6` are indistinguishable here,
+because `$419D16`'s `moveq #$0,d7` means the Mac asks for exactly one group for
+every command on this path. `askedLen` is right on principle and matches the
+other three reply kinds; no test proves it.
+
+`scripts/read_probes.tcl`'s PDC2 reason text is narrowed to match: an unknown
+opcode can no longer land in "not dispatched from C_IDLE", so that line now
+means a guard refused a command it does implement. `sim/test_read_probes.tcl`
+still passes -- it matches on a substring that survives.
+
+### Part 4: the menu mask
+
+Built exactly as the deferred section prescribed. `mac_model` gains a
+`ramSoldered` output; a SECOND `mac_model` instance driven from the LIVE
+`status[3:1]` produces the mask, so greying follows what the user just picked
+rather than waiting for Reset & Apply. `status_menumask = {14'd0, ramSoldered,
+~scsiPresent}`, `D0` on `SC0`/`SC1`/`SC4`/`OI`/`OFG` and `D1` on `O4`. No `v`
+bump: no status bit moved. The stale "an `h` prefix hid the item outright"
+comment is replaced by what actually happened -- the mask was never connected,
+so every bit was zero.
+
+**`status_menumask` is DECLARED before `hps_io` and ASSIGNED beside the model
+instance 170 lines later, deliberately.** Written as a `wire ... = ...` at the
+driver, the reference in the `hps_io` port list would have created an implicit
+ONE-BIT net first, and the 16-bit declaration afterwards is then a duplicate.
+
+**The new output is tested by its INVARIANT, not by a second list of models.**
+`tb_mac_model` sweeps all eight encodings and requires `ramSoldered` to be true
+if and only if `configRAMSize` actually ignores `mem_big`. A model added later
+cannot have one edited without the other. Verified by mutation: flipping the
+512Ke row alone fails 2 checks.
 
 ## Verification
 
