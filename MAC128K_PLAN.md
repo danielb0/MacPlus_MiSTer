@@ -4824,6 +4824,165 @@ Not release-blocking, and not the cause of the two-floppy observation. But it
 is the same class of problem as Phase 4 -- reporting a device that is not there
 -- so it should be fixed alongside the SCSI gate rather than separately.
 
+## Code quality for upstream: the lookup-table defect, and an audit for its siblings
+
+**Daniel's instruction, 2026-09-05, and it REVERSES the earlier call.** After
+PR #21 merged, Sorgelig wrote: *"it would be good to reduce AI slop in the code.
+cd_vol_lut.vh is very ugly. Not how HDL should be written. It must be a
+BRAM/MLAB driven look up with proper clocked pipeline. It's very hard for fitter
+to fit this monster lookup table!"* The decision then (2026-08-30) was **leave
+it, do not bother him** -- he had merged it as-is, so it was a quality bar being
+set rather than a change request. That decision is now withdrawn: fix it, and
+audit the rest of our code for the same class of problem.
+
+This is a good time to do it. The file is being reopened anyway for the `mac128k`
+release, so the reason the earlier decision gave for leaving it ("fix it only if
+the file is reopened for another reason") is now satisfied on its own terms.
+
+### 1. The named defect: `cd_vol_lut.vh`
+
+**The `case` statement is NOT the problem. The missing output register is.**
+Measured 2026-08-30, standalone `quartus_map` + `quartus_fit`, same device and
+version, two harnesses around the IDENTICAL table differing only in whether the
+lookup output is registered:
+
+| form | ALMs | RAM blocks | mem bits |
+|---|---|---|---|
+| combinational (what ships) | **109** | 0 | 0 |
+| registered (same table) | **5** | 2 | 8,192 |
+
+Given a registered output, Quartus 17.0 infers the ROM by itself
+(`altsyncram:Ram0_rtl_0`/`Ram1_rtl_0`). `cd_audio.sv:1336` reads it into a
+`wire`, and a combinational output cannot be a memory read, so the mux tree is
+forced into logic -- twice, once per channel.
+
+The fix is about six lines and does not touch the table data, so the measured
+fifth-power volume law survives bit for bit:
+
+```verilog
+reg [15:0] ap_gain_l, ap_gain_r;
+always @(posedge clk) begin
+    ap_gain_l <= cd_vol_gain(ap_vol0);
+    ap_gain_r <= cd_vol_gain(ap_vol1);
+end
+```
+
+The added cycle is free: `ap_vol0/1` only move on a MODE SELECT of page 0x0E.
+
+**Two things NOT to do.** Do not argue the severity -- 109 ALMs is 0.55% of
+19,799 and the table uses zero memory bits, so it cannot have driven M10K
+placement pressure, but the defect is real, his prescribed fix is the right one,
+and winning that argument costs goodwill and buys nothing. And do not reply
+"that came from MacLC": true, but it is deflection, it drags a third party into
+criticism aimed at us, and we submitted it regardless.
+
+**PROVENANCE, which matters for where the fix belongs.** `cd_vol_lut.vh` is
+`MiSTer-devel/MacLC_MiSTer` commit `0089c82` (Dani Sarfati, 2026-07-30), still
+live at MacLC HEAD in the same combinational form at the same line numbers. Our
+copy differs by two lines, both from the PR's encoding audit. Fixing it here is
+right because we shipped it; whether it is also fixed in MacLC is Dani
+Sarfati's call, not ours to make on their behalf.
+
+### 2. The audit: what else looks like this
+
+Surveyed 2026-09-05 across every file `mac128k` adds or changes under `rtl/`
+and `MacPlus.sv`. The pattern to look for is NOT "a big case statement" -- it is
+**a wide lookup read combinationally into a `wire`**, which is what forces the
+mux tree into logic.
+
+**ONE genuine sibling, and it is ours:**
+
+- **`rtl/floppy_track_decoder.v:179`, `wire [6:0] rl = rev_lookup(idata);`** --
+  a 256-entry reverse GCR table, 8 bits in and 7 out, read straight into a wire.
+  Structurally identical to `cd_vol_lut` at about a quarter the width
+  (256x7 = 1,792 bits against 8,192). By the measured ratio that is tens of
+  ALMs, not hundreds. **MEASURE IT BEFORE CHANGING IT** -- the whole point of
+  the `cd_vol_lut` measurement was that the obvious culprit (the case) was not
+  the cause, and a second guess deserves the same treatment. Registering it
+  means finding a cycle in the decoder's timing, which is real work rather than
+  six lines, so the measurement decides whether it is worth it.
+
+**CHECKED AND FINE -- recorded so the audit is not repeated:**
+
+- **`rtl/disk_pwm_duty.v:39` `pwm_convert`** -- 64 entries, 6 bits in and 6 out
+  (384 bits), and it already feeds a REGISTER through a deliberate three-stage
+  pipeline that exists because the combinational form missed setup by 3.945 ns.
+  Right as built.
+- **`rtl/dcd_icon.vh`** -- 32 entries by ROW rather than 256 by byte, and only
+  13 rows are non-zero with the mask collapsing to two distinct values. The
+  minimiser eats nearly all of it.
+- **`rtl/cd_audio.sv:1410`'s forced `(* ramstyle = "M10K,no_rw_check" *)`** --
+  the stated motivation is stale (below) but forcing these arrays into M10K is
+  still the right call in a design sitting at 24% M10K. Leave it.
+- **`scsi.v`'s `cd_*_byte` response functions** -- tens of entries each,
+  ordinary response muxes, not tables.
+
+### 3. THE FALSE JUSTIFICATION, WHICH SPREAD INTO OUR OWN FILES
+
+This is the finding worth more than the ALMs. **"RAM blocks are the scarce
+resource in this design" is not true of this design, and it appears in four
+places:**
+
+| file | claim |
+|---|---|
+| `rtl/cd_vol_lut.vh:14` | "never an M10K -- RAM blocks are the scarce resource" |
+| `rtl/cd_audio.sv:1419` | "the device is at 513/553 M10K blocks (93%)" |
+| `rtl/dcd_icon.vh:57` | the same words, **and it cites `cd_vol_lut.vh` as its authority** |
+| `rtl/disk_pwm_duty.v:37` | "synthesises to logic, never an M10K -- RAM blocks are the scarce resource" |
+
+**513/553 (93%) is MacLC's figure. This core fits at 131/553 (24%).** The claim
+was rational where it was written and became false the moment it crossed repos
+-- and then we repeated it, from memory, in two files we wrote ourselves this
+year, one of which explicitly cites the criticised file as its reason.
+
+That is the actual slop: not the case statement, but a measurement that expired
+and kept being quoted. **Correct all four comments, and where a justification
+rests on a number, cite the number and where it was measured.**
+[[feedback-read-the-spec-for-historical-hardware]] is the same lesson pointed at
+our own prose: distrust a comment asserting a fact, including one we wrote.
+
+### 4. `mac128k` IS BEHIND MASTER ON EXACTLY THE CLEANUPS THIS IS ABOUT
+
+`master` has one commit `mac128k` does not: `51cf977`, the squashed PR #21. The
+functional content is already in `mac128k` unsquashed -- but the PR-preparation
+cleanups are NOT. Demonstrated: `master:rtl/cd_vol_lut.vh` is pure ASCII, while
+`mac128k`'s still carries **two raw `0x97` cp1252 em-dashes, which make the file
+INVALID UTF-8**. `master` fixed them during the strip; the fix never came back.
+
+So the next PR off `mac128k` would re-introduce encoding defects that were
+already fixed once. **Before any upstream submission, diff `mac128k` against
+`master` on the shared files and re-apply what the strip cleaned.** Not a
+rebase -- the two histories are deliberately different shapes -- a file-by-file
+reconciliation of the cleanups.
+
+Non-ASCII more broadly: `addrController_top.v`, `scsi.v`, `cd_audio.sv` and
+`dataController_top.sv` contain non-ASCII too, but all of it is VALID UTF-8
+(em-dashes, plus-minus, section signs, micro, approximately-equal). Only
+`cd_vol_lut.vh` is actually malformed. Whether to flatten the rest to ASCII is a
+house-style question, not a defect -- decide it once rather than per file.
+
+### 5. What was NOT said, and must not be invented
+
+Sorgelig wrote "slop" generally and gave exactly ONE example. A hypothesis was
+recorded on 2026-08-30 that he might also mean comment density (`cd_mix.v` 51%,
+`scsi.v` 42%, `floppy_write_committer.v` 38%, `ncr5380.sv` 37%, much of it dated
+lab-notebook narrative). **That remains a hypothesis and he has never said it.**
+Do not restructure the comments across the core on the strength of it. If it
+matters it can be asked -- but the earlier judgement that unsolicited follow-up
+reads as fussing applies to questions as well as to patches.
+
+### Order of work
+
+1. `cd_vol_lut` output register -- six lines, measured, known win.
+2. The four false justifications -- comments only, no RTL.
+3. `cd_vol_lut.vh` encoding, taken from `master`'s copy.
+4. MEASURE `rev_lookup`; fix only if the number justifies the timing work.
+5. The `mac128k`-versus-`master` cleanup reconciliation, before any PR.
+
+Items 1 to 3 are one compile between them, and 1 is the only one that changes
+anything at all about behaviour. **The gate is unchanged: benches, then ask
+before compiling.**
+
 ## Deferred: grey out the menu items a model cannot use
 
 **Daniel's idea, 2026-09-04, and DEFERRED ON HIS INSTRUCTION: do not spend a
