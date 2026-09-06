@@ -5966,7 +5966,10 @@ clean the control looks.** Reproduce before concluding.
 ### And then it WAS reproduced, and the answer is FOLDERS after all
 
 **Daniel, later the same day: "I can confirm that it crashes when loading from a
-folder. Exactly the same as before."** With that, every observation lines up:
+folder. Exactly the same as before."** and then again: **"I reproduced and
+confirmed it all again. It won't run from a folder. It will run from the root
+dir."** REPEATED TRIALS BOTH WAYS -- which is what neither earlier conclusion
+had. With that, every observation lines up:
 
 | where the file is | result |
 |---|---|
@@ -5984,10 +5987,12 @@ second copy of the application inside a folder, which is what actually got
 launched. Daniel's reading, and it fits: it is the only observation that ever
 disagreed.
 
-**That confound is INFERRED, not verified**, and it is cheap to settle: search
-the catalog for `APPL`/`DONN` records and print each one's parent CNID. If a
-second copy exists inside a folder, the confound is a fact. Worth doing before
-this is quoted anywhere.
+**That confound is now EXPLAINED, and by an account of what was done rather than
+an inference from the symptom.** Daniel: *"I accidentally copied it to the root
+of the wrong disk. Therefore it copied it rather than moving it."* The Finder
+moves within a volume and COPIES between volumes, so a copy to the wrong disk
+necessarily leaves the original in place -- a second copy of the application
+still in a folder, which is what got launched. Nothing left unaccounted for.
 
 **So the original reading stands, but note how it got here** -- right answer,
 then a retraction that over-corrected, then the right answer again with a
