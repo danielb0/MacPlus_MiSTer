@@ -5963,6 +5963,38 @@ the same day, which was also void because every result in it was a single trial.
 **An intermittent fault cannot be characterised by one observation, however
 clean the control looks.** Reproduce before concluding.
 
+### And then it WAS reproduced, and the answer is FOLDERS after all
+
+**Daniel, later the same day: "I can confirm that it crashes when loading from a
+folder. Exactly the same as before."** With that, every observation lines up:
+
+| where the file is | result |
+|---|---|
+| in a folder (`MacBasic/Samples/Surface`) | **fails** -- reproduced, 16 MHz and 8 MHz |
+| at the volume ROOT | **works** -- confirmed on the 1.84 GB HD20 AND the 80 MB SCSI |
+| on its own diskette | works |
+
+That is MFS behaviour exactly. MFS has no directories at all, so a 1985
+application breaks the moment folders are involved -- and it does NOT care about
+volume size, which is why the same 1.84 GB volume works from its root.
+
+**The one contradicting observation was contaminated.** Step 2 above -- "loading
+from the ROOT fails and gives the Sad Mac" -- is explained by there having been a
+second copy of the application inside a folder, which is what actually got
+launched. Daniel's reading, and it fits: it is the only observation that ever
+disagreed.
+
+**That confound is INFERRED, not verified**, and it is cheap to settle: search
+the catalog for `APPL`/`DONN` records and print each one's parent CNID. If a
+second copy exists inside a folder, the confound is a fact. Worth doing before
+this is quoted anywhere.
+
+**So the original reading stands, but note how it got here** -- right answer,
+then a retraction that over-corrected, then the right answer again with a
+reproduction behind it. The retraction was still correct AS AN ACT: the evidence
+at that moment genuinely did contradict the conclusion. What was wrong was
+concluding from one trial in the first place.
+
 
 ## Verification
 
