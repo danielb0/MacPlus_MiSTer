@@ -5868,6 +5868,57 @@ the DCD off a mounted image alone, so a 128K gets the same working device; there
 is simply no Mac-side driver that will load to talk to it.
 
 
+### MacBASIC cannot find a file that is demonstrably there -- the MacWrite class again
+
+**Observed 2026-09-06 on `075d50b5`, 16 MHz.** Loading `Surface` from
+`MacBasic/Samples/` in MacBASIC gives **"file not found"**, then the machine
+hangs. **Identical at 8 MHz**, so it is not the turbo pacing bug and not speed
+at all.
+
+**The file is there.** Read straight out of the HD20 image's catalog
+(`E:\games\MACPLUS\HD20\608_2GB_volume.img`, read-only):
+
+```
+root (CNID 2) -> MacBasic  DIR cnid=158, 4 items
+              -> Samples   DIR cnid=159, 8 items
+              -> Surface   FILE parent=159, type 'BTXT', creator 'DONN'
+```
+
+`BTXT`/`DONN` is Donn Denman's MacBASIC -- the right file, correctly parented,
+valid record. So the lookup failed, not the storage.
+
+**The volume is structurally sound**: `drSigWord` = `$4244`, allocation blocks
+consistent, claims 3,850,005 sectors against 3,850,144 available, catalog
+readable. `drAtrb` bit 8 (unmounted cleanly) is CLEAR, which is the expected
+mark of a session that ended in a hang, not corruption.
+
+**This is [[the MacWrite finding above]] again, one generation earlier.**
+MacBASIC is 1985 and **MFS is FLAT -- it has no directories at all**. An
+MFS-era application asked to reach two levels down an HFS tree can legitimately
+fail to find the file, while the Finder -- reading the same volume through the
+modern File Manager -- shows it happily. Same shape as MacWrite's wrong
+free-space figure and its crash on a large volume: an early application not
+coping with later system and hardware.
+
+**The hang needs no core defect either.** The probe deck says nothing in the
+storage stack was holding the bus: `PHLD holds=0`, no stuck HPS fetch
+(`PIO4 ack=208` = `rd 200 + wr 8`), DCD in `C_IDLE` with no abort and
+`bad-checksum=0`. What it does say is that **`PACT` bus cycles were FROZEN**
+across six samples with `PIFA` pinned at `PC=$40F69C` -- `move.l $930.w,-(a7)`,
+a RAM access just past a `_BlockMove` trap. A 68000 has no memory protection, so
+a 1985 application operating on state it has mangled can put a wild pointer on
+the bus and wedge it.
+
+**The `025555` Sad Mac that followed was transient** and cleared on an OSD
+Reset & Apply. Decoded from the ROM (see [[macplus-rom-pc-landmarks]]): class
+`$02` is the RAM test, and reaching class 2 at `$400D9E` proves the ROM checksum
+test at `$400D9A` PASSED, so the ROM image is intact.
+
+**Two tests worth running before anyone reports this as a core bug**: put a copy
+of the file in the volume ROOT and load it from there (if it opens, the nesting
+is the whole story), and try the same program from the original floppy.
+
+
 ## Verification
 
 House ladder applies unchanged: a failing test before the fix, iverilog
