@@ -5914,9 +5914,27 @@ Reset & Apply. Decoded from the ROM (see [[macplus-rom-pc-landmarks]]): class
 `$02` is the RAM test, and reaching class 2 at `$400D9E` proves the ROM checksum
 test at `$400D9A` PASSED, so the ROM image is intact.
 
-**Two tests worth running before anyone reports this as a core bug**: put a copy
-of the file in the volume ROOT and load it from there (if it opens, the nesting
-is the whole story), and try the same program from the original floppy.
+**SETTLED 2026-09-06, and it is the VOLUME.** Both tests were run. Loading from
+the volume ROOT fails too -- and is what produced the Sad Mac -- so folder
+nesting is NOT the explanation. Loading the same program from its own DISKETTE,
+under the same System 6.0.8, in the same session, **works**.
+
+So: the application is fine, System 6.0.8 is not the blocker, and a ~1.84 GB
+HFS volume is what breaks it. **This is a tighter control than the MacWrite
+result it echoes** -- that one was monotonic across different disks; this holds
+everything constant but the storage. Two independent 1980s applications now fail
+the same way on large volumes, which makes the class of fault solid rather than
+a comfortable answer reached twice.
+
+MacBASIC has a particular reason to be fragile here: Donn Denman finished it in
+1985 and Apple CANCELLED it, trading it to Microsoft to keep the Apple II BASIC
+licence. It was never released and never updated. HFS arrived with System 3.0 in
+1986 -- so it predates the filesystem by a year and this System by six.
+
+**Worth pinning the threshold** if anyone cares: `320_32MB_volume.img` is in the
+local store, and MacWrite worked (with a wrong free-space figure) at ~32 MB. If
+MacBASIC works there too, the practical advice is simply "old applications want
+a small HD20 image" -- a documentation note, not a defect.
 
 
 ## Verification
