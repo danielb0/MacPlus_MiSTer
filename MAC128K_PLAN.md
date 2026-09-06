@@ -5914,27 +5914,54 @@ Reset & Apply. Decoded from the ROM (see [[macplus-rom-pc-landmarks]]): class
 `$02` is the RAM test, and reaching class 2 at `$400D9E` proves the ROM checksum
 test at `$400D9A` PASSED, so the ROM image is intact.
 
-**SETTLED 2026-09-06, and it is the VOLUME.** Both tests were run. Loading from
-the volume ROOT fails too -- and is what produced the Sad Mac -- so folder
-nesting is NOT the explanation. Loading the same program from its own DISKETTE,
-under the same System 6.0.8, in the same session, **works**.
+**NOT SETTLED -- and the "it is the volume" conclusion below was RETRACTED
+within the hour. Read this whole block before quoting any of it.**
 
-So: the application is fine, System 6.0.8 is not the blocker, and a ~1.84 GB
-HFS volume is what breaks it. **This is a tighter control than the MacWrite
-result it echoes** -- that one was monotonic across different disks; this holds
-everything constant but the storage. Two independent 1980s applications now fail
-the same way on large volumes, which makes the class of fault solid rather than
-a comfortable answer reached twice.
+The tests, in order, all on 2026-09-06:
 
-MacBASIC has a particular reason to be fragile here: Donn Denman finished it in
-1985 and Apple CANCELLED it, trading it to Microsoft to keep the Apple II BASIC
-licence. It was never released and never updated. HFS arrived with System 3.0 in
-1986 -- so it predates the filesystem by a year and this System by six.
+1. Load `MacBasic/Samples/Surface` from the 1.84 GB HD20 -- **"file not found"**,
+   at 16 MHz and identically at 8 MHz.
+2. Load the same file from the volume **ROOT** -- also fails, and this is what
+   produced the `025555` Sad Mac. So folder nesting is NOT the explanation.
+3. Load it from its own **DISKETTE**, same System, same session -- **works**.
+4. On that evidence this section said "SETTLED: it is the volume", reasoning
+   that a 1985 MFS-era application cannot cope with a 1.84 GB HFS volume, and
+   citing the MacWrite finding above as the same class.
+5. **Then it loaded from the ROOT of that SAME 1.84 GB HD20, and from the 80 MB
+   SCSI disk, at 16 MHz.** Which kills 4 outright.
 
-**Worth pinning the threshold** if anyone cares: `320_32MB_volume.img` is in the
-local store, and MacWrite worked (with a wrong free-space figure) at ~32 MB. If
-MacBASIC works there too, the practical advice is simply "old applications want
-a small HD20 image" -- a documentation note, not a defect.
+**So the difference is TEMPORAL, not spatial.** The same application, the same
+System and the same volume behave differently at different times, so neither
+"the nesting", nor "the volume size", nor "System 6 incompatibility" survives.
+
+**Leading candidate, explicitly NOT established: the volume's state.** It was
+flagged not-cleanly-unmounted (`drAtrb` bit 8 clear) after the wedge, and the
+failures cluster in the window right after the big copy and that hang. A volume
+the File Manager has not verified could plausibly fail a lookup and then come
+right after a clean mount cycle. Also unexcluded: the build changed to
+`acf15050` between the failing and working runs -- that commit touches only
+`dbg_probes.sv` telemetry and nothing functional, so it *should* be irrelevant,
+but "should" has not earned much this session.
+
+**What DOES stand, because it was measured rather than inferred:**
+
+- The file is on the disk. Catalog decode: root(2) -> `MacBasic` DIR cnid 158 ->
+  `Samples` DIR cnid 159 -> `Surface` FILE parent 159, type `BTXT`, creator
+  `DONN`. Correctly parented, valid record.
+- The volume is structurally sound: `drSigWord` `$4244`, allocation blocks
+  consistent, claims 3,850,005 sectors against 3,850,144 available.
+- The wedge held no device: `PHLD holds=0`, no stuck HPS fetch, DCD `C_IDLE`,
+  `bad-checksum=0`, and `PACT` FROZEN with `PIFA` at `$40F69C` --
+  `move.l $930.w,-(a7)`, a RAM access past a `_BlockMove` trap.
+- `025555` decoded from the ROM as the RAM test, transient, cleared on reset.
+
+**THE LESSON, which is the reason this block is written out in full.** One clean
+control ("works from the diskette, fails from the HD20") was treated as
+conclusive and committed as SETTLED. It was a single trial of a behaviour that
+turned out to be intermittent -- the same mistake as the six-build bisect earlier
+the same day, which was also void because every result in it was a single trial.
+**An intermittent fault cannot be characterised by one observation, however
+clean the control looks.** Reproduce before concluding.
 
 
 ## Verification
