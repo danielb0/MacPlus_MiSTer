@@ -808,6 +808,32 @@ module tb_dbg_probes;
 		ok("probe - and whether the drive was still selected",
 		   probes.pdcd_r[19] == 1'b1);
 
+		// ---- the late-byte counter, and what must NOT trip it -------------
+		// This field shipped in 075d50b5 with only a negative test and was
+		// WRONG: it counted TX_SYNC, the deliberate wait for the payload, so a
+		// perfectly healthy boot reported "7+ late bytes" at both speeds. A
+		// field with no positive test is how a broken instrument ships.
+		dcd_clear;
+		dcd_lvl(3'd1, 1'b1, 1'b1, 3'd3, 3'd3, 3'd0, 1'b1, 8'h00);  // TX_DATA
+		repeat (1100) @(posedge clk);                              // no byte
+		@(negedge clk); dcd_stim[13] = 1'b1;                       // ...then one
+		@(posedge clk); @(negedge clk); dcd_stim[13] = 1'b0;
+		dcd_settle;
+		ok("probe - a byte more than 1024 clk late IS counted",
+		   probes.pdcd_r[18:16] == 3'd1);
+
+		// The regression that made the field lie. TX_SYNC spans the HPS fetch
+		// by design; if it counts, the number is meaningless.
+		dcd_clear;
+		dcd_lvl(3'd1, 1'b1, 1'b1, 3'd3, 3'd2, 3'd0, 1'b1, 8'h00);  // TX_SYNC
+		repeat (1100) @(posedge clk);                              // seek time
+		dcd_lvl(3'd1, 1'b1, 1'b1, 3'd3, 3'd3, 3'd0, 1'b1, 8'h00);  // TX_DATA
+		@(negedge clk); dcd_stim[13] = 1'b1;
+		@(posedge clk); @(negedge clk); dcd_stim[13] = 1'b0;
+		dcd_settle;
+		ok("probe - a TX_SYNC payload wait is NOT counted as a late byte",
+		   probes.pdcd_r[18:16] == 3'd0);
+
 		// TX_WAIT(1) -> TX_IDLE(0) is the OTHER escape and must not set it:
 		// confusing the two sends the next investigation to the wrong layer.
 		dcd_clear;

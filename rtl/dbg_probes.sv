@@ -618,10 +618,18 @@ module dbg_probes (
 
 	// WAS THE DRIVE EVER LATE WITH A BYTE? The poll-budget reading says no --
 	// the Mac gives up early, our pacing never slips -- so this is the field
-	// that can falsify it. Counted in clk between newByteReady edges while a
-	// frame is actually going out; a byte is 512 clk apart at 8 MHz and 256
-	// with the turbo fix, so 1024 is late by any reading and nowhere near the
-	// Mac's ~90 us (2880 clk) budget.
+	// that can falsify it. Counted in clk between newByteReady edges while
+	// bytes are actually being clocked out; a byte is 512 clk apart at 8 MHz
+	// and 256 with the turbo fix, so 1024 is late by any reading and nowhere
+	// near the Mac's ~90 us (2880 clk) budget.
+	//
+	// TX_SYNC IS EXCLUDED, AND THAT IS THE WHOLE CORRECTNESS OF THIS FIELD.
+	// Its own comment in dcd_link.v calls it "armed, on the bus, and waiting
+	// for the payload ... where a real drive's seek time goes" -- it spans the
+	// HPS block fetch and is meant to be long. Counting it read 7+ late bytes
+	// on a HEALTHY boot at BOTH speeds (measured 2026-09-06 on 075d50b5,
+	// after the turbo fix, at 8 MHz as well as 16), which is nonsense: 8 MHz
+	// never had a pacing problem. Only TX_DATA and TX_LSB clock bytes out.
 	reg [11:0] dcd_gap_cnt     = 0;   // clk since the last byte, saturating
 	reg  [2:0] dcd_gap_long    = 0;   // gaps over 1024 clk, saturating
 
@@ -738,7 +746,7 @@ module dbg_probes (
 
 			// Inter-byte pacing, measured only while a frame is going out so
 			// idle time between commands cannot register as a stall.
-			if (dcd_txstate == 3'd2 || dcd_txstate == 3'd3 || dcd_txstate == 3'd4) begin
+			if (dcd_txstate == 3'd3 || dcd_txstate == 3'd4) begin
 				if (dcd_txbyte && !dcd_txbyte_d) begin
 					if (dcd_gap_cnt > 12'd1024 && ~&dcd_gap_long)
 						dcd_gap_long <= dcd_gap_long + 3'd1;
