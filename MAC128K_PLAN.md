@@ -4376,7 +4376,7 @@ Plus does. Nothing in the RTL needs to change for this test.
 
 | model | HD20 | status |
 |---|---|---|
-| 128K | no -- the `Hard Disk 20` patch will not load (source says so; it does not say why); `HD Diag` still exercises the link | not applicable |
+| 128K | **no -- CONFIRMED ON HARDWARE 2026-09-06.** The startup floppy boots its OWN System and never hands over; the `Hard Disk 20` patch does not install. No error, no hang -- it simply carries on from the floppy. `HD Diag` still exercises the link | **tested, negative** |
 | **512K** | **via the startup diskette** | **CONFIRMED 2026-09-05, `f157fcc8`** |
 | 512Ke / Plus | from ROM | confirmed, `f157fcc8` |
 
@@ -5839,6 +5839,33 @@ Model bits drive theirs, and remember Main re-polls `UIO_GET_OSDMASK` while the
 menu is open (`menu.cpp:2636`), so it will track a mount live. A greyed item
 cannot be activated (`menu.cpp:2403`), so this actually prevents the action
 rather than only annotating it.
+
+
+### The 128K genuinely cannot use the HD20 -- tested 2026-09-06
+
+**Daniel, on hardware: "The HD20 is absolutely not supported by the 128. The
+boot disk does not hand over to the disk, it simply boots to its own system."**
+
+This closes an item that had stood on period documentation alone -- the plan's
+model table said "the patch will not load (source says so; it does not say
+why)", and that was never tested here. It is now, and the sources were right.
+
+**The manner of failure is the useful part.** It is not an error, a hang or a
+Sad Mac: the `Hard Disk 20` startup floppy boots its own System and carries on
+from the floppy as though no hard disk existed. So a 128K user sees a working
+machine that silently ignores the HD20, which is much harder to recognise than
+a failure would be -- worth saying explicitly in any user-facing note.
+
+**It corroborates the RAM reading already recorded above.** The barrier is the
+RAM-RESIDENT PATCH, not the protocol: the `Hard Disk 20` file's bulk is a ~24 KB
+TFS resource (HFS in RAM), needed only because the 64K ROM has none, and there
+is no room for it beside a booted System in 128 KB. The patch declines to
+install rather than failing. The 512K, with four times the RAM, installs the
+same patch and boots the same drive -- confirmed 2026-09-05 (`7b67ff6`).
+
+**Nothing in the RTL is model-gated here** and nothing needs to be. `iwm.v` keys
+the DCD off a mounted image alone, so a 128K gets the same working device; there
+is simply no Mac-side driver that will load to talk to it.
 
 
 ## Verification
