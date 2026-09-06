@@ -603,6 +603,28 @@ module dbg_probes (
 	reg  [2:0] dcd_txstate_d   = 0;
 	reg        dcd_txbyte_d    = 0;
 
+	// A REPLY ABANDONED MID-FRAME, WHICH dcd_st_abort CANNOT SEE. That bit
+	// watches TX_WAIT(1) -> TX_IDLE(0) only, the escape added in abd857c for a
+	// transfer the Mac never collected. But dcd_link's TX_DATA(3) and TX_LSB(4)
+	// carry their OWN escape -- `!selected || state==2 || state==3 || state>=4`
+	// -- and that one fires when the Mac walks away with the frame half sent.
+	// On 2026-09-06 a 16 MHz boot showed exactly that: 64 bytes out, txmax
+	// stuck at TX_LSB, and every existing flag clean. Record the escape, and
+	// the state that caused it, or the deck says "no wedge visible" about a
+	// reply that died.
+	reg        dcd_ab_send     = 0;   // aborted out of TX_DATA/TX_LSB
+	reg  [2:0] dcd_ab_state    = 0;   // the state the Mac drove at that moment
+	reg        dcd_ab_sel      = 0;   // selected, at that moment
+
+	// WAS THE DRIVE EVER LATE WITH A BYTE? The poll-budget reading says no --
+	// the Mac gives up early, our pacing never slips -- so this is the field
+	// that can falsify it. Counted in clk between newByteReady edges while a
+	// frame is actually going out; a byte is 512 clk apart at 8 MHz and 256
+	// with the turbo fix, so 1024 is late by any reading and nowhere near the
+	// Mac's ~90 us (2880 clk) budget.
+	reg [11:0] dcd_gap_cnt     = 0;   // clk since the last byte, saturating
+	reg  [2:0] dcd_gap_long    = 0;   // gaps over 1024 clk, saturating
+
 	// A COMMAND THE DRIVE RECEIVED AND NEVER ANSWERED. dcd.v dispatches only
 	// from C_IDLE and does it on the SAME edge rxValid is asserted, so one
 	// clock later an accepted command has moved cstate off C_IDLE and a
@@ -677,6 +699,11 @@ module dbg_probes (
 			dcd_unans_op    <= 8'd0;
 			dcd_unans_cnt   <= 2'd0;
 			dcd_unans_why   <= 2'd0;
+			dcd_ab_send     <= 1'b0;
+			dcd_ab_state    <= 3'd0;
+			dcd_ab_sel      <= 1'b0;
+			dcd_gap_cnt     <= 12'd0;
+			dcd_gap_long    <= 3'd0;
 		end
 		else begin
 			// State 5 is the discriminator that says a DCD and not a Sony
@@ -698,6 +725,28 @@ module dbg_probes (
 			// path in the link layer that has never run on hardware, so it
 			// gets its own bit rather than being inferred from txmax.
 			if (dcd_txstate == 3'd0 && dcd_txstate_d == 3'd1) dcd_st_abort <= 1'b1;
+
+			// The mid-frame escape. dcd_state is sampled a clock after the
+			// transition; the phase lines are held far longer than that by
+			// the Mac, so it is the state that caused it.
+			if (dcd_txstate == 3'd0 &&
+			    (dcd_txstate_d == 3'd3 || dcd_txstate_d == 3'd4)) begin
+				dcd_ab_send  <= 1'b1;
+				dcd_ab_state <= dcd_state;
+				dcd_ab_sel   <= dcd_sel;
+			end
+
+			// Inter-byte pacing, measured only while a frame is going out so
+			// idle time between commands cannot register as a stall.
+			if (dcd_txstate == 3'd2 || dcd_txstate == 3'd3 || dcd_txstate == 3'd4) begin
+				if (dcd_txbyte && !dcd_txbyte_d) begin
+					if (dcd_gap_cnt > 12'd1024 && ~&dcd_gap_long)
+						dcd_gap_long <= dcd_gap_long + 3'd1;
+					dcd_gap_cnt <= 12'd0;
+				end
+				else if (~&dcd_gap_cnt) dcd_gap_cnt <= dcd_gap_cnt + 12'd1;
+			end
+			else dcd_gap_cnt <= 12'd0;
 
 			// The inbound event is the IWM's one-clock writeReq. The outbound
 			// one is dcd_link's newByteReady, which is HELD from one cen tick
@@ -749,7 +798,13 @@ module dbg_probes (
 	end
 
 	// PDCD packing, mirrored in scripts/read_probes.tcl and sim/tb_dbg_probes.v:
-	//   [31:24] states the Mac drove (bit n = state n)   [23:16] last opcode
+	//   [31:24] states the Mac drove (bit n = state n)
+	//   [23]    a reply was aborted out of TX_DATA/TX_LSB
+	//   [22:20] the state the Mac drove at that abort   [19] selected there
+	//   [18:16] inter-byte gaps over 1024 clk (saturating)
+	//   (this field WAS dcd_last_op, which its own comment records as always
+	//    the $00 of an ordinary read -- it carried no signal and the deck is
+	//    at the hub-node ceiling, so a new field has to come out of an old one)
 	//   [15:13] rxHs now    [12:10] txState now    [9:7] command FSM now
 	//   [6]     /HSHK now (1 = de-asserted)
 	//   [5]     present     [4]     selected now
@@ -757,7 +812,8 @@ module dbg_probes (
 	//   [1]     a bad checksum was seen   [0] a reply was abandoned in TX_WAIT
 	reg [31:0] pdcd_r, pdc2_r;
 	always @(posedge clk) begin
-		pdcd_r <= {dcd_states_seen, dcd_last_op,
+		pdcd_r <= {dcd_states_seen,
+		           dcd_ab_send, dcd_ab_state, dcd_ab_sel, dcd_gap_long,
 		           dcd_rxhs, dcd_txstate, dcd_cstate,
 		           dcd_hshk_n, dcd_present, dcd_sel,
 		           dcd_frames_in, dcd_st_bad, dcd_st_abort};

@@ -115,6 +115,25 @@ module dcd_link
 	input         cep,
 	input         cen,
 
+	// CPU speed. The Mac's receive loop polls for each byte with a POOLED
+	// budget -- $4198C0 loads d6 with 80 and every `dbmi d6` in the group
+	// shares it, reloading only at $419960 for the next group. One poll
+	// iteration is `move.b (a3),dN` + a taken `dbmi` = 18 cycles, so the Mac
+	// burns 2.25 us per try at 8 MHz and 1.125 us at 16 MHz. Against a FIXED
+	// 16 us byte it spends ~7 tries per byte at 8 MHz (~57 per 8-byte group,
+	// inside the 80) but ~14 at 16 MHz (~114, well outside it). The budget
+	// runs out mid-group, $4198D2 falls to error $22 at $4198B6, the Mac
+	// abandons the frame, and TX_DATA/TX_LSB see it walk away and abort --
+	// a truncated reply, which the Mac then reports as an unreadable disk.
+	//
+	// So the byte interval has to track the CPU, exactly as iwm.v:520 already
+	// does for the .Sony latch clear and for the same reason. HALVE THE
+	// CONSTANT rather than ticking on cen16: that keeps the whole FSM in one
+	// enable domain, which iwm.v:520's own comment warns is what matters --
+	// a counter ticking on cen16 can pass its terminal count on a phase the
+	// cen-gated action never sees.
+	input         turbo,
+
 	input         _reset,
 
 	// phase lines from the IWM. lstrb is PH3 (daisy-chain select); with a
@@ -244,7 +263,7 @@ module dcd_link
 	// Mac clocks at 7.8333 MHz, but this core's IWM models that same clock as
 	// its nominal 8 MHz enable, so matching floppy.v keeps DCD at the correct
 	// rate RELATIVE to everything else the IWM does.
-	localparam [7:0] BYTE_TICKS = 8'd128;
+	wire [7:0] BYTE_TICKS = turbo ? 8'd64 : 8'd128;   // 8 us / 16 us
 
 	wire [2:0] state    = {ca2, ca1, ca0};
 	wire       selected = present & ~_enable;

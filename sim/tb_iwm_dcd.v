@@ -64,7 +64,19 @@ module tb_iwm_dcd;
 
 	// clk_sys cycles per CPU clock. 4 = 8 MHz, the speed a 512Ke runs at and
 	// the only speed an HD20 was ever attached to.
-	localparam integer CPUP = 4;
+	// CPU SPEED. Run this bench BOTH ways -- the 16 MHz case is not a variant
+	// of the 8 MHz one, it is the case the DCD was broken in:
+	//
+	//     iverilog ... -o tb_iwm_dcd.vvp        sim/tb_iwm_dcd.v ...
+	//     iverilog ... -PTURBO=1 -o turbo.vvp   sim/tb_iwm_dcd.v ...
+	//
+	// At 16 MHz a CPU period is 2 clk, not 4, so _cpuLDS spans half the
+	// wall-clock time while cen does not move -- and the Mac's pooled poll
+	// budget ($4198C0, 80 tries shared by a group) burns twice as fast
+	// against the drive's byte interval. dcd_link halves BYTE_TICKS on
+	// `turbo` to keep that ratio; this is what proves it.
+	parameter integer TURBO = 0;
+	localparam integer CPUP = TURBO ? 2 : 4;
 
 	// Poll spacing for the data-latch read loop, in CPU cycles of IDLE - the
 	// access itself is 3 more, so start to start is POLL_GAP + 3.
@@ -122,7 +134,7 @@ module tb_iwm_dcd;
 	reg         dcd_img_readonly = 1'b0;
 
 	iwm dut (
-		.clk(clk), .cep(cep), .cen(cen), .cen16(cen16), .turbo(1'b0),
+		.clk(clk), .cep(cep), .cen(cen), .cen16(cen16), .turbo(TURBO[0]),
 		._reset(_reset),
 		.selectIWM(selectIWM),
 		._cpuRW(_cpuRW),
@@ -190,6 +202,24 @@ module tb_iwm_dcd;
 		wrPrev <= dut.dcd0.writeReq;
 	end
 
+	// BYTE PACING, which is the whole of the 16 MHz fix. dcd_link paces the
+	// drive at BYTE_TICKS cen ticks per byte and halves it under `turbo`, so
+	// the Mac's POOLED poll budget ($4198C0 loads 80 for a whole group, and
+	// one try costs 18 cycles = 2.25 us at 8 MHz but 1.125 us at 16 MHz)
+	// keeps the same ~30% headroom at either speed. Measured here rather than
+	// asserted from the constant, so the test fails if the plumbing breaks
+	// anywhere between iwm.v's `turbo` port and the counter.
+	integer nbrGap = 0, nbrGapLast = -1;
+	reg     nbrGapPrev = 1'b0;
+	always @(posedge clk) if (cen) begin
+		if (dut.newByteReadyDcd && !nbrGapPrev) begin
+			if (nbrGap > 4) nbrGapLast = nbrGap;   // ignore the first edge
+			nbrGap = 0;
+		end
+		else nbrGap = nbrGap + 1;
+		nbrGapPrev <= dut.newByteReadyDcd;
+	end
+
 	// nbrEdges   - bytes the drive OFFERED to the IWM
 	// nbrLatched - of those, how many the IWM's `cen && newByteReady` latch
 	//              could actually see. Bug 2 is exactly nbrEdges > 0 with
@@ -250,14 +280,27 @@ module tb_iwm_dcd;
 			_cpuRW       = 1'b1;
 			selectIWM    = 1'b1;
 			_cpuLDS      = 1'b0;
-			n = 0;
-			while (n < 3) begin
-				@(negedge clk);              // mid-cycle: cen is the NEXT edge's
-				if (cen) begin
-					n = n + 1;
-					if (n == 3) begin
-						d = dataOut[7:0];    // pre-edge, as dbin <= iEdb is
-						if (dut.newByteReady) lastCenHits = lastCenHits + 1;
+			// The 8 MHz form waits for the THIRD cen of the access, which is
+			// where fx68k samples. At 16 MHz three CPU periods span only 1.5
+			// cen, so waiting for three would hold _cpuLDS twice as long as a
+			// real access -- conservative in exactly the direction that hides
+			// a pacing bug. Time it in CPU periods there instead.
+			if (TURBO) begin
+				for (n = 0; n < 3*CPUP-1; n = n + 1) @(posedge clk);
+				@(negedge clk);
+				d = dataOut[7:0];
+				if (dut.newByteReady) lastCenHits = lastCenHits + 1;
+			end
+			else begin
+				n = 0;
+				while (n < 3) begin
+					@(negedge clk);          // mid-cycle: cen is the NEXT edge's
+					if (cen) begin
+						n = n + 1;
+						if (n == 3) begin
+							d = dataOut[7:0];  // pre-edge, as dbin <= iEdb is
+							if (dut.newByteReady) lastCenHits = lastCenHits + 1;
+						end
 					end
 				end
 			end
@@ -695,6 +738,14 @@ module tb_iwm_dcd;
 		check("the reply is 49 groups, i.e. 343 payload bytes", nDecoded === 343);
 		sum = 0;
 		for (i = 0; i < 343; i = i + 1) sum = sum + rsp[i];
+		// THE 16 MHz FIX. A byte every 128 cen at 8 MHz, every 64 under turbo.
+		// Mutation: pinning BYTE_TICKS back to 8'd128 leaves every other check
+		// in this bench passing -- its Mac model polls patiently and has no
+		// budget to blow -- so without this one the fix is untested.
+		check(TURBO ? "byte pacing halves under turbo (64 cen), keeping the Mac's poll budget in ratio"
+		         : "byte pacing is 128 cen at 8 MHz",
+		      nbrGapLast == (TURBO ? 64 : 128));
+
 		check("the whole reply checksums to zero through the IWM", sum === 8'h00);
 		check("the reply opcode is $83", rsp[0] === 8'h83);
 		// Reply byte 6 begins the identity block; capacity is at offset 5..7
@@ -746,7 +797,7 @@ module tb_iwm_dcd;
 		         lastCenHits, dupBytes, rxTimeouts);
 
 		$display("");
-		$display("tb_iwm_dcd: %0d/%0d", pass, pass + fail);
+		$display("tb_iwm_dcd%0s: %0d/%0d", TURBO ? " TURBO" : "", pass, pass + fail);
 		if (fail != 0) $display("IWM/DCD SEAM GATE: FAIL (%0d)", fail);
 		else           $display("IWM/DCD SEAM GATE: PASS");
 		$finish;

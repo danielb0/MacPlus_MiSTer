@@ -607,8 +607,8 @@ module tb_dbg_probes;
 		   probes.pdcd_r[29] == 1'b1);
 		ok("probe - PDCD recorded every phase state the Mac drove, and no other",
 		   probes.pdcd_r[31:24] == 8'hEE);
-		ok("probe - PDCD names the opcode of the last command decoded",
-		   probes.pdcd_r[23:16] == 8'h03);
+		ok("probe - a healthy frame leaves the mid-frame abort field clear",
+		   probes.pdcd_r[23] == 1'b0 && probes.pdcd_r[18:16] == 3'd0);
 		ok("probe - PDCD counted exactly one command",
 		   probes.pdcd_r[3:2] == 2'd1);
 		ok("probe - PDCD shows /HSHK released and both FSMs idle afterwards",
@@ -640,8 +640,8 @@ module tb_dbg_probes;
 		// is the exact failure this deck exists to avoid. Caught by mutation:
 		// every earlier step changed the opcode and pulsed rxValid together.
 		dcd_lvl(3'd1, 1'b1, 1'b0, 3'd3, 3'd0, 3'd0, 1'b1, 8'hC7); dcd_settle;
-		ok("probe - PDCD keeps the last DECODED opcode, not a part-received one",
-		   probes.pdcd_r[23:16] == 8'h03);
+		ok("probe - a part-received command does not fake a mid-frame abort",
+		   probes.pdcd_r[23] == 1'b0);
 
 		// The clear. Sticky state that cannot be zeroed is readable once per
 		// power cycle, which is useless for a fault that has to be provoked
@@ -790,6 +790,31 @@ module tb_dbg_probes;
 		dcd_cmd_busy(8'h00, 3'd3);
 		ok("probe - a command that arrived BUSY is recorded with reason 2",
 		   probes.pdc2_r[1:0] == 2'd2 && probes.pdc2_r[11:4] == 8'h00);
+
+		// ---- the mid-frame abort, which dcd_st_abort cannot see -----------
+		// dcd_link's TX_DATA/TX_LSB escape fires when the Mac walks away with a
+		// reply half sent -- state 2/3, or deselection. On hardware (2026-09-06,
+		// 16 MHz) that gave 64 bytes out, txmax stuck at TX_LSB and EVERY
+		// existing flag clean, so the deck said "no wedge visible" about a frame
+		// that had died. Driven positively here: a negative test alone passes
+		// against a probe that never fires at all.
+		dcd_clear;
+		dcd_lvl(3'd1, 1'b1, 1'b1, 3'd3, 3'd4, 3'd0, 1'b1, 8'h00); dcd_settle;
+		dcd_lvl(3'd3, 1'b1, 1'b1, 3'd3, 3'd0, 3'd0, 1'b1, 8'h00); dcd_settle;
+		ok("probe - an abort out of TX_LSB is recorded",
+		   probes.pdcd_r[23] == 1'b1);
+		ok("probe - and it names the state the Mac drove to cause it",
+		   probes.pdcd_r[22:20] == 3'd3);
+		ok("probe - and whether the drive was still selected",
+		   probes.pdcd_r[19] == 1'b1);
+
+		// TX_WAIT(1) -> TX_IDLE(0) is the OTHER escape and must not set it:
+		// confusing the two sends the next investigation to the wrong layer.
+		dcd_clear;
+		dcd_lvl(3'd1, 1'b1, 1'b1, 3'd3, 3'd1, 3'd0, 1'b1, 8'h00); dcd_settle;
+		dcd_lvl(3'd2, 1'b1, 1'b1, 3'd3, 3'd0, 3'd0, 1'b1, 8'h00); dcd_settle;
+		ok("probe - a TX_WAIT abort does NOT set the mid-frame field",
+		   probes.pdcd_r[23] == 1'b0 && probes.pdcd_r[0] == 1'b1);
 
 		dcd_clear;
 		ok("probe - the JTAG clear empties the unanswered fields too",

@@ -224,11 +224,35 @@ set names {PIFA PACT PSCS PSCW PODR PIFD PRG0 PRG1 PIOS PIO2 PIO3 PIO4 PHLD PDMA
 # A whole healthy Status exchange: the ID states walked, one command decoded,
 # 40 bytes back, /HSHK released, both FSMs home. This is the capture that must
 # NOT produce a wedge verdict.
-set probeval(PDCD) [mkpdcd 0xEE 0x03 0 0 0 1 1 1 1 0 0]
+set probeval(PDCD) [mkpdcd 0xEE 0x00 0 0 0 1 1 1 1 0 0]
 set probeval(PDC2) [mkpdc2 40 11 5 4 0 0 0]
 set out [capture]
 ok "reader decodes the PDCD summary line" \
-   [string match {*present=1 selected=1 /HSHK=released  commands=1  last op=$03*} $out]
+   [string match {*present=1 selected=1 /HSHK=released  commands=1*} $out]
+# A healthy capture must say NOTHING about mid-frame aborts: the field is
+# new and a reader that always printed it would train people to ignore it.
+ok "reader stays silent about aborts on a healthy frame" \
+   [expr {![string match "*ABORTED MID-FRAME*" $out]
+          && ![string match "*was late with*" $out]}]
+
+# The case the field exists for: 0xB8 = abort, state 3, selected.
+set probeval(PDCD) [mkpdcd 0xEE 0xB8 0 0 0 1 1 1 1 0 0]
+set out [capture]
+ok "reader reports a reply aborted mid-frame, and the state that caused it" \
+   [string match "*ABORTED MID-FRAME: the Mac drove state 3 (selected=1)*" $out]
+ok "reader separates that from the TX_WAIT abort" \
+   [string match "*not the TX_WAIT one below*" $out]
+
+# And the falsifier: a late DRIVE byte, which would sink the poll-budget
+# reading of the 16 MHz failure.
+set probeval(PDCD) [mkpdcd 0xEE 0x02 0 0 0 1 1 1 1 0 0]
+set out [capture]
+ok "reader reports a late drive byte, and says what it means" \
+   [expr {[string match "*DRIVE was late with 2 byte(s)*" $out]
+          && [string match "*Mac is NOT the one giving up*" $out]}]
+
+set probeval(PDCD) [mkpdcd 0xEE 0x00 0 0 0 1 1 1 1 0 0]
+set out [capture]
 ok "reader lists the phase states the Mac drove, state 5 among them" \
    [string match "*phase states the Mac drove: 1 2 3 5 6 7*" $out]
 ok "reader decodes both byte counters, in the right direction" \

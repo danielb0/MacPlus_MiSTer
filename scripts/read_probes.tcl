@@ -219,7 +219,10 @@ for {set n 0} {$n < $samples} {incr n} {
 		set pdcd [b2i [rd PDCD]]
 		set pdc2 [b2i [rd PDC2]]
 		set d_seen  [expr {($pdcd >> 24) & 0xFF}]
-		set d_op    [expr {($pdcd >> 16) & 0xFF}]
+		set d_absend  [expr {($pdcd >> 23) & 0x1}]
+		set d_abst    [expr {($pdcd >> 20) & 0x7}]
+		set d_absel   [expr {($pdcd >> 19) & 0x1}]
+		set d_gaplong [expr {($pdcd >> 16) & 0x7}]
 		set d_rxhs  [expr {($pdcd >> 13) & 0x7}]
 		set d_txst  [expr {($pdcd >> 10) & 0x7}]
 		set d_cst   [expr {($pdcd >>  7) & 0x7}]
@@ -247,9 +250,20 @@ for {set n 0} {$n < $samples} {incr n} {
 		}
 		if {$states eq ""} { set states "NONE" }
 
-		puts [format "  PDCD  DCD: present=%d selected=%d /HSHK=%s  commands=%s  last op=\$%02X" \
+		puts [format "  PDCD  DCD: present=%d selected=%d /HSHK=%s  commands=%s" \
 		             $d_pres $d_sel [expr {$d_hshk ? "released" : "ASSERTED"}] \
-		             [expr {$d_cmds >= 3 ? "3+" : $d_cmds}] $d_op]
+		             [expr {$d_cmds >= 3 ? "3+" : $d_cmds}]]
+		if {$d_absend} {
+			puts [format "  PDCD  REPLY ABORTED MID-FRAME: the Mac drove state %d (selected=%d) with the reply half sent." \
+			             $d_abst $d_absel]
+			puts "        This is TX_DATA/TX_LSB's own escape, not the TX_WAIT one below."
+			puts "        state 2 or 3 = the Mac walked away (its error exit, e.g. \$22 once the poll budget ran out);"
+			puts "        selected=0   = it deselected the drive outright."
+		}
+		if {$d_gaplong} {
+			puts [format "  PDCD  the DRIVE was late with %s byte(s) (gap > 1024 clk) -- so the Mac is NOT the one giving up." \
+			             [expr {$d_gaplong >= 7 ? "7+" : $d_gaplong}]]
+		}
 		puts [format "  PDCD  phase states the Mac drove: %s" $states]
 		puts [format "  PDCD  now: rxHs=%-6s txState=%-8s cmdFSM=%s" \
 		             [lindex $rxhsname $d_rxhs] [lindex $txstname $d_txst] \

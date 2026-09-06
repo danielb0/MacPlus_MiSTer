@@ -190,6 +190,10 @@ module dcd
 	input  [63:0] img_size,
 	input         img_readonly,
 
+	// CPU speed, passed straight to dcd_link's byte pacing. See the note on
+	// its `turbo` port for why the drive has to keep step with the CPU.
+	input         turbo,
+
 	// A DCD image is mounted. rtl/iwm.v uses this to decide whether the
 	// external drive port is a Sony or a DCD; with nothing mounted the port
 	// behaves exactly as it always has.
@@ -266,7 +270,7 @@ module dcd
 
 	dcd_link link
 	(
-		.clk(clk), .cep(cep), .cen(cen),
+		.clk(clk), .cep(cep), .cen(cen), .turbo(turbo),
 		._reset(_reset),
 		.ca0(ca0), .ca1(ca1), .ca2(ca2), .lstrb(lstrb), ._enable(_enable),
 		.writeData(writeData), .writeReq(writeReq),

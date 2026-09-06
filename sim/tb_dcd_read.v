@@ -59,7 +59,7 @@ module tb_dcd_read;
 		if (dbg_dcd[18:16] > dbgCstateSeen) dbgCstateSeen <= dbg_dcd[18:16];
 
 	dcd dut (
-		.clk(clk), .cep(1'b1), .cen(1'b1),
+		.clk(clk), .cep(1'b1), .cen(1'b1), .turbo(1'b0),
 		._reset(_reset),
 		.ca0(ca0), .ca1(ca1), .ca2(ca2), .lstrb(lstrb), ._enable(_enable),
 		.writeData(writeData), .writeReq(writeReq),

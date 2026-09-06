@@ -312,6 +312,7 @@ module iwm
 		.clk(clk),
 		.cep(cep),
 		.cen(cen),
+		.turbo(turbo),
 		._reset(_reset),
 		.ca0(ca0),
 		.ca1(ca1),
