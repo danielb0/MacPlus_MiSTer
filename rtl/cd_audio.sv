@@ -1353,30 +1353,18 @@ wire signed [15:0] ap_src_l = (ap_ch0 == 8'h01) ? sum_l[15:0] :
 wire signed [15:0] ap_src_r = (ap_ch1 == 8'h02) ? sum_r[15:0] :
                               (ap_ch1 == 8'h01) ? sum_l[15:0] : 16'sd0;
 //
-// The gain is REGISTERED, not read into a wire, so Quartus infers a ROM rather
-// than a 256-way mux: 109 ALMs and 0 memory bits combinational against 5 ALMs
-// and 2 M10K blocks registered. Those came from a STANDALONE HARNESS with free
-// inputs (2026-08-30; numbers and method in rtl/cd_vol_lut.vh).
-//
-// MEASURED IN THIS CORE, build 9303cab0, 2026-09-05, against f157fcc8. It does
-// NOT cost what the harness said, and it is NOT free either -- both guesses
-// were made here before anyone compiled it. scsi.v:1670 ties ap_vol0/1 to a
-// constant 8'hff (the drive's power-on full scale), so constant propagation
-// collapses each 256x16 table to a 32-bit altsyncram: ap_gain_l and ap_gain_r
-// become Ram0_rtl_0 and Ram1_rtl_0, 64 memory bits for the pair against the
-// harness's 8,192, and ONE extra M10K block -- 133 -> 134 of 553. They are
-// inferred as RAM, not removed as stuck-at.
-//
-// So the honest cost is one block of the 419 free, for a register that buys
-// nothing until a MODE SELECT path for page 0x0E exists. Worth it at that
-// price, and the added cycle is free either way -- but do not repeat here that
-// it costs nothing.
+// The gain is read into a WIRE. Registering it so Quartus infers a ROM was
+// tried and reverted: a standalone harness with free inputs said 109 ALMs
+// combinational against 5 ALMs + 2 M10K registered (2026-08-30; numbers and
+// method in rtl/cd_vol_lut.vh), but MEASURED IN THIS CORE (build 9303cab0,
+// 2026-09-05, against f157fcc8) neither figure held. scsi.v:1670 ties
+// ap_vol0/1 to a constant 8'hff -- the drive's power-on full scale -- so
+// constant propagation collapses the table either way, and the registered
+// form cost ONE extra M10K block (133 -> 134 of 553) for a pipeline stage
+// that buys nothing until a MODE SELECT path for page 0x0E exists.
 `include "cd_vol_lut.vh"
-reg [15:0] ap_gain_l, ap_gain_r;
-always @(posedge clk) begin
-	ap_gain_l <= cd_vol_gain(ap_vol0);
-	ap_gain_r <= cd_vol_gain(ap_vol1);
-end
+wire [15:0] ap_gain_l = cd_vol_gain(ap_vol0);
+wire [15:0] ap_gain_r = cd_vol_gain(ap_vol1);
 wire signed [31:0] ap_scl_l = ap_src_l * $signed({1'b0, ap_gain_l});
 wire signed [31:0] ap_scl_r = ap_src_r * $signed({1'b0, ap_gain_r});
 reg  [2:0] odiv;

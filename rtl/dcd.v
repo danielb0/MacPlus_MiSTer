@@ -336,11 +336,9 @@ module dcd
 	// Readable, Ejectable, Icon_Included, Disk_In_Place = $D6. Exactly one of
 	// Writable ($20) and Write_Protected ($08) joins it.
 	//
-	// WRITE_IMPLEMENTED went true when MultiBlock Write landed; a read-only
-	// mount still reports write-protected, which is a state the Mac has
-	// handled natively since 1984.
-	localparam WRITE_IMPLEMENTED = 1'b1;
-	wire writeProtected = ~WRITE_IMPLEMENTED | readonly;
+	// MultiBlock Write is implemented, so only a read-only mount reports
+	// write-protected -- a state the Mac has handled natively since 1984.
+	wire writeProtected = readonly;
 	wire [7:0] deviceChar = 8'hD6 | (writeProtected ? 8'h08 : 8'h20);
 
 	// The four replies share a six-byte header and differ after it. The kind
