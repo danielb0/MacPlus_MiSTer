@@ -247,12 +247,15 @@ Hardware smoke test, in this order:
 6. Re-probe: `PHLD holds/breaches` unchanged, and a completed transaction must
    show `... STATUS MESSAGE` in the phase list.
 
-## Outstanding, not a bug
+## Outstanding, not a bug -- CLOSED 2026-09-08
 
-Before the forum post goes up: confirm **mount-after-boot** works on this
-build. Strongly implied by the 08-27 tests and by the healthy capture
-(`cd rd=82 ack=82`, transactions completing), but not specifically exercised.
-The post's workaround depends on it.
+**Mount-after-boot is confirmed working.** Daniel, 2026-09-08, on the
+`5a17b4d` build: "definitely works". Nothing outstanding in this document.
+
+Original note: before the forum post goes up, confirm **mount-after-boot**
+works on this build. Strongly implied by the 08-27 tests and by the healthy
+capture (`cd rd=82 ack=82`, transactions completing), but not specifically
+exercised. The post's workaround depends on it.
 
 ## Not doing
 
