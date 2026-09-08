@@ -5808,6 +5808,13 @@ the same class of mistake in its own fix. The comments in `cd_audio.sv` and
 
 ### Backlog: grey `Mount Sec Floppy` while an HD20 is mounted (final polish)
 
+**DONE 2026-09-08.** Daniel called the polish phase during the `5a17b4d`
+hardware test. `status_menumask` gains bit 2, latched from the slot 5 mount
+pulse the way `rtl/dcd.v` derives its own `present`, and the OSD entry becomes
+`D2S3`. Unlike bits 0 and 1 it is not model-derived, because the HD20 is not
+model-gated. On `upstream-pr-2` as `1fdc754`; mirrored here. Original note
+follows.
+
 **Daniel, 2026-09-05: backlog, not now -- this is final polish before release.**
 
 Mounting an HD20 costs you the EXTERNAL floppy, because the DCD replaces it
