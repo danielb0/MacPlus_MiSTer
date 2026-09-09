@@ -5808,6 +5808,13 @@ the same class of mistake in its own fix. The comments in `cd_audio.sv` and
 
 ### Backlog: grey `Mount Sec Floppy` while an HD20 is mounted (final polish)
 
+**SUPERSEDED AND REVERTED 2026-09-09 -- see "Phase 6: the daisy chain" below.**
+The premise was that an HD20 costs you the external floppy. It does not have
+to: a real HD20 daisy-chains one behind itself, so there is nothing to grey.
+`MacPlus.sv` is back to `S3,DSK` with `status_menumask` unchanged. Kept below
+because the reasoning about where "replaces" is enforced is still correct, and
+because the greying is the fallback if the chain is ever abandoned.
+
 **DONE 2026-09-08.** Daniel called the polish phase during the `5a17b4d`
 hardware test. `status_menumask` gains bit 2, latched from the slot 5 mount
 pulse the way `rtl/dcd.v` derives its own `present`, and the OSD entry becomes
@@ -6006,6 +6013,114 @@ then a retraction that over-corrected, then the right answer again with a
 reproduction behind it. The retraction was still correct AS AN ACT: the evidence
 at that moment genuinely did contradict the conclusion. What was wrong was
 concluding from one trial in the first place.
+
+
+## Phase 6: the daisy chain -- internal floppy + HD20 + external floppy
+
+**Daniel, 2026-09-09: build it. The upstream PR is abandoned until this works,
+and will be re-cut from the result.**
+
+### It is real, on three independent lines
+
+1. **Apple's spec.** `Directly_Connected_Disks_Specification_1.2a_May85`, p.2-3,
+   Figure 2 "Flowthrough Schematic": *"it is possible to connect more than one
+   DCD to a Macintosh if they have the proper 'flow-through' circuit... the
+   Phase3 line is reserved for connecting to multiple DCD's with the
+   possibility of an external Sony drive at the end of the chain."*
+2. **The shipping hardware.** The HD20 had a floppy-out connector on its back
+   panel. BMOW's Steve Chamberlin implemented the chain on the Floppy Emu after
+   reverse-engineering the Mac ROM; a commenter there runs a genuine HD20 plus
+   a genuine 800K external floppy on a 512Ke.
+   <https://www.bigmessowires.com/2015/02/11/macintosh-disk-daisy-chaining/>
+   His mechanism, verbatim: *"To select the next drive in the chain, the Mac
+   asserted and then deasserted another signal called LSTRB, while keeping
+   ENABLE asserted the whole time."* Ordering constraint: HD20s first, at most
+   one floppy and it must be **last**.
+3. **The ROM.** Located byte-for-byte -- see `rtl/iwm.v`'s comment. `$B40`
+   resolves statically to `$418934` (filled at `$417DD0` from the word table at
+   `$417D6A`, base `$417D4C`). The install loop at `$417E00`-`$417E8A` runs
+   `d2 = 1..6`, Sony path below 3 and the DCD ID probe at or above it, ending
+   in `_AddDrive`. `subq.w #3,d0` at `$4189CC` makes drive numbers 3..6 chain
+   positions 0..3.
+
+**Heed Chamberlin's warning**: *"I was never able to get it to work as described
+in the document."* Implement from the ROM, not the spec prose.
+
+### And Apple's HD20 INIT carries the same routine
+
+The walk above is in the 128K ROM. The 512K gets DCD support from `PTCH` id=2
+(`.Sony`) on the HD20 startup floppy -- a different codebase -- so it was worth
+checking. Extracted with `scripts/mfs_extract.py` and diffed against the ROM:
+
+| block | PTCH | ROM | result |
+|---|---|---|---|
+| `cmpi #$4A` .. `cmpi #$8C`+`bne` | `+084E` | `$41894C` | **55 bytes, 0 differ** |
+| search entry + `dbpl` sense loop | `+0886` | `$418984` | **32 bytes, 0 differ** |
+| chain reset + hop count + table  | `+08BC` | `$4189BE` | identical bar the branch displacement |
+
+The only real difference is the pad instruction in the hop loop (`2E97` x4 in
+the ROM, `3E97` x2 in the PTCH), which is why the `bne` at `+0885` reads `$36`
+against the ROM's `$3A`. So no model needs a separate implementation.
+
+| model | chain expected? |
+|---|---|
+| Plus, 512Ke (128K ROM) | yes, from cold ROM |
+| 512K (64K ROM) | yes, once the startup floppy's `PTCH` installs |
+| 128K | no, and irrelevant -- it never mounts an HD20 at all |
+
+The 512K sequencing works because we have an internal drive: boot the startup
+floppy internally, the `PTCH` patches `.Sony`, the HD20 mounts, the floppy
+auto-ejects at the hand-off, and the chained external drive is live from then
+on. That is Chamberlin's own answer to the same question.
+
+### The change
+
+All of it is in `rtl/iwm.v`, plus reverting the greying in `MacPlus.sv`.
+
+* `chainSel`, the flow-through flip-flop: set by an LSTRB falling edge while
+  `/ENBL2` is asserted and a DCD is mounted; cleared whenever `/ENBL2` is
+  released, which is how every walk rewinds to the head.
+* `dcdOwnsPort = dcdPresent & ~chainSel` replaces bare `dcdPresent` at
+  `floppyExt._enable` and at the `readData`/`newByteReady` muxes.
+* `dcd0._enable` gains the `~chainSel` term, so the deselected DCD falls into
+  the phantom state Apple's spec requires (`dcd_link.v`'s `selected` drops and
+  its sense reads 1 in every ID state).
+
+**LSTRB is also the Sony register-write strobe (`$418618`), so the chain cannot
+be a toggle count.** It does not need to be: ownership is the discriminator,
+exactly as Apple's flip-flop has it. `floppy.v` already gates every `lstrbEdge`
+action on `_enable == 1'b0` and returns `8'hFF` while disabled, so it is
+already a well-behaved phantom -- the flip-flop alone disambiguates.
+
+### The eject hazard, and what the bench actually proves
+
+The walk strobes LSTRB in state 7 with SEL low, which is `{ca1,ca0,SEL} = 6`
+with `ca2 = 1` -- `floppy.v`'s EJECT. A hand-over that enables the floppy while
+that edge is still live ejects the disk it has just selected, at every boot.
+
+`sim/tb_iwm_dcd.v` gains 13 checks and passes 47/47 at 8 MHz and under TURBO.
+Two mutations were run against it, and they say different things:
+
+* **Removing the `dcdOwnsPort` term from `floppyExt._enable`** -> 3 failures,
+  including the eject. **The guard is load-bearing and the hazard is real.**
+* **Arming `chainSel` off the raw clk edge instead of under `cep`** -> passes
+  identically. That detail buys margin; it is not what saves the design, and
+  the comment in `iwm.v` says so rather than claiming otherwise.
+
+A third trap was self-inflicted and is worth recording: the first draft of the
+no-DCD regression check strobed in state 7, which ejects, and `diskEject` is a
+24-bit indicator TIMER (`floppy.v:469`) that stays asserted for ~2 s. It was
+still latched when the chain section checked it, so the chain test failed for a
+reason that had nothing to do with the chain. **Never read a sticky probe
+without clearing it first** -- second time this has bitten.
+
+### Pass criterion
+
+Hardware: with an HD20 in slot 5 and a floppy image in `Mount Sec Floppy`, a
+Plus (and a 512Ke) mounts **both**, the HD20 still reads and writes, and the
+external floppy image is not ejected at boot. On a 512K the same, once
+`HD_20_Startup.img` has installed the patch. If it works, the upstream PR is
+re-cut from here and the `Mount Sec Floppy` greying stays deleted.
 
 
 ## Verification

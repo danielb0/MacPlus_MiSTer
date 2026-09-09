@@ -64,10 +64,7 @@ localparam CONF_STR = {
 	"MACPLUS;UART115200;",
 	"-;",
 	"S2,DSK,Mount Pri Floppy;",
-	// D2 greys this while an HD20 is mounted: the DCD replaces the external
-	// drive rather than chaining behind it, so an image mounted here would be
-	// inert. Mask bit 2, driven below.
-	"D2S3,DSK,Mount Sec Floppy;",
+	"S3,DSK,Mount Sec Floppy;",
 	"-;",
 	"D0SC0,IMGVHD,Mount SCSI-6;",
 	"D0SC1,IMGVHD,Mount SCSI-5;",
@@ -452,14 +449,8 @@ mac_model mac_model_menu
 	.ramSoldered   ( menu_ramSoldered  )
 );
 
-// Mask bit 2 is not model-derived: an HD20 takes over the external drive port
-// for as long as it is mounted, so Mount Sec Floppy is inert. Latched from the
-// slot 5 mount pulse, which is how rtl/dcd.v derives its own `present`.
-reg hd20_mounted = 0;
-always @(posedge clk_sys) if (img_mounted[5]) hd20_mounted <= (img_size != 0);
-
 // Bit set = item unavailable, which is what uppercase D reads as.
-assign status_menumask = {13'd0, hd20_mounted, menu_ramSoldered, ~menu_scsiPresent};
+assign status_menumask = {14'd0, menu_ramSoldered, ~menu_scsiPresent};
 			  
 //
 // Serial Ports

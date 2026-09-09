@@ -656,6 +656,28 @@ module tb_iwm_dcd;
 		check("no DCD: state 7 reads INSTALLED = 0, so the ROM's ID probe fails here",
 		      st7[7] === 1'b0);
 
+		// THE REGRESSION THE DAISY CHAIN MUST NOT BREAK. With no DCD mounted
+		// the flow-through flip-flop must never arm, so an LSTRB strobe stays
+		// an ordinary Sony register strobe and this port is bit-identical to
+		// what it has always been.
+		//
+		// STROBED IN STATE 3, NOT STATE 7, and that is not arbitrary. floppy.v
+		// ejects on {ca1,ca0,SEL} = 6 with ca2 = 1, which is exactly state 7
+		// with SEL low, and its diskEject is a 24-bit indicator TIMER
+		// (floppy.v:469) that stays asserted for ~2 s. Ejecting here would
+		// still be latched when the chain section below checks that the
+		// hand-over ejects nothing, and that check would fail for a reason
+		// that has nothing to do with the chain. State 3 has ca2 = 0, so the
+		// strobe cannot eject, and arming is state-independent anyway.
+		setState(3'd3);
+		iwm_set(4'h7);   // ph3H
+		iwm_set(4'h6);   // ph3L
+		cpu_gap(8);
+		check("no DCD: an LSTRB strobe does not arm the chain",
+		      dut.chainSel === 1'b0);
+		check("no DCD: /ENBL2 still reaches the external floppy after a strobe",
+		      dut.floppyExt._enable === 1'b0);
+
 		// ------------------------------------------------------------------
 		$display("");
 		$display("-- BUG 1: the ID probe, with a DCD mounted --");
@@ -677,20 +699,76 @@ module tb_iwm_dcd;
 		check("BUG 1: and that is the DCD's line, not the floppy's",
 		      (st5[7] === dc5) && (st5[7] !== fx5));
 
-		// The DCD REPLACES the external floppy, and that has to hold at the
-		// floppy's enable, not just at the read mux: writeReqExt and the PH3
-		// strobes still go to it. The ROM's chain walk pulses PH3 in state 7
-		// with SEL=0, which is {ca1,ca0,SEL} = 110 = EJECT with ca2=1 - so with
-		// the floppy still enabled, mounting an HD20 ejected the external
-		// floppy image at every boot.
-		check("with a DCD mounted the external floppy is held disabled",
+		// ------------------------------------------------------------------
+		$display("");
+		$display("-- the daisy chain: DCD at position 0, floppy behind it --");
+		// ------------------------------------------------------------------
+		// Apple's flow-through flip-flop, iwm.v's chainSel. The Plus ROM and
+		// the HD20 INIT's PTCH both advance with an LSTRB pulse while /ENBL2
+		// stays asserted ($4189A4) and rewind by releasing it ($4189BE).
+		//
+		// Until the Mac advances, the DCD owns the port outright, and that has
+		// to hold at the FLOPPY'S ENABLE and not only at the read mux, because
+		// writeReqExt and the LSTRB strobes reach the floppy either way.
+		check("head of chain: the external floppy is held disabled",
 		      dut.floppyExt._enable === 1'b1);
+		check("head of chain: the DCD holds the port",
+		      dut.dcdOwnsPort === 1'b1);
+
+		// THE EJECT HAZARD. The walk pulses LSTRB in state 7 with SEL=0, which
+		// is {ca1,ca0,SEL} = 6 with ca2 = 1 - floppy.v's EJECT. This check is
+		// load-bearing and was confirmed so by removing the dcdOwnsPort term
+		// from floppyExt's _enable: the advancing strobe then ejects the very
+		// floppy it just selected, and this line fails. (A weaker mutation,
+		// arming chainSel off the raw clk edge rather than under cep, does NOT
+		// fail it - so this check pins the ownership guard, not the sampling.)
 		setState(3'd7);
-		iwm_set(4'h7);   // ph3H
-		iwm_set(4'h6);   // ph3L
+		iwm_set(4'h7);   // ph3H  \  the advance
+		iwm_set(4'h6);   // ph3L  /
 		cpu_gap(8);
-		check("a PH3 strobe in state 7 with a DCD mounted ejects no floppy",
+		check("the advancing LSTRB strobe ejects no floppy",
 		      diskEject[1] === 1'b0);
+
+		// ...and the hand-over itself
+		check("the chain advanced past the DCD", dut.chainSel === 1'b1);
+		check("the external floppy now has /ENBL2",
+		      dut.floppyExt._enable === 1'b0);
+		check("the DCD has released the port", dut.dcd0._enable === 1'b1);
+		check("the DCD is deselected inside the link layer",
+		      dut.dcd0.link.selected === 1'b0);
+
+		// The mux followed the enable. State 5 is the ONLY state where the two
+		// sources disagree - a DCD answers 0 and a Sony 1 - so a mux left on
+		// the DCD cannot pass this by luck. It is also the state the ROM
+		// discriminates on, and the state the search loop at $418998 watches
+		// while it hops.
+		idProbe;
+		check("the sense line is the floppy's now, not the DCD's",
+		      (st5[7] === fx5) && (st5[7] !== dc5));
+		check("the deselected DCD phantoms a 1 in state 5, as the spec requires",
+		      dc5 === 1'b1);
+
+		// We model a two-device chain, so a further strobe has nothing to hand
+		// the port to and must not bounce it back to the DCD.
+		setState(3'd7);
+		iwm_set(4'h7);
+		iwm_set(4'h6);
+		cpu_gap(8);
+		check("a second strobe does not hand the port back",
+		      dut.chainSel === 1'b1);
+
+		// $4189BE: releasing /ENBL2 clears the whole chain and the next
+		// assertion selects the head again. Every walk starts this way, and it
+		// is what lets the rest of this bench go on talking to the DCD.
+		iwm_set(4'h8);   // mtrOff
+		cpu_gap(4);
+		check("releasing /ENBL2 rewinds the chain", dut.chainSel === 1'b0);
+		iwm_set(4'h9);   // mtrOn
+		cpu_gap(4);
+		check("and the DCD holds the port again", dut.dcdOwnsPort === 1'b1);
+		idProbe;
+		check("the ID probe finds the DCD again after the rewind",
+		      (st7[7] === 1'b1) && (st6[7] === 1'b1) && (st5[7] === 1'b0));
 
 		// ------------------------------------------------------------------
 		$display("");
