@@ -39,7 +39,7 @@ module tb_drive_sides;
 		.advanceDriveHead(1'b0), .insertDisk(1'b0),
 		.diskSides(diskSides_i), .drive800k(1'b1),
 		.dskReadAck(1'b0), .dskReadData(8'h00),
-		.writeReq(1'b0), .writeProtect(1'b0)
+		.writeReq(1'b0), .writeProtect(1'b0), .writeMode(1'b0)
 	);
 
 	floppy dut400 (
@@ -49,7 +49,7 @@ module tb_drive_sides;
 		.advanceDriveHead(1'b0), .insertDisk(1'b0),
 		.diskSides(diskSides_i), .drive800k(1'b0),
 		.dskReadAck(1'b0), .dskReadData(8'h00),
-		.writeReq(1'b0), .writeProtect(1'b0)
+		.writeReq(1'b0), .writeProtect(1'b0), .writeMode(1'b0)
 	);
 
 	integer tests = 0;

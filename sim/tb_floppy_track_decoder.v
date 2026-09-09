@@ -54,7 +54,9 @@ module tb_floppy_track_decoder;
    floppy_track_encoder dut_enc (
       .clk(clk), .ready(ready), .rst(rst),
       .side(side), .sides(sides), .track(track),
-      .addr(enc_addr), .idata(enc_idata), .odata(enc_odata)
+      .addr(enc_addr), .idata(enc_idata), .odata(enc_odata),
+      // no writes here: the format relay stays disarmed
+      .wr_byte(1'b0), .wr_mark(1'b0), .wr_mark_sector(4'd0), .wr_end(1'b0)
    );
 
    // ---- corruption injector between encoder and decoder ----

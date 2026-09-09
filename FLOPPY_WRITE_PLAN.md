@@ -360,8 +360,48 @@ A single-pass review of the Phase 5 write path (`floppy.v`, `floppy_track_decode
 
 ---
 
-### Phase 6 — Formatting (explicitly deferred)
-Low-level format / "Erase Disk" requires writing complete tracks *including address fields*, with correct sync gaps and interleave across all 80 tracks. It is a materially harder problem than sector writes and is not needed to edit files on an already-formatted disk. Recommend shipping Phases 1–5 first and treating format as a separate project. If attempted, the currently commented-out inter-sector gap in `STATE_WAIT` will need to become real.
+### Phase 6 — Formatting (Erase Disk)
+
+**Original assessment (2026-08, superseded):** low-level format requires writing complete tracks *including address fields*, with correct sync gaps and interleave across all 80 tracks; materially harder than sector writes; deferred. If attempted, the commented-out inter-sector gap in `STATE_WAIT` would need to become real.
+
+**What actually happened (2026-09-09).** Erase Disk on an 800K image was tried on hardware (build `375E23A4`) and failed with "Initialization failed" — and left the image unmountable: every data sector of **track 0, both sides, zeroed**, nothing else touched, every write at the correct address, zero step requests. Daniel: *"we can't release the core in this state."* Scope he set: Erase Disk on an already-formatted, correctly-sized image; formatting blank or wrongly-sized images is out of scope.
+
+**The write side was never the problem.** Phases 0–5 already decode whatever data fields arrive, and the ROM's format writes ordinary ones. The failure was on the **read-back**, and the original assessment had the mechanism wrong in every particular: no gaps or interleave need modelling, and address fields need only be *noticed*, not laid out.
+
+#### The ROM's format, decoded (128K ROM `MacPlus v3.ROM`, base `$400000`)
+
+| address | what it does |
+|---|---|
+| `$419100` | entry: `$32(a1)` ← double-sided flag, `$22(a1)` ← **7** (sync count), copies the 27-byte template at `$4190CA` twelve times |
+| `$419136` | the track loop, 0..79; **bails on the first error** |
+| `$41917C` | seeks (`$418718` via `$4194B6`), then a spindle-speed check that an 800K drive skips (`tst.b $13(a1,d1.w) / bmi`) — *not* the write, as an earlier reading had it |
+| `$4191E6` | per side: `$419362` fills the template's address fields (sector order **0 6 1 7 2 8 3 9 4 10 5 11**, format byte `$22`/`$02`), `$419282` writes, `$418C18` reads back, `$41922C` judges; then side 1 if double-sided |
+| `$419282` | **the track write**, one burst: a byte to Q7H, 200 × `FF 3F CF F3 FC FF` (1200 bytes of lead-in), then per sector (sync−1) more sync groups, the 27-byte template (6 sync + `D5 AA 96 t s h f c DE AA FF` + 7 sync + `D5 AA AD s`), **703 × `$96`** (an all-zero data field and its checksum), `DE AA FF FF`. Then `tst.b Q7L`. Checks the handshake's underrun bit (`wrUnderrun`, −74) |
+| `$418C18` | the address-field reader: three bytes for a nibble check (`noNybErr`), then hunts `D5 AA 96` with a budget of `$5DC` (400K drive) or `$5BC` (800K) bytes (`noAdrMkErr`, −67), decodes t/s/h/f/checksum (`badCksmErr`), checks `DE AA` (`badBtSlpErr`); returns the sector in `d2` and the unused budget in `d0` |
+| `$419214` | **`d2` must be 0, else `$AE` = −82 = `fmt1Err`, "can't find sector 0 after track format"** |
+| `$41922C` | `d2 = ($5E0 − d0) / 5 − sync`; if negative: −1 accepts, less rewrites the track with sync−1 (below 4: `fmt2Err`, −83); if ≥ 0: `/spt`, 0 or 1 accepts, more accepts and bumps sync for the next track |
+
+So after the burst the ROM demands that the **first address field to come round is sector 0**, within ~1500 bytes. On real media that is physics: the write went round once, so its start is about to come under the head again. The core's read-side encoder free-runs through its own 12-sector cycle regardless of writes, so the first field after a format was whichever sector it happened to be on — `fmt1Err` eleven times in twelve. (Track 0 side 1 being zeroed as well means side 0 passed by that one-in-twelve luck; on the Plus's 800K budget the gap arithmetic accepts *any* non-negative distance, so sector 0 first is the only hard requirement there.) The 64K ROM's reader is the same shape (`move.w #$5DC` at `$4020DC`); its formatter was not decoded.
+
+#### The fix: a format relay (`rtl/floppy_track_encoder.v`)
+
+The media is treated as a ring of `rev_len` byte cells — spt × 782, the encoder's own cycle (SYN0 56 + ADDR 10 + SYN1 5 + DHDR 4 + DZRO 12 + DPRE 4 + DATA 683 + DSUM 4 + DTRL 3 + WAIT 1). `floppy_track_decoder.v` now reports each address field's sector as it goes by in the write stream (`amark`; a normal sector write never contains one, so this is unambiguous — the same fact the abandoned safety-gate idea rested on). From the first mark of a burst the encoder counts the distance from the head round to that mark per byte written, modulo `rev_len`; when the burst ends it restarts its layout at that sector with exactly that many sync bytes before the address mark (new `STATE_GAP`). The ROM then finds sector 0 where the physics says it is. A burst with no address field never arms the relay.
+
+`floppy.v` bounds the burst with a new `writeMode` input — the IWM's Q7, wired through in `iwm.v` — ANDed with the pacer, and delays the end pulse two clocks so the decoder's verdict on the final byte lands first. Nothing in the read path's timing or layout changed; a plain sector write behaves exactly as before.
+
+Not modelled: a write that runs on more than a revolution past its own first mark has, on real media, overwritten it. Here the count wraps and sector 0 is still presented. The ROM's format never does this (one revolution plus ~1100 bytes of lead-in, tuned toward a ~100-byte gap; with `rev_len` = 9384 the tuning settles at sync 8 by track 1 and stays there), and the consequence would only be accepting a track the ROM would have rewritten.
+
+#### Verification (`sim/tb_floppy_format.v`, iverilog, cep every 4 clocks as on hardware)
+
+1. the layout's period is measured at **9384** bytes and equals `rev_len`;
+2. the ROM's exact 10441-byte burst for track 0 side 0: all 12 data fields commit (track zeroed, nothing else written), the first field read back is sector 0 with `t=96 s=96 h=96 f=d9 c=d9`, its `D5` **185** bytes after the write against the ring arithmetic's 186 (the burst's end is a clock-level event inside a 16 µs byte cell; the bench allows a byte either side, the ROM's window is ~1400 wide), and the ROM's `$41922C` arithmetic, reproduced in the bench, accepts it on both budgets (sync bumped to 8 for the next track);
+3. an ordinary data-field write commits byte-exact and never arms the relay;
+4. a burst ending on the very byte that completes an address field (sector 6) relays to sector 6, 9378 bytes on (predicted 9379);
+5. the same burst on side 1 lands on side 1's sectors and reads back as side 1 (`h=d6`).
+
+Mutations: removing the relay fails 2, 4 and 5 (sector 4 comes first, at 499 bytes — the hardware failure, reproduced). Removing the two-clock delay on the burst-end pulse **passes at the hardware cep spacing** — it is load-bearing only when cep is held high every clock, as `tb_floppy_write_path.v` does; kept for that robustness, and the comment says so. All eight pre-existing floppy/IWM benches still pass.
+
+**STATUS: benched, NOT compiled, NOT on hardware.** Hardware test: Erase Disk (Two-Sided) on a copy of a formatted 800K image, with and without an HD20 mounted; then mount it, copy files on, and run `scripts/hfs_integrity.py`. A One-Sided erase of an 800K image, or a Two-Sided erase of a 400K image, is out of scope (the core cannot resize the file) and the latter would still spoil the image.
 
 ---
 

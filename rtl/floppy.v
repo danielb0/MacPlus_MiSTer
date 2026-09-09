@@ -100,6 +100,9 @@ module floppy
 	input writeProtect,    // 1 = writes refused for this drive (OSD toggle ANDed with img_readonly)
 	output writeBusy,      // 1 = write buffer full, mac must wait (iwm.v inverts for _iwmBusy)
 	output writeUnderrun,  // 1 = an in-flight write byte was abandoned (iwm.v inverts for _writeUnderrun)
+	input  writeMode,      // IWM Q7, 1 while the IWM is in write mode - what a real drive is
+	                       // told on its write-request line. Bounds a write for the format
+	                       // relay (floppy_track_encoder.v); the bytes still come via writeReq
 
 	output [21:0] dskWriteAddr,
 	output [15:0] dskWriteData,
@@ -187,7 +190,14 @@ module floppy
 
 		.addr    ( dskReadAddr ),
 		.idata   ( dskReadDataLatch ),
-		.odata   ( dskReadDataEnc )
+		.odata   ( dskReadDataEnc ),
+
+		// format relay: the write stream as the decoder consumed it, and
+		// the end of the burst (see wrEnd below for the ordering)
+		.wr_byte        ( decReady ),
+		.wr_mark        ( secAmark ),
+		.wr_mark_sector ( secAmarkSector ),
+		.wr_end         ( wrEnd )
 	);
 
 	// TODO: auto-detect doubleSidedDisk from image file size
@@ -328,11 +338,49 @@ module floppy
 		end
 	end
 
+	// The write as a whole, for the encoder's format relay (see
+	// floppy_track_encoder.v's header): a burst runs from the first byte
+	// the IWM hands over until it has left write mode AND the last byte has
+	// left the pacer. Between bytes writeBusyReg drops for a few clocks
+	// while the Mac refills the IWM, so the end is taken from Q7 and the
+	// pacer together, never from the pacer alone.
+	//
+	// wrEnd is that end delayed by two clocks. The pacer hands its last byte
+	// to the decoder (decReady) on the same edge that clears writeBusyReg;
+	// the decoder consumes it a clock later and reports an address mark a
+	// clock after that. The encoder must hear of that mark BEFORE it hears
+	// the burst is over, or a write ending on a mark's sector byte would
+	// relay to the wrong place. With cep every fourth clock, as on hardware,
+	// the next cep sample is already late enough and the delay changes
+	// nothing (checked by mutation); it is what keeps the order when cep is
+	// held high every clock, as sim/tb_floppy_write_path.v does. Two clocks
+	// covers any spacing (sim/tb_floppy_format.v ends a write exactly there
+	// to check).
+	//
+	// A disk change ends a burst too: an eject or remount mid-format must
+	// not leave the relay armed for the departing disk and fire it on the
+	// next disk's first ordinary write.
+	reg  wrBusyPrev, wrEndD1, wrEnd;
+	wire wrBusy = (writeMode && _enable == 1'b0) || writeBusyReg;
+	always @(posedge clk or negedge _reset) begin
+		if (_reset == 1'b0) begin
+			wrBusyPrev <= 1'b0;
+			wrEndD1    <= 1'b0;
+			wrEnd      <= 1'b0;
+		end else begin
+			if (cep) wrBusyPrev <= wrBusy;
+			wrEndD1 <= (cep && wrBusyPrev && !wrBusy) || writePathReset;
+			wrEnd   <= wrEndD1;
+		end
+	end
+
 	wire        secValid, secReject;
 	wire [3:0]  secNum;
 	wire [21:0] secAddr;
 	wire [8:0]  wcBufAddr;
 	wire [7:0]  wcBufData;
+	wire        secAmark;
+	wire [3:0]  secAmarkSector;
 
 	floppy_track_decoder dec
 	(
@@ -350,6 +398,8 @@ module floppy
 		.sector       ( secNum ),
 		.addr         ( secAddr ),
 		.reject       ( secReject ),
+		.amark        ( secAmark ),
+		.amark_sector ( secAmarkSector ),
 
 		.buf_addr     ( wcBufAddr ),
 		.buf_data     ( wcBufData )

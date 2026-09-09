@@ -28,6 +28,16 @@
  correct behaviour - there is no code path that can assert sector_valid
  without having verified the whole field.
 
+ Address fields (D5 AA 96) are reported, not decoded. A normal sector write
+ never contains one - the Mac writes a data field straight behind the
+ address field it just read - so one in the write stream means the track is
+ being FORMATTED, and floppy_track_encoder.v then needs to know where the
+ formatter put its sectors (its header explains why). `amark` pulses once
+ per address field with the sector number; the track/side bytes are not
+ checked because the drive's own head position decides where the data
+ lands, and a formatter writing some other track's number into the field
+ would be laying down a broken disk on real media too.
+
  The nibble-recovery arithmetic below is a direct RTL port of the reference
  decoder proved out in Phase 0 (sim/decode_track.py) against this project's
  own RTL encoder dumps: group g's four raw bytes recover group g's own
@@ -73,6 +83,12 @@ module floppy_track_decoder (
 
    // pulses for exactly one clk whenever a field is abandoned
    output reg        reject,
+
+   // pulses for exactly one clk when an address field's sector number has
+   // gone by in the write stream - only a format writes those; see the
+   // header. amark_sector is valid with it.
+   output reg        amark,
+   output reg [3:0]  amark_sector,
 
    // recovered 512-byte payload from the most recently completed sector,
    // registered (1-clk-latency) read port - buf_data reflects buf_addr as
@@ -194,9 +210,12 @@ module floppy_track_decoder (
                                // payload bytes 3g..3g+2, no lookback
    localparam S_DSUM = 3'd4;  // 4 bytes: checksum
    localparam S_DTRL = 3'd5;  // 2 bytes: DE AA trailer
+   localparam S_AMRK = 3'd6;  // 2 bytes after D5 AA 96: track (skipped),
+                               // then the sector, reported on amark
 
    reg [2:0]  state;
    reg [23:0] hist;
+   reg        am_idx;
 
    reg [3:0]  sector_reg;
    reg [21:0] addr_latched; // geom_base + sector term, captured in S_SECT
@@ -285,9 +304,12 @@ module floppy_track_decoder (
          reject       <= 1'b0;
          sector       <= 4'd0;
          addr         <= 22'd0;
+         amark        <= 1'b0;
+         amark_sector <= 4'd0;
       end else begin
          sector_valid <= 1'b0;
          reject       <= 1'b0;
+         amark        <= 1'b0;
 
          if (state == S_GRPC) begin
             // Drain the up-to-3 pending buf_mem writes latched when the
@@ -320,6 +342,29 @@ module floppy_track_decoder (
                hist <= {hist[15:0], idata};
                if ({hist[15:0], idata} == 24'hD5AAAD)
                   state <= S_SECT;
+               else if ({hist[15:0], idata} == 24'hD5AA96) begin
+                  state  <= S_AMRK;
+                  am_idx <= 1'b0;
+               end
+            end
+
+            S_AMRK: begin
+               // D5 AA 96 t s ...: skip t, report s, go back to scanning.
+               // A sector this track cannot hold (or a byte that is not
+               // GCR at all) is not reported: nothing could be laid out
+               // for it, and a formatter writing such a field is not one
+               // whose track needs relaying. D5 and AA are not data
+               // nibbles, so the scan cannot have matched inside a field.
+               if (am_idx == 1'b0)
+                  am_idx <= 1'b1;
+               else begin
+                  if (nib_valid && nib_cur < {2'b00, spt}) begin
+                     amark        <= 1'b1;
+                     amark_sector <= nib_cur[3:0];
+                  end
+                  state <= S_SCAN;
+                  hist  <= 24'd0;
+               end
             end
 
             S_SECT: begin

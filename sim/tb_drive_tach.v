@@ -42,7 +42,7 @@ module tb_drive_tach;
 		.advanceDriveHead(1'b0), .insertDisk(1'b0), .diskSides(1'b0),
 		.drive800k(1'b0), .disk_pwm(pwm),
 		.dskReadAck(1'b0), .dskReadData(8'h00),
-		.writeReq(1'b0), .writeProtect(1'b0)
+		.writeReq(1'b0), .writeProtect(1'b0), .writeMode(1'b0)
 	);
 
 	floppy dut800 (
@@ -52,7 +52,7 @@ module tb_drive_tach;
 		.advanceDriveHead(1'b0), .insertDisk(1'b0), .diskSides(1'b0),
 		.drive800k(1'b1), .disk_pwm(pwm),
 		.dskReadAck(1'b0), .dskReadData(8'h00),
-		.writeReq(1'b0), .writeProtect(1'b0)
+		.writeReq(1'b0), .writeProtect(1'b0), .writeMode(1'b0)
 	);
 
 	integer tests = 0, fails = 0;

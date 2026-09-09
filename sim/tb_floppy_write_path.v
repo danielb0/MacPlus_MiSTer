@@ -75,6 +75,8 @@ module tb_floppy_write_path;
       .writeProtect(writeProtect),
       .writeBusy(writeBusy),
       .writeUnderrun(writeUnderrun),
+      .writeMode(1'b0), // no Q7 here: bursts end when the pacer idles, and
+                        // nothing in this bench writes an address field
       .dskWriteAddr(dskWriteAddr),
       .dskWriteData(dskWriteData),
       .dskWriteReq(dskWriteReq),

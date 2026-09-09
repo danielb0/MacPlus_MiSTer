@@ -50,7 +50,9 @@ module tb_floppy_track_encoder;
       .track(track),
       .addr(addr),
       .idata(idata),
-      .odata(odata)
+      .odata(odata),
+      // no writes here: the format relay stays disarmed
+      .wr_byte(1'b0), .wr_mark(1'b0), .wr_mark_sector(4'd0), .wr_end(1'b0)
    );
 
    always #5 clk = ~clk;
