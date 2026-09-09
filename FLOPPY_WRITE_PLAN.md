@@ -401,7 +401,85 @@ Not modelled: a write that runs on more than a revolution past its own first mar
 
 Mutations: removing the relay fails 2, 4 and 5 (sector 4 comes first, at 499 bytes — the hardware failure, reproduced). Removing the two-clock delay on the burst-end pulse **passes at the hardware cep spacing** — it is load-bearing only when cep is held high every clock, as `tb_floppy_write_path.v` does; kept for that robustness, and the comment says so. All eight pre-existing floppy/IWM benches still pass.
 
-**STATUS: benched, NOT compiled, NOT on hardware.** Hardware test: Erase Disk (Two-Sided) on a copy of a formatted 800K image, with and without an HD20 mounted; then mount it, copy files on, and run `scripts/hfs_integrity.py`. A One-Sided erase of an 800K image, or a Two-Sided erase of a 400K image, is out of scope (the core cannot resize the file) and the latter would still spoil the image.
+**STATUS: hardware-confirmed 2026-09-09** (`36632fcd`, rbf `MacPlus_36632fcd_format.rbf`; compile 0 errors, 120 warnings - the same count as the daisy build; 20,431/41,910 ALMs, 133/553 M10Ks, all setup slack positive). Five erases, every one verified byte-level offline rather than by the Finder's verdict:
+
+| image | drive | choice | result |
+|---|---|---|---|
+| 800K | internal | Two-Sided | healthy 800K HFS; all 160 tracks rewritten; the one apparent survivor explained (deterministic empty-extents header) |
+| 400K | external | One-Sided | healthy 400K **MFS**; all 80 tracks; 0 survivors |
+| 800K x2 | internal | One-Sided | **800K volume over a never-formatted side 1** - see Phase 7 |
+| 400K | internal | Two-Sided | healthy 400K MFS; 0 survivors; identical in shape to the One-Sided run |
+
+The relay itself was correct in all five: the tracks the ROM asked for were formatted and read back coherently, across both volume formats, both drives, all five sector-per-track zones, and both dialog choices. The 800K erase also proves the zone arithmetic (`rev_len`) on hardware for every zone - the alternate MDB lands on cylinder 79, the outermost - which `tb_floppy_format.v` never covered, since it only replays track 0.
+
+**Two scope notes in the earlier draft of this phase were wrong and are retracted.** A Two-Sided erase of a 400K image does *not* spoil the image: side 1's data fields are rejected in `S_SECT`, that pass is a silent no-op, and the driver reads back format byte `$02` and builds a normal 400K MFS volume. Tested (`EraseMe400K-2.dsk`): 0 survivors, indistinguishable from the One-Sided run. That claim sat here as a confident prediction for a day and was retired by a one-minute experiment. Prefer the experiment.
+
+### Phase 7 - The medium is a diskette, not a file size (media sidedness)
+
+**The defect, found 2026-09-09 by the Phase 6 hardware testing.** `rtl/floppy_track_encoder.v:123`:
+
+```verilog
+wire [5:0] format = { sides, 5'h2 };   // double sided = 22, single sided = 2
+```
+
+`sides` is `diskSides`, which comes only from the image file size (`MacPlus.sv:1138`/`1154`, `== 64'd819200`). That byte goes into every synthesised address field (`count == 6`) and into its checksum, and the `.Sony` driver reads it back to decide the disk's geometry. So the core asserts a medium's format from the size of the file holding it.
+
+A One-Sided erase of an 800K image therefore does this: the ROM formats side 0 only (**correctly** - side 0 comes back 99.5% zeroed, side 1 untouched), the driver then reads an address field, our encoder answers `$22` regardless, and the DIP builds an 800K HFS volume spanning a side that was never formatted. The Finder shows a healthy, empty 779K disk of which **308 KB is intact content of the previous volume, sitting in reported-free space** (617 free allocation blocks byte-identical to the source image). Reproducible: two runs, 1596/1600 sectors identical. The earlier tests missed it because the lie happened to be true - in each of them the file size matched the format actually performed.
+
+**Why this is worth fixing rather than documenting (Daniel, 2026-09-09).** Every 3.5" diskette of the era was the same medium. 400K versus 800K was a *formatting choice*, not a property of the disk: SS/DS was a certification label, nothing on the disk encodes it, and the drive cannot tell. So an 819,200-byte image is simply *a diskette*, and the volume on it is whatever was last formatted onto it. Modelling that is the authentic behaviour; deriving it from the file size is the inauthentic shortcut. It also removes the need to keep separate 400K images.
+
+#### The measurements this design rests on
+
+1. **The format byte is consulted at mount, not only at format.** A real 400K disk put into a Plus's 800K drive reads correctly on a machine that never saw it formatted. The only thing telling it 400K is that byte on the medium.
+
+2. **Proven by observing a write.** `scratchpad/mk400in800.py` built `400Kvol_in_800Kimage.dsk` - a valid 400K MFS volume copied into the *side-0 positions* of an 819,200-byte layout, i.e. what a correct One-Sided format should produce. The Mac said "minor repairs", and the repair wrote exactly three sectors:
+
+   | file sector | physical | volume block | |
+   |---|---|---|---|
+   | 2 | cyl 0 side 0 sec 2 | MDB | same under both geometries |
+   | 4 | cyl 0 side 0 sec 4 | block 4 | same under both geometries |
+   | 16 | cyl 0 **side 1** sec 4 | block 16 | **decisive** |
+
+   Block 16 is `drAlBlSt`. Single-sided mapping puts it at file sector 28; double-sided at 16. The Mac wrote 16. Blocks 0-11 agree under both geometries; only block 12 onward discriminates, and the MFS directory (`drDirSt`=4, `drBlLen`=12) runs straight through that boundary.
+
+3. **A free-space figure is not evidence of volume health.** The Mac reported "387K free" while misreading the volume - that figure is `drFreeBks * drAlBlkSiz` straight from the MDB, which sits at file sector 2, identical under both geometries. It nearly bought a wrong conclusion.
+
+4. **A 400K volume can live in an 800K image.** The repaired file is one; it is self-consistent and the Mac reads and writes it happily. The constraint is *consistency of geometry*, not capacity.
+
+#### Design
+
+One signal - call it `media_ds` - replaces `diskSides` at the floppy level and describes **the volume on the medium**, not the file. It feeds *both* consumers:
+
+* `geom_base` and the `S_SECT` bounds check in `floppy_track_decoder.v`
+* the `format` byte in `floppy_track_encoder.v`
+
+Sources, in priority order:
+
+1. **Mount-time sniff.** On `insertDisk`, read the MDB through the read port `floppy.v` already owns (`dskReadAddr`/`dskReadData`) - no new master on the memory arbiter. File sector 2 is at byte 1024 under *both* geometries, which is what makes this possible at all. Check the signature (`D2D7` MFS, `4244` HFS) and compute `drNmAlBlks * drAlBlkSiz`: about 400K means single-sided, about 800K double-sided.
+2. **Latch during a format.** Extend `S_AMRK` from a 2-byte walk to 4 (`t s h f`) and capture the format byte. No volume exists yet at format time, so nothing can be sniffed; the latch is what lets the newly written geometry take effect immediately, so the DIP writes its volume with it.
+3. **Fallback: file size**, as today. A blank 819,200 image is a blank diskette - double-sided until formatted otherwise.
+
+**Consistency is the whole point.** Report `$02` at format and `$22` on the next mount and you manufacture precisely the image that needed repairs. A session-only latch is worse than doing nothing.
+
+**Consequence for the 64K-ROM models (Daniel's question, and the reason `media_ds` must drive the addressing too).** A 400K volume stored in *interleaved side-0 slots* is unreadable by a 128K/512K by construction, because those models run `sides=0` and address linearly: track 1 side 0 is file sector 24 on a Plus and file sector 12 on a 512K. With `media_ds` driving `geom_base`, an 800K file carrying a 400K volume is addressed **linearly**, the volume occupies the first 409,600 bytes, both machines read it identically, and the file's first half is byte-for-byte a standard 400K `.dsk` - so it stays portable.
+
+The mount gate (`MacPlus.sv:1138`/`1154`) changes with it: an 819,200 file mounts on any model, and a 64K-ROM machine accepts it when the volume is 400K, refusing an 800K one - which is right, since those drives physically lack the second head. Today such a file sets neither `dsk_*_ds` nor `dsk_*_ss`, so `insertDisk` never fires and the Mac sees an empty drive (confirmed on hardware 2026-09-09: "it didn't mount, it's locked out").
+
+#### Verification (benches first, per this project's convention)
+
+1. a failing bench for the defect itself: the format byte reported after a One-Sided format must be `$02`, not `$22`;
+2. `S_AMRK` capture: a format burst carrying `$02` sets `media_ds` low, one carrying `$22` sets it high, and an ordinary sector write changes neither;
+3. the sniff: MFS 391x1024 and a ~400K HFS both yield single-sided; HFS 1594x512 yields double-sided; a zeroed image falls back to file size;
+4. addressing: with `media_ds` low on an 819,200 image, track 1 side 0 sector 0 resolves to file sector 12, not 24 - and a side-1 field is rejected;
+5. all Phase 6 benches still pass unchanged.
+
+Mutation sweep as in Phase 6, and note the standing lesson: three of this project's mutation findings have been defects in the *bench*, not the RTL.
+
+#### Cheap partial, if Phase 7 is not built
+
+Zero side 1 on a One-Sided format. It does nothing for the geometry, but it removes the 308 KB stale-data hazard on its own for a fraction of the effort.
+
+**STATUS: designed, nothing written.** Phase 6 is unaffected and stands on its own merits.
 
 ---
 
