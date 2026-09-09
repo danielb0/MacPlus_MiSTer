@@ -772,6 +772,54 @@ module tb_iwm_dcd;
 
 		// ------------------------------------------------------------------
 		$display("");
+		$display("-- the INTERNAL drive during a chain walk (hardware 2026-09-09) --");
+		// ------------------------------------------------------------------
+		// SYMPTOM: with an HD20 mounted the internal floppy stops mounting,
+		// while the chained external one works. PFLP on the board says the
+		// internal drive never spun and was never asked to step - i.e. the ROM
+		// believes there is no disk in it.
+		//
+		// THE ENABLES ARE TWO INDEPENDENT LATCHES HERE. A real IWM has ONE
+		// disk-enable register bit ($1000/$1200) STEERED by SELECT
+		// ($1400/$1600) to /ENBL1 or /ENBL2, so exactly one drive can be
+		// enabled. iwm.v latches diskEnableInt and diskEnableExt separately
+		// and each keeps its value when the other port is written, so both can
+		// be enabled at once - and the ROM does exactly that: it works the
+		// internal drive, then selects external and asserts the enable for the
+		// chain search at $418984 WITHOUT ever clearing the internal one.
+		//
+		// The walk then strobes LSTRB in state 7 with SEL=0, which is
+		// {ca1,ca0,SEL} = 6 with ca2 = 1 - EJECT - and the still-enabled
+		// INTERNAL drive takes it. Same hazard the chain guard closes for
+		// floppyExt, arriving at the drive nobody guarded.
+		iwm_set(4'hA);   // intDrive
+		iwm_set(4'h9);   // mtrOn  -> diskEnableInt
+		check("internal drive enabled while the internal port is selected",
+		      dut.floppyInt._enable === 1'b0);
+
+		// diskEnableInt is deliberately NOT cleared here, because the ROM does
+		// not clear it either. The internal drive must go deaf on the SELECT
+		// alone, the way /ENBL1 does on a real IWM.
+		iwm_set(4'hB);   // extDrive
+		iwm_set(4'h9);   // mtrOn  -> diskEnableExt, as $418984 does
+		check("the internal drive goes deaf when the external port is selected",
+		      dut.floppyInt._enable === 1'b1);
+
+		setState(3'd7);
+		iwm_set(4'h7);   // ph3H  \  the chain advance
+		iwm_set(4'h6);   // ph3L  /
+		cpu_gap(8);
+		check("the chain walk must not eject the INTERNAL disk",
+		      diskEject[0] === 1'b0);
+
+		// leave the DCD owning the port again for the sections below
+		iwm_set(4'hA); iwm_set(4'h8);   // intDrive, mtrOff -> clear diskEnableInt
+		iwm_set(4'hB); iwm_set(4'h8);   // extDrive, mtrOff -> rewind the chain
+		iwm_set(4'h9);
+		cpu_gap(4);
+
+		// ------------------------------------------------------------------
+		$display("");
 		$display("-- HD Diag's hard reset, $D8FC --");
 		// ------------------------------------------------------------------
 		// mtrOff, ca2/ca1/ca0 -> state 4 (RESET), select external, mtrOn,

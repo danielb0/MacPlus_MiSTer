@@ -6114,6 +6114,44 @@ still latched when the chain section checked it, so the chain test failed for a
 reason that had nothing to do with the chain. **Never read a sticky probe
 without clearing it first** -- second time this has bitten.
 
+### Hardware 2026-09-09: the chain works, the INTERNAL drive broke
+
+First hardware test of `60357775`. Result, from Daniel: the secondary floppy
+**works** behind the HD20 -- the feature does what it was built to do -- but the
+**internal** floppy stops mounting while an HD20 is mounted, and with the HD20
+unmounted both drives are fine.
+
+JTAG (`PFLP`, internal drive only) said `motor=0 everSpun=0 step requests NONE`:
+the ROM never asked the internal drive to do anything, i.e. it believed there
+was no disk in it. The machine was healthy -- PC scattered across RAM and ROM,
+HD20 answering with `bad-checksum=0`.
+
+**Root cause, reproduced in simulation before any fix.** The enables here are
+two independent latches. A real IWM has ONE disk-enable register bit
+(`$1000`/`$1200`) STEERED by SELECT (`$1400`/`$1600`) to `/ENBL1` or `/ENBL2`,
+so exactly one drive is ever enabled; `iwm.v` latches `diskEnableInt` and
+`diskEnableExt` separately and each keeps its value when the other port is
+written. The ROM works the internal drive, then selects external and asserts
+the enable for the chain search at `$418984` **without clearing the internal
+one** -- so both were enabled. The walk then strobes LSTRB in state 7 with SEL
+low, which is EJECT, and the still-enabled internal drive took it.
+
+So it is the same hazard the chain guard closes for `floppyExt`, arriving at
+the drive nobody had guarded. Fix: `floppyInt._enable` gains
+`& ~selectExternalDrive`, making the internal drive deaf while the external
+port is driven -- which is what `/ENBL1` does on real hardware. It reduces to
+the shipped expression whenever there is no external activity.
+
+`sim/tb_iwm_dcd.v` gains a section that reproduces it: 50/50 at 8 MHz and
+TURBO, and dropping the new term brings the eject back.
+
+**Lesson: I guarded the drive the feature touches and not the drive the
+feature disturbs.** Four hypotheses died first -- spurious `chainSel` arming,
+the external image being ejected, SDRAM contention between the two floppies
+(the arbiter is fixed time-division, `addrController_top.v:244`), and a
+software drive-numbering collision. The one that survived was the one I could
+reproduce in the bench.
+
 ### Pass criterion
 
 Hardware: with an HD20 in slot 5 and a floppy image in `Mount Sec Floppy`, a

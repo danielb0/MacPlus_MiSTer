@@ -247,7 +247,24 @@ module iwm
 		.ca2(ca2),
 		.SEL(SEL),
 		.lstrb(lstrb),
-		._enable(~(diskEnableInt & driveSel)),
+		// ~selectExternalDrive IS LOAD-BEARING, and its absence broke the
+		// internal drive on hardware 2026-09-09 the moment the daisy chain went
+		// in. A real IWM has ONE disk-enable register bit ($1000/$1200) STEERED
+		// by SELECT ($1400/$1600) to /ENBL1 or /ENBL2, so exactly one drive is
+		// ever enabled. iwm.v models it as two independent latches which each
+		// keep their value when the other port is written, so both could be
+		// enabled at once - and the ROM does precisely that: it works the
+		// internal drive, then selects external and asserts the enable for the
+		// chain search at $418984 without clearing the internal one.
+		//
+		// The walk then strobes LSTRB in state 7 with SEL=0 = EJECT, and the
+		// still-enabled INTERNAL drive took it: the disk was ejected before the
+		// ROM ever spun it, so with an HD20 mounted the internal floppy stopped
+		// mounting while the chained external one worked. Gating on the select
+		// makes this drive deaf while the external port is being driven, which
+		// is what the hardware does. With no external activity it reduces to
+		// what shipped. sim/tb_iwm_dcd.v reproduces the eject without it.
+		._enable(~(diskEnableInt & driveSel & ~selectExternalDrive)),
 		// dataInLo directly, not a registered copy: writeReqInt pulses the
 		// same cycle a register load from dataInLo would be scheduled, and
 		// nonblocking assignments only see pre-edge values, so a register
