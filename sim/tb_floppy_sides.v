@@ -41,6 +41,13 @@
 //      image does take, so the ceiling is what is doing the work.
 //   7. the DRIVE ceiling: on a single-headed 400K mechanism the geometry is
 //      single-sided whatever the file and whatever the medium say.
+//   8. the SNIFF on its own: an 819,200 image whose volume was sniffed
+//      single-sided, with nothing latched, is single-sided - reads back $02,
+//      addresses linearly, refuses side 1 - and a Two-Sided burst over it
+//      takes. This is the path a One-Sided-erased 800K image follows at its
+//      NEXT mount. Every single-sided result in 1-7 came from the latch or a
+//      ceiling with mediaSides held at 1, and a mutant that ignored the sniff
+//      outright (`fmtSeen ? fmtDs : 1'b1`) passed all of them.
 //
 // Run from the repo ROOT:
 //   iverilog -g2012 -I rtl -y rtl -o sim/out/tb_floppy_sides.vvp sim/tb_floppy_sides.v
@@ -514,6 +521,34 @@ module tb_floppy_sides;
       step_out;
       write_one_sector(where, n_landed);
       ok("... and track 1 is addressed linearly", n_landed == 1 && where === 22'd6144);
+
+      // ==================================================================
+      // 8. the SNIFF on its own, nothing latched
+      // ==================================================================
+      img800k = 1; drive800k = 1; mediaSides = 0;
+      do_reset;
+      ok("a sniffed single-sided volume on an 800K image is single-sided, unformatted",
+         dut.doubleSidedDisk === 1'b0 && dut.fmtSeen === 1'b0);
+      read_format(gf);
+      ok("... and the address field says $02 before any format burst",
+         gf === gcr(6'h02));
+      step_out;
+      write_one_sector(where, n_landed);
+      ok("... track 1 addressed linearly on the sniff alone",
+         n_landed == 1 && where === 22'd6144);
+      select_side(1'b1);
+      write_one_sector(where, n_landed);
+      ok("... and side 1 refused on the sniff alone", n_landed == 0);
+      select_side(1'b0);
+
+      // the reverse direction: a Two-Sided erase of that 400K-in-800K disk
+      do_reset;
+      build_rom_format(1'b0, 6'h22, 1'b0);
+      feed_burst;
+      read_format(gf);
+      ok("a Two-Sided burst over a sniffed single-sided medium reads back $22",
+         gf === gcr(6'h22) && dut.doubleSidedDisk === 1'b1);
+      mediaSides = 1;
 
       $display("");
       if (all_ok) $display("MEDIA SIDEDNESS GATE: PASS");

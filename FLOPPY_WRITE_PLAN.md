@@ -492,12 +492,13 @@ The one place the core still diverges from a real 400K drive: reading an interle
 5b. **a disk change clears the format latch** - erase One-Sided, swap the disk, and the new medium's own verdict governs. Added after a mutation sweep found nothing testing it;
 6. **the ceiling:** a `$22` format burst on a 409,600 mount leaves `media_ds` low, the first address field read back carries `$02`, and a side-1 field is still rejected - the guard for the 400K-image behaviour Daniel wants kept; the mirror case, the same burst on an 819,200 mount, sets `media_ds` high and reads back `$22`;
 7. **the drive:** with `drive800k` low, an 819,200 mount carrying an 800K HFS MDB still has `media_ds` low and addresses linearly.
+8. **the sniff on its own (added in review, 2026-09-09):** an 819,200 mount with `mediaSides` low and nothing latched is single-sided - reads back `$02`, addresses track 1 linearly, refuses side 1 - and a Two-Sided burst over it takes. Every single-sided result in 1-7 came from the latch or a ceiling with `mediaSides` held at 1, so the seam between the sniff and the addressing - the path a One-Sided-erased 800K image follows at its next mount - had no check, and a mutant ignoring the sniff (`fmtSeen ? fmtDs : 1'b1`) passed all 30. The commit's "the sniff ignored" mutation had only tried the `1'b0` form, which check 1 catches. Now 35 checks; the `1'b1` mutant fails four.
 
 Mutation sweep as in Phase 6, and note the standing lesson: three of this project's mutation findings have been defects in the *bench*, not the RTL.
 
 #### What was built
 
-Five files, no new modules (nothing to add to `files.qip`).
+Six files, no new modules (nothing to add to `files.qip`).
 
 * **`rtl/floppy_loader.v`** - the mount-time sniff. Sector 2's words 0, 9, 10 and 11 are latched out of the staging BRAM as they stream past (`mdb_wr`), bounds-checked, and `drNmAlBlks * (drAlBlkSiz/512)` compared against 1200 blocks - halfway between a 400K volume's 800 and an 800K volume's 1600. The multiply is a seven-cycle shift-add rather than a 16x7 array or a DSP block; it starts when word 11 lands and finishes hundreds of thousands of cycles before `done`. New output `media_ds`, published at `DONE_PULSE` so it is valid on the same edge as `done`.
 * **`rtl/floppy_track_decoder.v`** - `S_AMRK` walks the whole address field (`t s h f c`) instead of stopping after `s`. `amark` still fires on `s`, on the same byte as before, because the encoder's relay measures the head from it. New outputs `fmt_mark`/`fmt_ds`, gated on the field's own checksum.
@@ -509,7 +510,7 @@ Five files, no new modules (nothing to add to `files.qip`).
 
 Two new benches, both green, plus the Phase 6 gates unchanged.
 
-* **`sim/tb_floppy_sides.v`** - the floppy-level checks above, driving `img800k`, `drive800k` and `mediaSides` independently so each ceiling is pinned against the others.
+* **`sim/tb_floppy_sides.v`** - the floppy-level checks above, driving `img800k`, `drive800k` and `mediaSides` independently so each ceiling is pinned against the others. Check 8 (the sniff alone) was added in review; see item 8 above for the mutant it exists for.
 * **`sim/tb_floppy_sniff.v`** - the sniff, on eleven images: MFS 391x1024 and HFS 395x1024 (single-sided), HFS 1594x512 and 797x1024 (double-sided), a zero-filled image, an unrecognised signature, a `drAlBlkSiz` that is not a multiple of 512, one above 64K, one of 32768 (the only value that sets the multiplier's top bit), an image with no sector 2, and a remount.
 * **Regression:** `tb_floppy_format` (FORMAT RELAY GATE: PASS), `tb_floppy_write_path` (PHASE 3 WRITE-PATH GATE: PASS), `tb_floppy_track_decoder`, `tb_floppy_track_encoder`, `tb_floppy_loader`, `tb_drive_sides` (ITEM 8 GATE: PASS), `tb_drive_tach`, `tb_iwm_latch`, `tb_iwm_dcd` - all pass, none with an RTL change.
 * **Mutation sweep, `floppy.v` and `floppy_track_decoder.v`:** eleven mutations - each ceiling dropped in turn, the latch ignored, the sniff ignored, the latch surviving a disk change, the format byte read from the wrong bit and from the wrong byte, the checksum gate removed, `f` never captured, and the latch disabled outright. One survived: **nothing tested that a disk change clears the latch.** It matters more than most - a latch outliving its medium would address the NEXT disk with the previous one's geometry, the same corruption this phase removes, aimed at a disk that was never touched. Check 4b was added for it and both mutations now die.
