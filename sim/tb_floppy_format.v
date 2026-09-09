@@ -70,7 +70,8 @@ module tb_floppy_format;
    reg        writeMode = 0;
    reg        writeProtect = 0;
    reg        insertDisk = 1;
-   reg        diskSides = 1;   // 800K image
+   reg        img800k = 1;     // 819,200-byte image ...
+   reg        mediaSides = 1;  // ... whose volume sniffed as double-sided
 
    wire [7:0]  readData;
    wire        newByteReady;
@@ -91,8 +92,9 @@ module tb_floppy_format;
       .advanceDriveHead(1'b0),
       .newByteReady(newByteReady),
       .insertDisk(insertDisk),
-      .diskSides(diskSides),
+      .img800k(img800k),
       .drive800k(1'b1),
+      .mediaSides(mediaSides),
       .disk_pwm(9'd0),
       .diskEject(),
       .motor(), .act(),

@@ -13,7 +13,7 @@
 // bugs were fixed and the ROM actually ran.
 //
 // The distinction this bench exists to hold is MEDIA vs MECHANISM. They are
-// different signals with different lifetimes -- diskSides changes when you
+// different signals with different lifetimes -- img800k changes when you
 // mount a disk, drive800k never changes for a given model -- and wiring
 // SIDES to the wrong one would look correct with a disk inserted and wrong
 // with an empty drive. So every case below pins one against the other.
@@ -27,7 +27,7 @@ module tb_drive_sides;
 	reg clk = 0;
 	always #5 clk = ~clk;
 
-	reg  drive800k_i, diskSides_i;
+	reg  drive800k_i, img800k_i;
 	reg  [3:0] addr;
 	wire [7:0] rd800, rd400;
 
@@ -37,7 +37,7 @@ module tb_drive_sides;
 		.ca2(addr[3]), .ca1(addr[2]), .ca0(addr[1]), .SEL(addr[0]),
 		.lstrb(1'b1), ._enable(1'b0), .writeData(8'h00), .readData(rd800),
 		.advanceDriveHead(1'b0), .insertDisk(1'b0),
-		.diskSides(diskSides_i), .drive800k(1'b1),
+		.img800k(img800k_i), .drive800k(1'b1), .mediaSides(1'b1),
 		.dskReadAck(1'b0), .dskReadData(8'h00),
 		.writeReq(1'b0), .writeProtect(1'b0), .writeMode(1'b0)
 	);
@@ -47,7 +47,7 @@ module tb_drive_sides;
 		.ca2(addr[3]), .ca1(addr[2]), .ca0(addr[1]), .SEL(addr[0]),
 		.lstrb(1'b1), ._enable(1'b0), .writeData(8'h00), .readData(rd400),
 		.advanceDriveHead(1'b0), .insertDisk(1'b0),
-		.diskSides(diskSides_i), .drive800k(1'b0),
+		.img800k(img800k_i), .drive800k(1'b0), .mediaSides(1'b1),
 		.dskReadAck(1'b0), .dskReadData(8'h00),
 		.writeReq(1'b0), .writeProtect(1'b0), .writeMode(1'b0)
 	);
@@ -84,15 +84,15 @@ module tb_drive_sides;
 		// This is the case that separates the two signals. With no disk
 		// mounted, media-sidedness is meaningless but the drive still has
 		// however many heads it has, and the ROM still asks.
-		diskSides_i = 1'b0;
+		img800k_i = 1'b0;
 		read_reg(REG_SIDES);
 		ok("800K drive, no disk: SIDES = 1 (double-sided mechanism)", rd800[7] == 1'b1);
 		ok("400K drive, no disk: SIDES = 0 (single-sided mechanism)", rd400[7] == 1'b0);
 
 		// ---- 2. a single-sided image in each drive ------------------------
 		// A 400K disk in a Plus does not turn the Plus's drive into a 400K
-		// mechanism. If SIDES were wired to diskSides this would break.
-		diskSides_i = 1'b0;
+		// mechanism. If SIDES were wired to img800k this would break.
+		img800k_i = 1'b0;
 		read_reg(REG_SIDES);
 		ok("800K drive + 400K media: SIDES stays 1", rd800[7] == 1'b1);
 		ok("400K drive + 400K media: SIDES stays 0", rd400[7] == 1'b0);
@@ -101,7 +101,7 @@ module tb_drive_sides;
 		// The 400K row is the mirror image of the bug: the media gate should
 		// already have refused an 800K image on that model, but even if one
 		// arrived, the MECHANISM must not start claiming a second head.
-		diskSides_i = 1'b1;
+		img800k_i = 1'b1;
 		read_reg(REG_SIDES);
 		ok("800K drive + 800K media: SIDES = 1", rd800[7] == 1'b1);
 		ok("400K drive + 800K media: SIDES STILL 0 (media must not drive it)", rd400[7] == 1'b0);

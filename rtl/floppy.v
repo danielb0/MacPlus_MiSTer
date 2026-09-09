@@ -77,11 +77,19 @@ module floppy
 	input advanceDriveHead,  // prevents overrun when debugging, does not exist on a real Mac!
 	output reg newByteReady,
 	input insertDisk,
-	input diskSides,
+	// The mounted FILE is 819,200 bytes rather than 409,600. One of the
+	// three terms of doubleSidedDisk below, and only one - it says nothing
+	// on its own about the geometry of the volume inside the file, which
+	// was this core's original mistake (FLOPPY_WRITE_PLAN.md Phase 7).
+	input img800k,
 	// The DRIVE's capability, not the media's: 1 = 800K double-sided
 	// mechanism, 0 = 400K single-sided. Constant per model (rtl/mac_model.v),
-	// unlike diskSides above, which describes whichever image is mounted.
+	// unlike img800k above, which describes whichever image is mounted.
 	input drive800k,
+	// What the MEDIUM said at mount time, sniffed out of its own volume
+	// header by floppy_loader.v: 1 = the volume is double-sided, or the
+	// image carries nothing recognisable. See doubleSidedDisk below.
+	input mediaSides,
 	// Spindle duty INDEX, 0..399, computed by dataController_top.sv exactly as
 	// the hardware does: low 6 bits -> 64-entry table -> sum of 100 -> /10 - 11.
 	// duty%% = index/4.19. Only a 400K mechanism obeys it; see the tachometer.
@@ -200,8 +208,58 @@ module floppy
 		.wr_end         ( wrEnd )
 	);
 
-	// TODO: auto-detect doubleSidedDisk from image file size
-	wire doubleSidedDisk = diskSides;
+	// ---------------------------------------------------------------------
+	// Is this a double-sided diskette? (Phase 7 of FLOPPY_WRITE_PLAN.md)
+	//
+	// This one wire decides both halves of the geometry - where a sector
+	// lives in the image (the soff/spt arithmetic in the encoder and the
+	// decoder) and the FORMAT byte the encoder puts in every address field,
+	// which is what the .Sony driver reads the geometry back out of. They
+	// have to be the same answer or the driver builds a volume the core
+	// then addresses differently, which is exactly the defect this phase
+	// fixes.
+	//
+	// Every 3.5" diskette of the era was one medium; 400K vs 800K was a
+	// formatting choice, not a property of the disk. So three terms, each a
+	// CEILING on the ones after it:
+	//
+	//   drive800k  a 400K mechanism has one head. Whatever is on the disk,
+	//              this machine sees side 0 and nothing else, and the ROM
+	//              judges what it finds - which is what a real 400K drive
+	//              does with an 800K diskette put into it.
+	//   img800k    a 409,600-byte file cannot hold a double-sided volume
+	//              however it is formatted. Without this a format burst
+	//              claiming two sides would send side 1's sectors past the
+	//              end of the file, where floppy_sd_writer.v drops them.
+	//              It is also what keeps a Two-Sided erase of a 400K image
+	//              producing an ordinary 400K volume, as it does today.
+	//   the medium itself, which speaks twice: through the volume it
+	//              already carries (mediaSides, sniffed at mount) and,
+	//              from the moment a format overwrites that volume, through
+	//              the format byte of the track being laid down.
+	//
+	// The latch below is why the two never disagree. A format happens after
+	// a mount, so within a session it wins; at the next mount the sniff
+	// reads the volume this format wrote, so the two agree by construction.
+	// Reporting one geometry at format time and the other at the next mount
+	// is precisely how you manufacture a disk that needs repairs.
+	reg fmtSeen; // an address field's format byte has been read since the mount
+	reg fmtDs;
+	always @(posedge clk) begin
+		// Cleared with the decoder that feeds it, on the same eject/mount
+		// events - a latch that outlived its medium would be worse than no
+		// latch at all.
+		if (!_reset || writePathReset) begin
+			fmtSeen <= 1'b0;
+			fmtDs   <= 1'b0;
+		end
+		else if (secFmtMark) begin
+			fmtSeen <= 1'b1;
+			fmtDs   <= secFmtDs;
+		end
+	end
+
+	wire doubleSidedDisk = drive800k && img800k && (fmtSeen ? fmtDs : mediaSides);
 
 	// ---------------------------------------------------------------------
 	// Write path (Phase 3 of FLOPPY_WRITE_PLAN.md).
@@ -381,6 +439,8 @@ module floppy
 	wire [7:0]  wcBufData;
 	wire        secAmark;
 	wire [3:0]  secAmarkSector;
+	wire        secFmtMark;
+	wire        secFmtDs;
 
 	floppy_track_decoder dec
 	(
@@ -400,6 +460,8 @@ module floppy
 		.reject       ( secReject ),
 		.amark        ( secAmark ),
 		.amark_sector ( secAmarkSector ),
+		.fmt_mark     ( secFmtMark ),
+		.fmt_ds       ( secFmtDs ),
 
 		.buf_addr     ( wcBufAddr ),
 		.buf_data     ( wcBufData )

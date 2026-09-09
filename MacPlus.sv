@@ -847,10 +847,12 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 
 	// floppy disk interface
 	.insertDisk({dsk_ext_ins, dsk_int_ins}),
-	.diskSides({dsk_ext_ds, dsk_int_ds}),
-	// mac_model's drive800k, straight through: the MEDIA gate above uses it
-	// too (MAC128K_PLAN.md item 8), but the ROM asks the DRIVE.
+	.img800k({dsk_ext_ds, dsk_int_ds}),
+	// mac_model's drive800k, straight through: the ROM asks the DRIVE, and
+	// floppy.v's doubleSidedDisk takes it as its first ceiling.
 	.drive800k(drive800k),
+	// each floppy_loader's mount-time verdict on the medium it just loaded
+	.mediaSides({ldr_ext_media_ds, ldr_int_media_ds}),
 	.dbg_floppy(dbg_floppy),
 	.diskEject(diskEject),
 	.dskReadAddrInt(dskReadAddrInt),
@@ -950,6 +952,7 @@ wire        ldr_int_done, ldr_ext_done;
 wire        ldr_int_busy, ldr_ext_busy;
 wire [63:0] ldr_int_size, ldr_ext_size;
 wire        ldr_int_readonly, ldr_ext_readonly;
+wire        ldr_int_media_ds, ldr_ext_media_ds;
 
 floppy_loader ldr_int
 (
@@ -976,6 +979,7 @@ floppy_loader ldr_int
 	.done(ldr_int_done),
 	.loaded_size(ldr_int_size),
 	.readonly_latched(ldr_int_readonly),
+	.media_ds(ldr_int_media_ds),
 	.busy(ldr_int_busy)
 );
 
@@ -1004,6 +1008,7 @@ floppy_loader ldr_ext
 	.done(ldr_ext_done),
 	.loaded_size(ldr_ext_size),
 	.readonly_latched(ldr_ext_readonly),
+	.media_ds(ldr_ext_media_ds),
 	.busy(ldr_ext_busy)
 );
 
@@ -1106,15 +1111,20 @@ rom_word_addr rom_word_addr_dl (.slot(dio_index[7:6]), .word_offset(dio_addr[17:
 wire [20:0] rom_read_addr;
 rom_word_addr rom_word_addr_rd (.slot(romSlot),        .word_offset(memoryAddr[18:1]),  .addr(rom_read_addr));
 
-// good floppy image sizes are 819200 bytes and 409600 bytes. 819200 is
-// additionally gated on drive800k (MAC128K_PLAN.md item 8): the 128K and
-// 512K's drive is mechanically single-sided -- no head for the second side,
-// not just a format limit -- so an 800K image on those models is refused
-// exactly like any other size the drive can't read: neither ds nor ss goes
-// true, insertDisk never asserts for that slot, and nothing downstream needs
-// to know why. Plus/SE/512Ke are unaffected -- their real drives took 800K.
-reg dsk_int_ds, dsk_ext_ds;  // double sided image inserted
-reg dsk_int_ss, dsk_ext_ss;  // single sided image inserted
+// good floppy image sizes are 819200 bytes and 409600 bytes. Both mount on
+// every model. An 819200 image used to be refused on the 128K and 512K
+// (MAC128K_PLAN.md item 8, back when this flag doubled as the geometry),
+// but a real 400K drive does not refuse an 800K diskette - it reads side 0
+// and lets the ROM say "unreadable, initialise?". The refusal was a leftover
+// of that conflation; the mechanism half of item 8 lives in floppy.v's SIDES
+// register, which is the half the ROM actually interrogates, and the
+// geometry half is now floppy.v's doubleSidedDisk, where drive800k is the
+// first ceiling. See FLOPPY_WRITE_PLAN.md Phase 7.
+//
+// So these two say only how big the FILE is. dsk_*_ds is no longer a claim
+// that the volume inside it is double-sided.
+reg dsk_int_ds, dsk_ext_ds;  // 819,200-byte image inserted
+reg dsk_int_ss, dsk_ext_ss;  // 409,600-byte image inserted
 
 // any known type of disk image inserted?
 wire dsk_int_ins = dsk_int_ds || dsk_int_ss;
@@ -1135,7 +1145,7 @@ always @(posedge clk_sys) begin
 		dsk_int_ss <= 1'b0;
 	end
 	else if (ldr_int_done) begin
-		dsk_int_ds <= (ldr_int_size == 64'd819200) && drive800k;
+		dsk_int_ds <= (ldr_int_size == 64'd819200);
 		dsk_int_ss <= (ldr_int_size == 64'd409600);
 	end
 
@@ -1151,7 +1161,7 @@ always @(posedge clk_sys) begin
 		dsk_ext_ss <= 1'b0;
 	end
 	else if (ldr_ext_done) begin
-		dsk_ext_ds <= (ldr_ext_size == 64'd819200) && drive800k;
+		dsk_ext_ds <= (ldr_ext_size == 64'd819200);
 		dsk_ext_ss <= (ldr_ext_size == 64'd409600);
 	end
 

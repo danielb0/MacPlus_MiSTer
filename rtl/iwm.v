@@ -52,8 +52,9 @@ module iwm
 	output [15:0] dataOut,
 	input [1:0] insertDisk,
 	output [1:0] diskEject,
-	input [1:0] diskSides,
-	input drive800k, // drive MECHANISM: see floppy.v's port comment
+	input [1:0] img800k,    // mounted FILE is 819,200 bytes: see floppy.v's port comment
+	input drive800k,        // drive MECHANISM: see floppy.v's port comment
+	input [1:0] mediaSides, // what the MEDIUM said at mount: see floppy.v
 	input [8:0] disk_pwm, // spindle duty INDEX 0..399: see floppy.v's tachometer
 	output [31:0] dbg_floppy, // internal drive only -- see floppy.v
 	
@@ -274,8 +275,9 @@ module iwm
 		.advanceDriveHead(advanceDriveHead),
 		.newByteReady(newByteReadyInt),
 		.insertDisk(insertDisk[0]),
-		.diskSides(diskSides[0]),
+		.img800k(img800k[0]),
 		.drive800k(drive800k),
+		.mediaSides(mediaSides[0]),
 		.disk_pwm(disk_pwm),
 		.dbg_floppy(dbg_floppy),
 		.diskEject(diskEject[0]),
@@ -332,8 +334,9 @@ module iwm
 		.advanceDriveHead(advanceDriveHead),
 		.newByteReady(newByteReadyExt),
 		.insertDisk(insertDisk[1]),
-		.diskSides(diskSides[1]),
+		.img800k(img800k[1]),
 		.drive800k(drive800k),
+		.mediaSides(mediaSides[1]),
 		.disk_pwm(disk_pwm),
 		.diskEject(diskEject[1]),
 

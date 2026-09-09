@@ -46,7 +46,8 @@ module tb_floppy_write_path;
    reg  [7:0] writeData = 8'd0;
    reg  writeProtect = 1'b0;
    reg  insertDisk = 1'b1;
-   reg  diskSides = 1'b1;
+   reg  img800k    = 1'b1;
+   reg  mediaSides = 1'b1;
    reg  ca0 = 1'b0, ca1 = 1'b0, ca2 = 1'b0, SEL = 1'b0, lstrb = 1'b1;
 
    wire [7:0] readData;
@@ -66,7 +67,9 @@ module tb_floppy_write_path;
       .advanceDriveHead(1'b0),
       .newByteReady(),
       .insertDisk(insertDisk),
-      .diskSides(diskSides),
+      .img800k(img800k),
+      .drive800k(1'b1),
+      .mediaSides(mediaSides),
       .diskEject(),
       .motor(), .act(),
       .dskReadAddr(), .dskReadAck(1'b0), .dskReadData(8'd0),

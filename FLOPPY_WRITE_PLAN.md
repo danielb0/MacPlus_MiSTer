@@ -489,12 +489,38 @@ The one place the core still diverges from a real 400K drive: reading an interle
 3. the sniff: MFS 391x1024 and a ~400K HFS both yield single-sided; HFS 1594x512 yields double-sided; a zeroed image says nothing (falls through to the drive);
 4. addressing: with `media_ds` low on an 819,200 image, track 1 side 0 sector 0 resolves to file sector 12, not 24 - and a side-1 field is rejected;
 5. all Phase 6 benches still pass unchanged;
+5b. **a disk change clears the format latch** - erase One-Sided, swap the disk, and the new medium's own verdict governs. Added after a mutation sweep found nothing testing it;
 6. **the ceiling:** a `$22` format burst on a 409,600 mount leaves `media_ds` low, the first address field read back carries `$02`, and a side-1 field is still rejected - the guard for the 400K-image behaviour Daniel wants kept; the mirror case, the same burst on an 819,200 mount, sets `media_ds` high and reads back `$22`;
 7. **the drive:** with `drive800k` low, an 819,200 mount carrying an 800K HFS MDB still has `media_ds` low and addresses linearly.
 
 Mutation sweep as in Phase 6, and note the standing lesson: three of this project's mutation findings have been defects in the *bench*, not the RTL.
 
-**STATUS: designed and reviewed, nothing written.** Phase 6 is unaffected and stands on its own merits.
+#### What was built
+
+Five files, no new modules (nothing to add to `files.qip`).
+
+* **`rtl/floppy_loader.v`** - the mount-time sniff. Sector 2's words 0, 9, 10 and 11 are latched out of the staging BRAM as they stream past (`mdb_wr`), bounds-checked, and `drNmAlBlks * (drAlBlkSiz/512)` compared against 1200 blocks - halfway between a 400K volume's 800 and an 800K volume's 1600. The multiply is a seven-cycle shift-add rather than a 16x7 array or a DSP block; it starts when word 11 lands and finishes hundreds of thousands of cycles before `done`. New output `media_ds`, published at `DONE_PULSE` so it is valid on the same edge as `done`.
+* **`rtl/floppy_track_decoder.v`** - `S_AMRK` walks the whole address field (`t s h f c`) instead of stopping after `s`. `amark` still fires on `s`, on the same byte as before, because the encoder's relay measures the head from it. New outputs `fmt_mark`/`fmt_ds`, gated on the field's own checksum.
+* **`rtl/floppy.v`** - `diskSides` renamed to `img800k` (it only ever meant "the file is 819,200 bytes"), new input `mediaSides`, and `doubleSidedDisk` becomes `drive800k && img800k && (fmtSeen ? fmtDs : mediaSides)` - the three ceilings, with the format latch cleared by the same `writePathReset` that clears the decoder feeding it.
+* **`rtl/iwm.v`, `rtl/dataController_top.sv`** - the rename and the new signal, straight through.
+* **`MacPlus.sv`** - the mount gate loses its `drive800k` term; `dsk_*_ds` now means only "819,200-byte file". Each loader's `media_ds` is wired to its drive.
+
+#### Verification
+
+Two new benches, both green, plus the Phase 6 gates unchanged.
+
+* **`sim/tb_floppy_sides.v`** - the floppy-level checks above, driving `img800k`, `drive800k` and `mediaSides` independently so each ceiling is pinned against the others.
+* **`sim/tb_floppy_sniff.v`** - the sniff, on eleven images: MFS 391x1024 and HFS 395x1024 (single-sided), HFS 1594x512 and 797x1024 (double-sided), a zero-filled image, an unrecognised signature, a `drAlBlkSiz` that is not a multiple of 512, one above 64K, one of 32768 (the only value that sets the multiplier's top bit), an image with no sector 2, and a remount.
+* **Regression:** `tb_floppy_format` (FORMAT RELAY GATE: PASS), `tb_floppy_write_path` (PHASE 3 WRITE-PATH GATE: PASS), `tb_floppy_track_decoder`, `tb_floppy_track_encoder`, `tb_floppy_loader`, `tb_drive_sides` (ITEM 8 GATE: PASS), `tb_drive_tach`, `tb_iwm_latch`, `tb_iwm_dcd` - all pass, none with an RTL change.
+* **Mutation sweep, `floppy.v` and `floppy_track_decoder.v`:** eleven mutations - each ceiling dropped in turn, the latch ignored, the sniff ignored, the latch surviving a disk change, the format byte read from the wrong bit and from the wrong byte, the checksum gate removed, `f` never captured, and the latch disabled outright. One survived: **nothing tested that a disk change clears the latch.** It matters more than most - a latch outliving its medium would address the NEXT disk with the previous one's geometry, the same corruption this phase removes, aimed at a disk that was never touched. Check 4b was added for it and both mutations now die.
+* **Mutation sweep, `floppy_loader.v`:** twelve mutations, all caught. Three of them were only caught after the bench was strengthened, and the reason is worth keeping: the multiply's seventh bit, and the `drAlBlkSiz` high-word bound, were **unreachable from any of the original cases** - every real floppy volume uses a 512- or 1024-byte allocation block, so the top of the RTL's own admitted input range had no test. The fix was to add cases at the bounds the RTL admits, not to narrow the RTL. This project's sweeps have now found gaps in the BENCH rather than the RTL well over a dozen times; this phase added three more, plus the two bench defects below.
+
+Two defects were found during verification and both were in the benches, not the RTL:
+
+1. `tb_floppy_sniff.v` bracketed each mount on the `done` pulse. `done` is high during the cycle in which the loader is already back in `IDLE`, so a `wait (done)` posted right after the previous mount returns sees that same pulse and falls straight through - the second mount never ran and the bench read the FIRST image's verdict believing it was the second's. Now bracketed on `busy`.
+2. `tb_floppy_sides.v` read the commit counter as soon as `feed_burst` returned, but the write ends slightly before `floppy_write_committer.v` has drained the sector, so the addressing checks were reading the PREVIOUS sector's landing address - in a bench whose entire subject is where a sector lands. One extra cycle was all it needed; it now waits for its own commit, bounded, since a refused field never produces one.
+
+**STATUS: implemented, benched, mutation-swept. NOT compiled, never on hardware.** Phase 6 is unaffected and its gate still passes. The hardware test when this is next built: erase an 800K image One-Sided, confirm the Finder reports a ~400K disk, and check offline that the volume occupies the first 409,600 bytes linearly and that free space contains none of the old contents - the 617 recoverable allocation blocks that started this phase.
 
 ---
 

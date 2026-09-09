@@ -39,8 +39,8 @@ module tb_drive_tach;
 		.clk(clk), .cep(1'b1), .cen(1'b1), ._reset(rst_n),
 		.ca2(1'b0), .ca1(1'b1), .ca0(1'b1), .SEL(1'b1),
 		.lstrb(1'b1), ._enable(1'b0), .writeData(8'h00), .readData(rd400),
-		.advanceDriveHead(1'b0), .insertDisk(1'b0), .diskSides(1'b0),
-		.drive800k(1'b0), .disk_pwm(pwm),
+		.advanceDriveHead(1'b0), .insertDisk(1'b0), .img800k(1'b0),
+		.mediaSides(1'b1), .drive800k(1'b0), .disk_pwm(pwm),
 		.dskReadAck(1'b0), .dskReadData(8'h00),
 		.writeReq(1'b0), .writeProtect(1'b0), .writeMode(1'b0)
 	);
@@ -49,8 +49,8 @@ module tb_drive_tach;
 		.clk(clk), .cep(1'b1), .cen(1'b1), ._reset(rst_n),
 		.ca2(1'b0), .ca1(1'b1), .ca0(1'b1), .SEL(1'b1),
 		.lstrb(1'b1), ._enable(1'b0), .writeData(8'h00), .readData(rd800),
-		.advanceDriveHead(1'b0), .insertDisk(1'b0), .diskSides(1'b0),
-		.drive800k(1'b1), .disk_pwm(pwm),
+		.advanceDriveHead(1'b0), .insertDisk(1'b0), .img800k(1'b0),
+		.mediaSides(1'b1), .drive800k(1'b1), .disk_pwm(pwm),
 		.dskReadAck(1'b0), .dskReadData(8'h00),
 		.writeReq(1'b0), .writeProtect(1'b0), .writeMode(1'b0)
 	);
