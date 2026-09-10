@@ -96,7 +96,7 @@ end
 // The medium sniff (Phase 7 of FLOPPY_WRITE_PLAN.md)
 //
 // Nothing on a 3.5" diskette records whether it is single- or double-
-// sided; that was a certification label on the sleeve, and the drive
+// sided; that was a certification printed on the box, and the drive
 // cannot tell. What CAN be told is how big the volume last formatted onto
 // it is, and that is what the .Sony driver's address-field format byte
 // has to agree with. So read the volume's own size out of the Master
