@@ -93,8 +93,8 @@ localparam CONF_STR = {
 	// disk image like the SCSI slots above, so it takes their SC form and their
 	// extension list rather than the floppies' S/DSK.
 	//
-	// Mounting one REPLACES the external floppy for as long as it is mounted -
-	// see rtl/iwm.v. The drive itself is NOT model-gated: iwm.v keys it off a
+	// The external floppy sits behind it on the daisy chain - see rtl/iwm.v.
+	// The drive itself is not model-gated: iwm.v keys it off a
 	// mounted image alone, so every model gets the same device and only the
 	// Mac-side driver differs. A Plus or a 512Ke carries SonyDCD in the 128K
 	// ROM and boots straight from it; a 512K gets the same support as a .Sony
@@ -848,7 +848,7 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	// floppy disk interface
 	.insertDisk({dsk_ext_ins, dsk_int_ins}),
 	.img800k({dsk_ext_ds, dsk_int_ds}),
-	// mac_model's drive800k, straight through: the ROM asks the DRIVE, and
+	// mac_model's drive800k, straight through: the ROM asks the drive, and
 	// floppy.v's doubleSidedDisk takes it as its first ceiling.
 	.drive800k(drive800k),
 	// each floppy_loader's mount-time verdict on the medium it just loaded

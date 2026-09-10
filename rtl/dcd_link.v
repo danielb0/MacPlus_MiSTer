@@ -1,16 +1,16 @@
 /* dcd_link.v - DCD (Directly Connected Disk / Apple HD20) link layer.
 
-   MAC128K_PLAN.md Phase 5. This is the framing engine only: phase-line state
-   decode, the identification states, /HSHK, and 7-for-8 group coding in both
-   directions with the checksum. The command layer (Status, MultiBlock Read,
-   MultiBlock Write) and the storage back end sit on top of it and are not
-   here.
+   MAC128K_PLAN.md Phase 5. This is the framing engine only: phase-line
+   state decode, the identification states, /HSHK, and 7-for-8 group coding
+   in both directions with the checksum. The command layer (Status,
+   MultiBlock Read, MultiBlock Write) and the storage back end sit on top of
+   it in rtl/dcd.v.
 
-   A DCD device is a PEER OF floppy.v on the interface the IWM already
-   provides. That is not a simplification: the corrected DB-19 pinout (read
-   from the page image; the OCR of that table had shifted a column) says DCD
-   uses the ordinary RD and WR pins, with /ENBL2 as /Enable. Only PH0-PH2 are
-   repurposed, from a drive-register address into a 3-bit handshake state bus.
+   A DCD device is a peer of floppy.v on the interface the IWM already
+   provides: the corrected DB-19 pinout (read from the page image; the OCR
+   of that table had shifted a column) has DCD on the ordinary RD and WR
+   pins, with /ENBL2 as /Enable. Only PH0-PH2 are repurposed, from a
+   drive-register address into a 3-bit handshake state bus.
    /WrReq and HDSel are N/C, so SEL is ignored here.
 
    THE STATE IS {ca2,ca1,ca0} AS PLAIN BINARY, and the Mac changes one line at
@@ -32,9 +32,9 @@
    for it to rise; and the receive entry ($419820) refuses to start unless it
    is already 0.
 
-   AND IT IS DRIVEN FROM BOTH DIRECTIONS, WHICH THIS FILE ORIGINALLY MISSED.
-   A drive that only asserts /HSHK when IT wants to talk answers no command at
-   all: before sending anything the Mac asserts HOST and SPINS until the drive
+   And it is driven from both directions, which this file originally missed.
+   A drive that only asserts /HSHK when it wants to talk answers no command at
+   all: before sending anything the Mac asserts HOST and spins until the drive
    pulls /HSHK low, giving up with error $11. On hardware that presents as a
    diagnostic reporting "Comm error" while the ID probe still succeeds, because
    identification is a static level and needs no handshake.
@@ -52,8 +52,8 @@
    returns to state 3 -- its IntEn3 comment reads "mac is done and is waiting
    for !HSHK to be deasserted" -- and the drive releases before idling.
 
-   EVERY TRANSMITTED BYTE HAS ITS MSB SET, and on this interface that is not a
-   quirk - it is the data-ready signal. iwm.v latches readData on newByteReady
+   Every transmitted byte has its MSB set; on this interface the MSB is the
+   data-ready signal. iwm.v latches readData on newByteReady
    and clears the latch after a read, and the driver polls with `dbmi`,
    looping while the value is non-negative. A byte with the MSB clear would be
    indistinguishable from an empty latch.
@@ -136,17 +136,11 @@ module dcd_link
 
 	input         _reset,
 
-	// phase lines from the IWM. lstrb is PH3, the daisy-chain select, and it
-	// is DELIBERATELY UNUSED HERE: the flow-through flip-flop lives in
-	// iwm.v (see its "DAISY CHAIN" block), so a hand-over reaches this file
-	// as _enable going high, and being deselected is the only thing this
-	// layer needs to know. The port is kept because the signal really is on
-	// the pin, and because reading it here instead would mean duplicating
-	// iwm.v's ownership rule in a second place.
+	// phase lines from the IWM. PH3 (lstrb), the daisy-chain select, is
+	// handled in iwm.v; a hand-over reaches this layer as _enable going high.
 	input         ca0,
 	input         ca1,
 	input         ca2,
-	input         lstrb,
 	input         _enable,      // /ENBL2
 
 	// byte interface, the same shape floppy.v presents to iwm.v
@@ -268,7 +262,7 @@ module dcd_link
 	// Mac clocks at 7.8333 MHz, but this core's IWM models that same clock as
 	// its nominal 8 MHz enable, so matching floppy.v keeps DCD at the correct
 	// rate RELATIVE to everything else the IWM does.
-	wire [7:0] BYTE_TICKS = turbo ? 8'd64 : 8'd128;   // 8 us / 16 us
+	wire [7:0] byteTicks = turbo ? 8'd64 : 8'd128;   // 8 us / 16 us
 
 	wire [2:0] state    = {ca2, ca1, ca0};
 	wire       selected = present & ~_enable;
@@ -698,7 +692,7 @@ module dcd_link
 				TX_WAIT:
 					if (state == 3'd1) begin
 						txState <= TX_SYNC;
-						txTick  <= BYTE_TICKS;
+						txTick  <= byteTicks;
 					end
 					// States 0-3 are all legitimate here: 2 and 3 are the Mac
 					// on its way in, and 0 is a HOLD-OFF, which TX_DATA and
@@ -733,7 +727,7 @@ module dcd_link
 							txByte       <= SYNC;
 							newByteReady <= 1'b1;
 							txState      <= TX_DATA;
-							txTick       <= BYTE_TICKS;
+							txTick       <= byteTicks;
 							txLsbAcc     <= 8'h80;
 							txIdx        <= 0;
 						end
@@ -791,7 +785,7 @@ module dcd_link
 							txLsbAcc     <= txSource[0] ? txLsbSet : txLsbAcc;
 							txSum        <= txSum + txSource;
 							newByteReady <= 1'b1;
-							txTick       <= BYTE_TICKS;
+							txTick       <= byteTicks;
 							txSent       <= txSent + 10'd1;
 							if (!txIsChk) txAddr <= txAddr + 10'd1;
 							if (txIdx == 3'd6) txState <= TX_LSB;
@@ -815,7 +809,7 @@ module dcd_link
 						else begin
 							txByte       <= txLsbAcc;
 							newByteReady <= 1'b1;
-							txTick       <= BYTE_TICKS;
+							txTick       <= byteTicks;
 							txIdx        <= 0;
 							txLsbAcc     <= 8'h80;
 							// THE GROUP BOUNDARY, and the only place a hold-off
@@ -861,7 +855,7 @@ module dcd_link
 						hshk_n  <= 1'b0;
 						txHoff  <= 1'b0;
 						txState <= TX_SYNC;
-						txTick  <= BYTE_TICKS;
+						txTick  <= byteTicks;
 					end
 					else hshk_n <= 1'b1;
 

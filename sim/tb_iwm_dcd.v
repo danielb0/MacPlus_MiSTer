@@ -45,7 +45,7 @@
 // Run from the repo ROOT:
 //   iverilog -g2012 -I rtl -o /tmp/t.vvp sim/tb_iwm_dcd.v rtl/iwm.v rtl/floppy.v \
 //       rtl/floppy_track_encoder.v rtl/floppy_track_decoder.v \
-//       rtl/floppy_write_committer.v rtl/dcd.v rtl/dcd_link.v rtl/dcd_disk.v \
+//       rtl/floppy_write_committer.v rtl/dcd.v rtl/dcd_link.v rtl/dcd_disk.v rtl/scsi.v \
 //   && vvp /tmp/t.vvp
 //
 module tb_iwm_dcd;
@@ -73,7 +73,7 @@ module tb_iwm_dcd;
 	// At 16 MHz a CPU period is 2 clk, not 4, so _cpuLDS spans half the
 	// wall-clock time while cen does not move -- and the Mac's pooled poll
 	// budget ($4198C0, 80 tries shared by a group) burns twice as fast
-	// against the drive's byte interval. dcd_link halves BYTE_TICKS on
+	// against the drive's byte interval. dcd_link halves byteTicks on
 	// `turbo` to keep that ratio; this is what proves it.
 	parameter integer TURBO = 0;
 	localparam integer CPUP = TURBO ? 2 : 4;
@@ -204,7 +204,7 @@ module tb_iwm_dcd;
 	end
 
 	// BYTE PACING, which is the whole of the 16 MHz fix. dcd_link paces the
-	// drive at BYTE_TICKS cen ticks per byte and halves it under `turbo`, so
+	// drive at byteTicks cen ticks per byte and halves it under `turbo`, so
 	// the Mac's POOLED poll budget ($4198C0 loads 80 for a whole group, and
 	// one try costs 18 cycles = 2.25 us at 8 MHz but 1.125 us at 16 MHz)
 	// keeps the same ~30% headroom at either speed. Measured here rather than
@@ -866,7 +866,7 @@ module tb_iwm_dcd;
 		sum = 0;
 		for (i = 0; i < 343; i = i + 1) sum = sum + rsp[i];
 		// THE 16 MHz FIX. A byte every 128 cen at 8 MHz, every 64 under turbo.
-		// Mutation: pinning BYTE_TICKS back to 8'd128 leaves every other check
+		// Mutation: pinning byteTicks back to 8'd128 leaves every other check
 		// in this bench passing -- its Mac model polls patiently and has no
 		// budget to blow -- so without this one the fix is untested.
 		check(TURBO ? "byte pacing halves under turbo (64 cen), keeping the Mac's poll budget in ratio"

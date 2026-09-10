@@ -129,9 +129,8 @@ module mac_model
 			//
 			// drive800k = 0: both shipped with a mechanically single-sided
 			// drive -- no head for the second side, not merely a format
-			// limit -- so an 800K double-sided image cannot be read, only a
-			// 400K single-sided one. MacPlus.sv's dsk_int_ds/dsk_ext_ds
-			// gating on this is item 8.
+			// limit -- so only side 0 of an 800K double-sided image is ever
+			// read; floppy.v's doubleSidedDisk takes this as its first ceiling.
 			MODEL_512K: begin
 				configROMSize = 2'b00;                    // 64K, releases/boot2.rom
 				configRAMSize = 2'b01;                    // 512K, soldered

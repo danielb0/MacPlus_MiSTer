@@ -90,9 +90,8 @@ module floppy
 	// header by floppy_loader.v: 1 = the volume is double-sided, or the
 	// image carries nothing recognisable. See doubleSidedDisk below.
 	input mediaSides,
-	// Spindle duty INDEX, 0..399, computed by dataController_top.sv exactly as
-	// the hardware does: low 6 bits -> 64-entry table -> sum of 100 -> /10 - 11.
-	// duty%% = index/4.19. Only a 400K mechanism obeys it; see the tachometer.
+	// Spindle duty index, 0..399, from rtl/disk_pwm_duty.v. Only a 400K
+	// mechanism obeys it; see the tachometer.
 	input [8:0] disk_pwm,
 	output diskEject,
 
@@ -183,6 +182,13 @@ module floppy
 	reg old_newByteReady;
 	always @(posedge clk) old_newByteReady <= newByteReady;
 	
+	// format relay signals, driven by the write path below
+	wire        secAmark;
+	wire [3:0]  secAmarkSector;
+	wire        secFmtMark;
+	wire        secFmtDs;
+	reg         wrEnd;
+
 	// include track encoder
 	floppy_track_encoder enc
 	(
@@ -418,7 +424,7 @@ module floppy
 	// A disk change ends a burst too: an eject or remount mid-format must
 	// not leave the relay armed for the departing disk and fire it on the
 	// next disk's first ordinary write.
-	reg  wrBusyPrev, wrEndD1, wrEnd;
+	reg  wrBusyPrev, wrEndD1;
 	wire wrBusy = (writeMode && _enable == 1'b0) || writeBusyReg;
 	always @(posedge clk or negedge _reset) begin
 		if (_reset == 1'b0) begin
@@ -437,10 +443,6 @@ module floppy
 	wire [21:0] secAddr;
 	wire [8:0]  wcBufAddr;
 	wire [7:0]  wcBufData;
-	wire        secAmark;
-	wire [3:0]  secAmarkSector;
-	wire        secFmtMark;
-	wire        secFmtDs;
 
 	floppy_track_decoder dec
 	(
@@ -707,18 +709,17 @@ module floppy
 	// DRIVE_REG_TACH  7  Tachometer (produces 60 pulses for each rotation of the drive motor)
 	/* Data from MESS, sonydriv.c:
 	   Tracks	RPM   Timing Value
-	   00-15:   500   timing value $117B (acceptable range {1135-11E9})
-	   16-31:   550   timing value $???? (acceptable range {12C6-138A})
-	   32-47:   600   timing value $???? (acceptable range {14A7-157F})
-	   48-63:   675   timing value $???? (acceptable range {16F2-17E2})
-	   64-79:   750   timing value $???? (acceptable range {19D0-1ADE})
+	   00-15:   402   timing value $117B (acceptable range {1135-11E9})
+	   16-31:   438   timing value $???? (acceptable range {12C6-138A})
+	   32-47:   482   timing value $???? (acceptable range {14A7-157F})
+	   48-63:   536   timing value $???? (acceptable range {16F2-17E2})
+	   64-79:   603   timing value $???? (acceptable range {19D0-1ADE})
 
-	   CAUTION: those RPM labels are WRONG and cost time. The real CLV speeds
-	   (Guide to the Macintosh Family Hardware) are 402/438/482/536/603 rpm.
-	   The PERIODS below are right -- RPM = clk8 / (2*period), since TACH is
-	   60 pulses (120 edges) per revolution: 9996 -> 406 rpm, 9122 -> 445,
-	   8292 -> 490, 7463 -> 544, 6634 -> 612, all within ~1.5%% of the real
-	   table. Only the labels in this comment were wrong.
+	   RPM per Guide to the Macintosh Family Hardware; sonydriv.c labels the
+	   same rows 500/550/600/675/750. The periods below give rpm =
+	   clk8 / (2*period), since TACH is 60 pulses (120 edges) per revolution:
+	   9996 -> 406 rpm, 9122 -> 445, 8292 -> 490, 7463 -> 544, 6634 -> 612,
+	   all within ~1.5% of that table.
 		
 		Experimentally determined toggle rates for Plus Too with 8.125 MHz CPU clock:
 		TACH Half Period Clocks		Resulting Timing Value

@@ -11,8 +11,8 @@
 //   3. index = sum/(count/10) - 11, clamped to 0..399,
 //   4. duty% = index / 4.19.
 //
-// Step 1 is the step this core was missing, and it is not a detail. The table
-// is a PERMUTATION (0, 1, 59, 2, 60, 40, 54, 3, ...), so the raw 6-bit value
+// Step 1 is the step this core was missing, and it matters. The table
+// is a permutation (0, 1, 59, 2, 60, 40, 54, 3, ...), so the raw 6-bit value
 // has essentially no monotonic relationship to the real duty. Summing raw
 // values produces a number that wanders more or less independently of what the
 // Mac commanded: the spindle loop oscillated rail to rail on hardware (a JTAG
@@ -113,11 +113,11 @@ module disk_pwm_duty
 		endcase
 	endfunction
 
-	// PIPELINED IN THREE STAGES, deliberately. Doing the accumulate, the
+	// Pipelined in three stages. Doing the accumulate, the
 	// sum*205 scaling and the clamp in one combinational chain overran the
 	// clk_sys setup budget by 3.9 ns (Quartus reported a real timing
 	// failure, slack -3.945). Samples arrive roughly every 2 us and the
-	// window is 100 of them, so spending two extra CYCLES here costs
+	// window is 100 of them, so spending two extra cycles here costs
 	// nothing measurable and buys a comfortable path.
 	reg [12:0] acc = 13'd0;
 	reg  [6:0] cnt = 7'd0;

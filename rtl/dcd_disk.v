@@ -7,26 +7,23 @@
    Read of N blocks is N separate 77-group transmissions, so the drive fetches,
    sends, fetches, sends.
 
-   BYTE LANES ARE NOT A FREE CHOICE. The real HPS packs disk byte 0 into
-   sd_buff_dout[7:0], so the EVEN bytes go in buffer0 and the odd ones in
-   buffer1. That mapping is hardware-proven through rtl/scsi.v, which is the
-   reference for byte order anywhere else on this core - getting it backwards
-   transposes every byte pair in every sector and is invisible until something
-   tries to read a filesystem. This module is byte-addressed on the command
-   side precisely so the caller never has to think about it.
+   Byte lanes follow the HPS, which packs disk byte 0 into sd_buff_dout[7:0]:
+   the even bytes go in buffer0 and the odd ones in buffer1. That mapping is
+   hardware-proven through rtl/scsi.v, which is the reference for byte order
+   anywhere else on this core - getting it backwards transposes every byte
+   pair in every sector and is invisible until something tries to read a
+   filesystem. This module is byte-addressed on the command side precisely so
+   the caller never has to think about it.
 
-   THE BUFFER IS A LOCAL COPY OF scsi_dpram'S SHAPE, DELIBERATELY, rather than
-   an instantiation of it. scsi_dpram lives inside rtl/scsi.v, and a DCD device
-   must work on a 512Ke - a machine defined by having no SCSI at all. Depending
-   on the SCSI file for a RAM primitive would tie the two together for no
-   reason, and would drag 1700 lines into this module's bench.
+   The buffer is two planes of rtl/scsi.v's scsi_dpram, one per lane; the
+   DCD benches compile rtl/scsi.v alongside for that module.
 
-   SD_BUFF_WR IS SHARED ACROSS EVERY SLOT and must be qualified with our own
+   sd_buff_wr is shared across every slot and must be qualified with our own
    sd_ack, or another slot's transfer writes into our sector. rtl/floppy_loader.v
    makes the same guard for the same reason.
 
-   THE ACK TIMEOUT IS NOT DEFENSIVE PADDING. Without it a stalled or absent HPS
-   response leaves the drive holding /HSHK forever, which the Mac sees as a hung
+   The ack timeout exists because a stalled or absent HPS response would
+   otherwise leave the drive holding /HSHK forever, which the Mac sees as a hung
    bus rather than as a failed command. On a timeout the request is abandoned
    and `err` is raised, so the command layer can answer with the protocol's own
    error convention (status bit 7) and let the driver retry.
@@ -134,7 +131,7 @@ module dcd_disk #(
 	always @(posedge clk) buf_lane_q <= buf_addr[0];
 	assign buf_q = buf_lane_q ? buf1_qb : buf0_qb;
 
-	dcd_dpram buffer0
+	scsi_dpram #(.ADDRWIDTH(8)) buffer0
 	(
 		.clock(clk),
 		.address_a(sd_buff_addr), .data_a(sd_buff_dout[7:0]),
@@ -143,7 +140,7 @@ module dcd_disk #(
 		.wren_b(buf_we & ~buf_addr[0]), .q_b(buf0_qb)
 	);
 
-	dcd_dpram buffer1
+	scsi_dpram #(.ADDRWIDTH(8)) buffer1
 	(
 		.clock(clk),
 		.address_a(sd_buff_addr), .data_a(sd_buff_dout[15:8]),
@@ -213,42 +210,5 @@ module dcd_disk #(
 			default: state <= IDLE;
 		endcase
 	end
-
-endmodule
-
-// Two-port byte RAM, the shape rtl/scsi.v's scsi_dpram already proved on this
-// core. Local rather than shared; see the header.
-module dcd_dpram #(parameter DATAWIDTH=8, ADDRWIDTH=8)
-(
-	input                      clock,
-
-	input     [ADDRWIDTH-1:0]  address_a,
-	input     [DATAWIDTH-1:0]  data_a,
-	input                      wren_a,
-	output reg [DATAWIDTH-1:0] q_a,
-
-	input     [ADDRWIDTH-1:0]  address_b,
-	input     [DATAWIDTH-1:0]  data_b,
-	input                      wren_b,
-	output reg [DATAWIDTH-1:0] q_b
-);
-
-reg [DATAWIDTH-1:0] ram[0:(1<<ADDRWIDTH)-1];
-
-always @(posedge clock) begin
-	if (wren_a) begin
-		ram[address_a] <= data_a;
-		q_a <= data_a;
-	end
-	else q_a <= ram[address_a];
-end
-
-always @(posedge clock) begin
-	if (wren_b) begin
-		ram[address_b] <= data_b;
-		q_b <= data_b;
-	end
-	else q_b <= ram[address_b];
-end
 
 endmodule

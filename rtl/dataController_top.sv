@@ -86,9 +86,9 @@ module dataController_top(
 	// misc
 	output memoryOverlayOn,
 	input [1:0] insertDisk,
-	input [1:0] img800k,    // mounted FILE is 819,200 bytes: see floppy.v's port comment
-	input drive800k,        // drive MECHANISM: see floppy.v's port comment
-	input [1:0] mediaSides, // what the MEDIUM said at mount: see floppy.v
+	input [1:0] img800k,    // mounted file is 819,200 bytes: see floppy.v's port comment
+	input drive800k,        // drive mechanism: see floppy.v's port comment
+	input [1:0] mediaSides, // what the medium said at mount: see floppy.v
 	output [31:0] dbg_floppy, // JTAG telemetry: see floppy.v
 	output [1:0] diskEject,
 	output [1:0] diskMotor,
@@ -182,9 +182,8 @@ module dataController_top(
 	// The one-sample latency (audio_prebuf contains sample[N-1] when addr advances
 	// to N) is a constant delay, inaudible, and matches real hardware where the
 	// sample is read and used within the same line period.
-	// Spindle duty for a 400K drive, computed in rtl/disk_pwm_duty.v exactly
-	// as the hardware does it: low 6 bits -> 64-entry conversion table ->
-	// sum of 100 -> /10 - 11, clamped 0..399. It is a separate module
+	// Spindle duty for a 400K drive, from the low bits of each sound-buffer
+	// word; see rtl/disk_pwm_duty.v. It is a separate module
 	// because this file instantiates VHDL and so cannot be elaborated by
 	// iverilog; anything buried here is untestable, and unowned seams are
 	// where every bug in this project has been. Gated by
