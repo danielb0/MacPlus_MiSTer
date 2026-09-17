@@ -104,7 +104,8 @@ module floppy_sd_writer #(
 	reg  [12:0] q_head;    // registered read of q_mem[rd_ptr]
 	reg         empty_d;   // q_head lags a push by one cycle; see P_IDLE
 
-	wire push = commit_done && !readonly && !full;
+	wire accept = commit_done && !readonly;  // the single gate on reaching the card
+	wire push   = accept && !full;
 
 	always @(posedge clk) begin
 		if (push) q_mem[wr_ptr[QDEPTH_BITS-1:0]] <= commit_addr[21:9];
@@ -179,12 +180,8 @@ module floppy_sd_writer #(
 			// the next commit. A full queue means the card has stalled
 			// for ~13 s; the sector is refused, and the count is the
 			// sticky witness that it was.
-			if (commit_done && !readonly) begin
-				if (full) begin
-					if (dbg_refused != 8'hFF) dbg_refused <= dbg_refused + 8'd1;
-				end else
-					wr_ptr <= wr_ptr + 1'd1;
-			end
+			if (accept && full && dbg_refused != 8'hFF) dbg_refused <= dbg_refused + 8'd1;
+			if (push) wr_ptr <= wr_ptr + 1'd1;
 
 			case (pstate)
 			// q_head is valid once the queue has been non-empty for two

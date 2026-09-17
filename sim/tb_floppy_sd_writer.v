@@ -158,6 +158,38 @@ module tb_floppy_sd_writer;
       end
    endtask
 
+   // hps_io streaming SLOWLY - slower than a whole block fetch - with the
+   // ack held high throughout. A writer that retired the block on the ack's
+   // RISE rather than its fall would start fetching the next sector into
+   // the buffer under the stream; the ordinary serve_block streams too fast
+   // to see that. Every word read late must still be this block's, and no
+   // sd_wr may rise while the ack is up (wr_rise_in_ack, below).
+   task serve_block_slowly(input [12:0] blk);
+      integer i;
+      reg [15:0] w;
+      begin
+         @(posedge clk); #1;
+         sd_ack = 1'b1;
+         for (i = 0; i < 256; i = i + 1) begin
+            sd_buff_addr = i[7:0];
+            repeat (100) @(posedge clk); #1;
+            w = sdram[blk*256 + i];
+            check(sd_buff_din === {w[7:0], w[15:8]},
+                  "a word read late in a slow stream must still be this block's");
+         end
+         sd_ack = 1'b0;
+         repeat (4) @(posedge clk); #1;
+      end
+   endtask
+
+   // sd_wr rising while sd_ack is high: the handshake broken from our side
+   integer wr_rise_in_ack = 0;
+   reg     sd_wr_d = 1'b0;
+   always @(posedge clk) begin
+      sd_wr_d <= sd_wr;
+      if (sd_wr && !sd_wr_d && sd_ack) wr_rise_in_ack = wr_rise_in_ack + 1;
+   end
+
    task wait_wr(input integer limit, output ok);
       integer n;
       begin
@@ -379,6 +411,24 @@ module tb_floppy_sd_writer;
       check(got && sd_lba === 32'd61, "and the next sector is written normally");
       serve_block(13'd61);
       check(!busy, "done");
+
+      // ─── 12. a slow hps_io stream with the next sector already queued ─
+      $display("12. the block stays intact under a slow stream; the next fetch waits for the ack to fall");
+      loader_busy = 1'b1;
+      fill_sector(13'd70, 16'h7000);
+      fill_sector(13'd71, 16'h7100);
+      pulse_commit(13'd70);
+      pulse_commit(13'd71);
+      loader_busy = 1'b0;
+      wait_wr(BLK, got);
+      check(got && sd_lba === 32'd70, "sector 70 presented");
+      serve_block_slowly(13'd70);          // 25,600 cycles under the ack: longer than a fetch
+      check(wr_rise_in_ack == 0, "no sd_wr rose while the ack was high");
+      wait_wr(BLK, got);
+      check(got && sd_lba === 32'd71, "then sector 71");
+      serve_block(13'd71);
+      check(!busy, "done");
+      check(wr_rise_in_ack == 0, "no sd_wr rose while an ack was high anywhere in the run");
       check(bad_addr == 0, "no stray SDRAM address anywhere in the run");
 
       $display("");
