@@ -577,9 +577,10 @@ Two defects were found during verification and both were in the benches, not the
 * `sim/tb_floppy_sd_writer.v`: 11 sections, **5433 checks, 0 failures**. `sim/tb_slot3_fetch.v`: **784 checks, 0 failures** (one bench defect on the way: its stray-read counter also counted the IWM read windows, which read address 0 in that bench - now only a fetch outside the image counts). `sim/tb_loader_writer_roundtrip.v`: PASS.
 * Regressions re-run green: `tb_floppy_format`, `tb_floppy_sides`, `tb_floppy_loader_integrated`, `tb_floppy_loader_ext`, `tb_iwm_dcd`, `tb_iwm_latch` (its header's build line predates the DCD work - add `rtl/dcd.v rtl/dcd_link.v rtl/dcd_disk.v rtl/scsi.v`), `tb_floppy_write_path`.
 * `quartus_map --analysis_and_elaboration`: **0 errors, 83 warnings - the identical set the untouched branch head produces** (re-measured by stashing the change; the only diff is line-number shifts in `dbg_probes.sv`). The connectivity report has nothing on the new ports.
-* Mutation sweep: not yet run (script prepared, 21 mutants over the writer and the arbiter).
+* **Mutation sweep, 21 mutants over the writer and the arbiter: all killed** - after two survivors of the first pass were dealt with (`c6a0c99`). One was a bench gap of the recurring shape: a writer that retired the block on the ack's RISE rather than its fall only overwrote words the model had already read, because the model streamed a block in ~770 cycles against a ~16,000-cycle fetch. Section 12 now streams slowly (25,600 cycles under the ack) with the next sector queued, and pins that no `sd_wr` rises while the ack is up. The other was an equivalent mutant - the read-only gate was checked twice - now single-sourced as `accept`/`push`. 5950 checks.
+* **Cold compile (2026-09-17, tag `c6a0c99f`): 0 errors, timing met** - worst setup slack 0.520 ns (the HDMI PLL domain; 1.415 ns on the core's PLL), hold 0.243 ns; 20,655 / 41,910 ALMs (49%), 135 / 553 RAM blocks; each writer's `q_mem` is two M10K and its `blk` one, as intended. rbf: `output_files/MacPlus_c6a0c99f_sdwriter.rbf`.
 
-**STATUS: implemented, benched, elaborated. NOT compiled, never on hardware.** The hardware gate is item 8 above.
+**STATUS: implemented, benched, mutation-swept, compiled. NOT yet on hardware.** The hardware gate is item 8 above.
 
 ---
 
