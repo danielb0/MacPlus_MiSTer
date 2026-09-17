@@ -361,9 +361,31 @@ for {set n 0} {$n < $samples} {incr n} {
 	set s_breach "0 (good)"
 	if {$phld_breach != 0} { set s_breach "$phld_breach <<< FRONTIER BREACHED" }
 	puts [format "  PHLD  cpu hold-off: holds=%-12s longest=%-18s breaches=%s" $s_holds $s_max $s_breach]
-	# The access ring, newest first. Entry = {rw,dack,reg,3'b0,val}.
-	puts [format "  PRG   last 4 non-poll SCSI accesses (newest first); DACK reads so far: %d" [expr {($pscs >> 8) & 0xf}]]
-	foreach pr {PRG0 PRG1} {
+	# PFSW: the floppy SD writers' witness (Phase 8). Packing in
+	# rtl/dbg_probes.sv: per writer {refused[3:0] sat, oor[3:0] sat, landed[7:0]},
+	# ext in the high half, int in the low. refused != 0 means a sector was
+	# LOST (the queue of pending sectors was full, i.e. the card stalled for
+	# ~13 s); the gate for a sustained copy is 0. landed wraps at 256 and
+	# should move between samples while a copy is running.
+	if {[have PFSW]} {
+		set pfsw [b2i [rd PFSW]]
+		foreach {nm sh} {int 0 ext 16} {
+			set h   [expr {($pfsw >> $sh) & 0xffff}]
+			set ref [expr {($h >> 12) & 0xf}]
+			set oor [expr {($h >> 8) & 0xf}]
+			set lnd [expr {$h & 0xff}]
+			set v "0 (good)"
+			if {$ref != 0} { set v "$ref <<< SECTOR(S) LOST: queue full" }
+			if {$ref == 15} { set v "15+ (SAT) <<< SECTOR(S) LOST: queue full" }
+			puts [format "  PFSW  %s floppy writer: refused=%-36s out-of-range=%-4d landed=%d (mod 256)" $nm $v $oor $lnd]
+		}
+	} else {
+		puts "  PFSW  ABSENT from this bitstream -- predates the Phase 8 SD writer."
+	}
+	# The access ring, newest first. Entry = {rw,dack,reg,3'b0,val}. PRG1
+	# gave its hub node to PFSW, so the ring is two entries now.
+	puts [format "  PRG   last 2 non-poll SCSI accesses (newest first); DACK reads so far: %d" [expr {($pscs >> 8) & 0xf}]]
+	foreach pr {PRG0} {
 		set w [b2i [rd $pr]]
 		foreach half {0 16} {
 			set e [expr {($w >> $half) & 0xffff}]

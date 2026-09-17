@@ -30,8 +30,10 @@
 //   PIO3  {wr_stuck, d0_io_lba} -- the WRITE-side twin of PIOS
 //   PIO4  disk write/ack counts + live write handshake bits
 //   PHLD  CPU hold-off engagements + longest stall + frontier breaches
-//   PRG0-1  ring of the last 4 SCSI register accesses -- the CONVERSATION,
-//           not just its last line
+//   PRG0  ring of the last 2 SCSI register accesses -- the CONVERSATION,
+//         not just its last line (PRG1 gave its slot to PFSW)
+//   PFSW  the two floppy SD writers' witness: queue refusals (a sector
+//         LOST), out-of-range refusals, blocks landed -- see below
 //   PDMA  the discriminating word: DACK reads since the arm, watchdog fire
 //         counts, phase-visit mask -- see "the discriminators" below
 //   PDM2  sticky evidence bits + a ring of the last 8 target phases
@@ -94,7 +96,12 @@ module dbg_probes (
 	// DCD (Apple HD20) link telemetry from rtl/dcd.v. Raw live state only; all
 	// the counting and the sticky bits are below, which is why the clear
 	// source can live here and does not have to be threaded back down.
-	input  wire [31:0] dbg_dcd
+	input  wire [31:0] dbg_dcd,
+
+	// floppy_sd_writer witness words (rtl/floppy_sd_writer.v `dbg`), one
+	// per drive. Decoded and packed below as PFSW.
+	input  wire [31:0] dbg_sdw_int,
+	input  wire [31:0] dbg_sdw_ext
 );
 
 	wire dbg_bsy    = scsi_dbg[0];
@@ -886,10 +893,29 @@ module dbg_probes (
 		.instance_id ("PRG0"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
 	) cp_prg0 (.probe(acc_hist[31:0]),   .source(), .source_clk(clk), .source_ena(1'b1));
+	// PRG1 (the older half of the ring) gave its hub node to PFSW: the
+	// SCSI wedge the ring was built for is closed, and two entries still
+	// carry a CDB handover.
+
+	// ---- PFSW: the floppy SD writers' witness (Phase 8) -----------------
+	// Per writer, from its dbg word: queue refusals and out-of-range
+	// refusals clamped to a nibble (nonzero is the verdict), and the landed
+	// count, which wraps and should MOVE between samples during a copy.
+	//   [31:28] ext refused  [27:24] ext out-of-range  [23:16] ext landed
+	//   [15:12] int refused  [11:8]  int out-of-range  [7:0]   int landed
+	// refused != 0 after a sustained copy means a sector never reached the
+	// card: the only silent loss path the SDRAM-sourced writer has left.
+	function [3:0] nib_sat(input [7:0] v);
+		nib_sat = (v > 8'd15) ? 4'hF : v[3:0];
+	endfunction
+	reg [31:0] pfsw_r;
+	always @(posedge clk)
+		pfsw_r <= {nib_sat(dbg_sdw_ext[31:24]), nib_sat(dbg_sdw_ext[23:16]), dbg_sdw_ext[15:8],
+		           nib_sat(dbg_sdw_int[31:24]), nib_sat(dbg_sdw_int[23:16]), dbg_sdw_int[15:8]};
 	altsource_probe #(
-		.instance_id ("PRG1"), .probe_width (32), .source_width (1),
+		.instance_id ("PFSW"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
-	) cp_prg1 (.probe(acc_hist[63:32]),  .source(), .source_clk(clk), .source_ena(1'b1));
+	) cp_pfsw (.probe(pfsw_r), .source(), .source_clk(clk), .source_ena(1'b1));
 
 	altsource_probe #(
 		.instance_id ("PIOS"), .probe_width (32), .source_width (1),

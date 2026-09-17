@@ -69,7 +69,10 @@ module tb_floppy_loader_ext;
       .dskLoadAddrInt(ldr_int_wr_addr), .dskLoadReqInt(ldr_int_wr_req), .dskLoadAckInt(dskLoadAckInt),
       .dskLoadAddrExt(ldr_ext_wr_addr), .dskLoadReqExt(ldr_ext_wr_req), .dskLoadAckExt(dskLoadAckExt),
       .dskLoadWrEn(dskLoadWrEn),
-      .dskLoadSelExt(dskLoadSelExt)
+      .dskLoadSelExt(dskLoadSelExt),
+      .dskFetchAddrInt(22'd0), .dskFetchReqInt(1'b0), .dskFetchAckInt(),
+      .dskFetchAddrExt(22'd0), .dskFetchReqExt(1'b0), .dskFetchAckExt(),
+      .dskLoadRdEn()
    );
 
    // ---- dut_int: wired up but NEVER mounted - stand-in for MacPlus.sv's

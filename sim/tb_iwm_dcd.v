@@ -173,10 +173,8 @@ module tb_iwm_dcd;
 		.dcd_img_size(dcd_img_size),
 		.dcd_img_readonly(dcd_img_readonly),
 		.dbg_dcd(dbg_dcd),
-		.dskCommitDoneInt(), .dskCommitAddrInt(), .dskCommitBufWrInt(),
-		.dskCommitBufAddrInt(), .dskCommitBufDataInt(),
-		.dskCommitDoneExt(), .dskCommitAddrExt(), .dskCommitBufWrExt(),
-		.dskCommitBufAddrExt(), .dskCommitBufDataExt()
+		.dskCommitDoneInt(), .dskCommitAddrInt(),
+		.dskCommitDoneExt(), .dskCommitAddrExt()
 	);
 
 	integer pass = 0, fail = 0;

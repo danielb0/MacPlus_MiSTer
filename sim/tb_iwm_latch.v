@@ -115,10 +115,8 @@ module tb_iwm_latch;
       .writeProtect(2'b11),
       .dskWriteAddrInt(), .dskWriteDataInt(), .dskWriteReqInt(), .dskWriteAckInt(1'b0),
       .dskWriteAddrExt(), .dskWriteDataExt(), .dskWriteReqExt(), .dskWriteAckExt(1'b0),
-      .dskCommitDoneInt(), .dskCommitAddrInt(), .dskCommitBufWrInt(),
-      .dskCommitBufAddrInt(), .dskCommitBufDataInt(),
-      .dskCommitDoneExt(), .dskCommitAddrExt(), .dskCommitBufWrExt(),
-      .dskCommitBufAddrExt(), .dskCommitBufDataExt()
+      .dskCommitDoneInt(), .dskCommitAddrInt(),
+		.dskCommitDoneExt(), .dskCommitAddrExt()
    );
 
    // floppy.v refills `diskImageData` from the encoder on every dskReadAck.

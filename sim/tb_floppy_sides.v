@@ -125,8 +125,7 @@ module tb_floppy_sides;
       .dskWriteReq(dskWriteReq),
       .dskWriteAck(dskWriteAck),
       .dbg_floppy(),
-      .dskCommitDone(commitDone), .dskCommitAddr(commitAddr),
-      .dskCommitBufWr(), .dskCommitBufAddr(), .dskCommitBufData()
+      .dskCommitDone(commitDone), .dskCommitAddr(commitAddr)
    );
 
    // SDRAM write port mock: ack a cycle after each request. Where the bytes

@@ -5,14 +5,16 @@
 // each other, by driving BOTH real RTL modules back-to-back through a
 // mocked hps_io rather than trusting the algebra.
 //
-// floppy_sd_writer commits one sector (internal SDRAM word convention -
-// even source byte in the high half, see floppy_write_committer.v) and its
-// sd_buff_din stream is captured into `file_mem`, exactly as hps_io would
-// write it byte-for-byte to the .dsk. floppy_loader then mounts that same
-// sector and its sd_buff_dout is served from `file_mem`, exactly as hps_io
-// would read it back - proving the two independently-written swaps
-// (`{lo,hi}` on the way out, `{lo,hi}` on the way back in) round-trip the
-// original word, not just that each one looks locally plausible.
+// Since Phase 8 the writer keeps no copy of the data: it fetches the block
+// out of SDRAM at write time. So the sector is placed in a mock SDRAM in
+// the internal word convention (even source byte in the high half, see
+// floppy_write_committer.v) and the writer's sd_buff_din stream is
+// captured into `file_mem`, exactly as hps_io would write it byte-for-byte
+// to the .dsk. floppy_loader then mounts that same sector and its
+// sd_buff_dout is served from `file_mem`, exactly as hps_io would read it
+// back - proving the two independently-written swaps (`{lo,hi}` on the way
+// out, `{lo,hi}` on the way back in) round-trip the original word, not just
+// that each one looks locally plausible.
 //
 // This is the harness referenced in the Phase 4 code review - previously
 // scratchpad-only and not kept; landed here permanently per that review.
@@ -33,15 +35,18 @@ module tb_loader_writer_roundtrip;
    endtask
 
    // ---------------------------------------------------------------
-   // DUT 1: floppy_sd_writer - commits one sector, we mock hps_io's
-   // write side and capture the raw wire bytes into file_mem.
+   // DUT 1: floppy_sd_writer - persists one sector out of a mock SDRAM;
+   // we mock hps_io's write side and capture the raw wire bytes into
+   // file_mem.
    // ---------------------------------------------------------------
    reg         img_mounted_w = 1'b0;
    reg         commit_done = 1'b0;
    reg  [21:0] commit_addr = 22'd0;
-   reg         commit_buf_wr = 1'b0;
-   reg  [7:0]  commit_buf_addr = 8'd0;
-   reg  [15:0] commit_buf_data = 16'd0;
+
+   wire [21:0] fetch_addr;
+   wire        fetch_req;
+   reg         fetch_ack = 1'b0;
+   reg  [15:0] fetch_data = 16'd0;
 
    wire [31:0] w_sd_lba;
    wire        w_sd_wr;
@@ -57,13 +62,15 @@ module tb_loader_writer_roundtrip;
 
       .commit_done(commit_done),
       .commit_addr(commit_addr),
-      .commit_buf_wr(commit_buf_wr),
-      .commit_buf_addr(commit_buf_addr),
-      .commit_buf_data(commit_buf_data),
 
       .readonly(1'b0),
       .loader_busy(1'b0),
       .size_blocks(13'd1600),
+
+      .fetch_addr(fetch_addr),
+      .fetch_req(fetch_req),
+      .fetch_ack(fetch_ack),
+      .fetch_data(fetch_data),
 
       .sd_lba(w_sd_lba),
       .sd_wr(w_sd_wr),
@@ -72,8 +79,29 @@ module tb_loader_writer_roundtrip;
       .sd_buff_addr(w_sd_buff_addr),
       .sd_buff_din(w_sd_buff_din),
 
-      .busy()
+      .busy(),
+      .dbg()
    );
+
+   // mock extra-slot-3 read port: one sector of SDRAM, a grant a couple of
+   // cycles after each request, the word with a one-cycle ack (the phase
+   // relation against the real arbiter is tb_slot3_fetch.v's business)
+   reg [15:0] sdram_mem [0:255];
+   reg [1:0]  fetch_wait = 2'd2;
+   integer    stray_fetch = 0;
+   always @(posedge clk) begin
+      fetch_ack <= 1'b0;
+      if (fetch_req && !fetch_ack) begin
+         if (fetch_wait != 0) fetch_wait <= fetch_wait - 1'd1;
+         else begin
+            if (fetch_addr[21:9] != 13'd0 || fetch_addr[0]) stray_fetch = stray_fetch + 1;
+            fetch_data <= sdram_mem[fetch_addr[8:1]];
+            fetch_ack  <= 1'b1;
+            fetch_wait <= 2'd2;
+         end
+      end
+      else if (!fetch_req) fetch_wait <= 2'd2;
+   end
 
    // ---------------------------------------------------------------
    // DUT 2: floppy_loader - mounts the same one-sector image, we mock
@@ -186,20 +214,14 @@ module tb_loader_writer_roundtrip;
    initial begin
       do_reset;
 
-      // ---- feed one sector of distinguishable-nibble-order data into the
-      // writer: hi byte counts up, lo byte is its bitwise complement, so a
-      // stuck (un-swapped) or double-swapped word can never accidentally
-      // match.
-      commit_addr = 22'd0; // byte offset 0 -> LBA 0
-      for (i = 0; i < 256; i = i + 1) begin
-         @(posedge clk); #1;
-         commit_buf_addr = i[7:0];
-         commit_buf_data = {i[7:0], ~i[7:0]};
-         commit_buf_wr   = 1'b1;
-      end
+      // ---- one sector of distinguishable-nibble-order data in SDRAM, in
+      // the committer's convention: hi byte counts up, lo byte is its
+      // bitwise complement, so a stuck (un-swapped) or double-swapped word
+      // can never accidentally match.
+      for (i = 0; i < 256; i = i + 1) sdram_mem[i] = {i[7:0], ~i[7:0]};
       @(posedge clk); #1;
-      commit_buf_wr = 1'b0;
-      commit_done   = 1'b1;
+      commit_addr = 22'd0; // byte offset 0 -> LBA 0
+      commit_done = 1'b1;
       @(posedge clk); #1;
       commit_done = 1'b0;
 
@@ -209,10 +231,14 @@ module tb_loader_writer_roundtrip;
          $display("FAIL: writer requested LBA %0d, expected 0", w_sd_lba);
          $finish;
       end
+      if (stray_fetch != 0) begin
+         $display("FAIL: %0d fetch(es) outside sector 0", stray_fetch);
+         $finish;
+      end
       repeat (3) @(posedge clk); #1;
       w_sd_ack = 1'b1;
       w_sd_buff_addr = 8'd0;
-      @(posedge clk); #1; // let mem0_do/mem1_do register address 0's word
+      @(posedge clk); #1; // let the registered read catch address 0's word
       for (i = 0; i < 256; i = i + 1) begin
          file_mem[i] = w_sd_buff_din; // raw wire bytes, as hps_io would store them
          if (i < 255) w_sd_buff_addr = w_sd_buff_addr + 1'b1;
@@ -252,6 +278,13 @@ module tb_loader_writer_roundtrip;
 
       $display("");
       $display("%s", (mismatches == 0) ? "PHASE 4 ROUND-TRIP GATE: PASS" : "PHASE 4 ROUND-TRIP GATE: FAIL");
+      $finish;
+   end
+
+   initial begin
+      #20_000_000;
+      $display("FAIL: timeout");
+      $display("PHASE 4 ROUND-TRIP GATE: FAIL");
       $finish;
    end
 

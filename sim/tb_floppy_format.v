@@ -114,8 +114,7 @@ module tb_floppy_format;
       .dskWriteReq(dskWriteReq),
       .dskWriteAck(dskWriteAck),
       .dbg_floppy(),
-      .dskCommitDone(), .dskCommitAddr(),
-      .dskCommitBufWr(), .dskCommitBufAddr(), .dskCommitBufData()
+      .dskCommitDone(), .dskCommitAddr()
    );
 
    // SDRAM write port mock: ack a cycle after each request, record the word

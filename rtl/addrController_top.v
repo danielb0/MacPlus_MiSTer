@@ -82,7 +82,22 @@ module addrController_top(
 	// only in busPhase 3) - MacPlus.sv needs this, not the ack pulses, to
 	// mux which loader's write DATA reaches sdram.v, since that data must
 	// be stable through busPhase 1 (CAS), not just busPhase 3.
-	output dskLoadSelExt
+	output dskLoadSelExt,
+
+	// floppy_sd_writer's READ port on the same slot (Phase 8), below both
+	// write requests in priority. Same protocol: hold the request with the
+	// address stable, the grant is held for the whole cycle, the ack is a
+	// pulse in busPhase 3 - and by then sdram.v has had the word in dout
+	// since the end of busPhase 2 (STATE_READ), so the requester captures
+	// it on the same edge it sees the ack. MacPlus.sv routes sdram.v's dout
+	// to the writers and raises oe from dskLoadRdEn.
+	input [21:0] dskFetchAddrInt,
+	input dskFetchReqInt,
+	output dskFetchAckInt,
+	input [21:0] dskFetchAddrExt,
+	input dskFetchReqExt,
+	output dskFetchAckExt,
+	output dskLoadRdEn
 );
 
 	// -------------- audio engine ---------------
@@ -265,9 +280,12 @@ module addrController_top(
 	// sampled the column address and data, so every word landed at a wrong
 	// column with the CPU's data bus contents instead of the disk byte.
 	reg dskLoadReqIntR, dskLoadReqExtR;
+	reg dskFetchReqIntR, dskFetchReqExtR;
 	always @(posedge clk) if (busPhase == 2'b11) begin
-		dskLoadReqIntR <= dskLoadReqInt;
-		dskLoadReqExtR <= dskLoadReqExt;
+		dskLoadReqIntR  <= dskLoadReqInt;
+		dskLoadReqExtR  <= dskLoadReqExt;
+		dskFetchReqIntR <= dskFetchReqInt;
+		dskFetchReqExtR <= dskFetchReqExt;
 	end
 
 	assign dskLoadSelExt = ~dskLoadReqIntR & dskLoadReqExtR;
@@ -276,6 +294,17 @@ module addrController_top(
 	assign dskLoadAckInt = dskLoadAck & ~dskLoadSelExt;
 	assign dskLoadAckExt = dskLoadAck &  dskLoadSelExt;
 	assign dskLoadWrEn   = dskLoadGrant;
+
+	// the read requests take the slot only when neither write request has
+	// it; every term is a busPhase-3 register, so the choice holds for the
+	// whole cycle exactly as the write grant does
+	wire dskFetchSelExt  = ~dskFetchReqIntR & dskFetchReqExtR;
+	wire dskFetchGrant   = (extraBusControl == 1'b1) && (extra_slot_count == 3) &&
+	                       ~(dskLoadReqIntR | dskLoadReqExtR) && (dskFetchReqIntR | dskFetchReqExtR);
+	wire dskFetchAck     = dskFetchGrant && (busPhase == 2'b11);
+	assign dskFetchAckInt = dskFetchAck & ~dskFetchSelExt;
+	assign dskFetchAckExt = dskFetchAck &  dskFetchSelExt;
+	assign dskLoadRdEn    = dskFetchGrant;
 
 	// Byte offsets of each floppy image within the disk region. Named in
 	// rtl/sdram_map.vh so that sim/tb_sdram_map.v can check them against the
@@ -286,6 +315,7 @@ module addrController_top(
 		dskReadAckInt ? dskReadAddrInt + `DSK_INT_BYTE_OFF:   // first dsk image at 1MB
 		dskReadAckExt ? dskReadAddrExt + `DSK_EXT_BYTE_OFF:   // second dsk image at 2MB
 		dskLoadGrant  ? (dskLoadSelExt ? dskLoadAddrExt + `DSK_EXT_BYTE_OFF : dskLoadAddrInt + `DSK_INT_BYTE_OFF) :
+		dskFetchGrant ? (dskFetchSelExt ? dskFetchAddrExt + `DSK_EXT_BYTE_OFF : dskFetchAddrInt + `DSK_INT_BYTE_OFF) :
 		macAddr;
 
 	// address decoding

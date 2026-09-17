@@ -547,13 +547,16 @@ wire        wc_int_wr_req,  wc_ext_wr_req;
 wire        wc_int_wr_ack,  wc_ext_wr_ack;
 wire [15:0] wc_int_wr_data, wc_ext_wr_data;
 
-// SD persistence tap (Phase 4): mirrors each committed sector so
-// floppy_sd_writer can shadow it out to the mounted .dsk over sd_wr.
+// commit notice (Phase 4): floppy_sd_writer queues the sector number and
+// fetches the block back out of SDRAM at write time (Phase 8), through
+// addrController_top.v's extra-slot-3 READ port below the write requests.
 wire        wc_int_commit_done,   wc_ext_commit_done;
 wire [21:0] wc_int_commit_addr,   wc_ext_commit_addr;
-wire        wc_int_commit_buf_wr, wc_ext_commit_buf_wr;
-wire [7:0]  wc_int_commit_buf_addr, wc_ext_commit_buf_addr;
-wire [15:0] wc_int_commit_buf_data, wc_ext_commit_buf_data;
+wire [21:0] wr_int_fetch_addr, wr_ext_fetch_addr;
+wire        wr_int_fetch_req,  wr_ext_fetch_req;
+wire        wr_int_fetch_ack,  wr_ext_fetch_ack;
+wire        dskLoadRdEn;
+wire [31:0] wr_int_dbg, wr_ext_dbg;   // witness words, PFSW in rtl/dbg_probes.sv
 
 // per-side combined (loader-or-committer) request presented to
 // addrController_top.v; loader wins whenever it is requesting, since a
@@ -776,7 +779,15 @@ addrController_top ac0
 	.dskLoadReqExt(slot3_ext_req),
 	.dskLoadAckExt(slot3_ext_ack),
 	.dskLoadWrEn(dskLoadWrEn),
-	.dskLoadSelExt(dskLoadSelExt)
+	.dskLoadSelExt(dskLoadSelExt),
+
+	.dskFetchAddrInt(wr_int_fetch_addr),
+	.dskFetchReqInt(wr_int_fetch_req),
+	.dskFetchAckInt(wr_int_fetch_ack),
+	.dskFetchAddrExt(wr_ext_fetch_addr),
+	.dskFetchReqExt(wr_ext_fetch_req),
+	.dskFetchAckExt(wr_ext_fetch_ack),
+	.dskLoadRdEn(dskLoadRdEn)
 );
 
 wire [1:0] diskEject;
@@ -874,14 +885,8 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 
 	.dskCommitDoneInt(wc_int_commit_done),
 	.dskCommitAddrInt(wc_int_commit_addr),
-	.dskCommitBufWrInt(wc_int_commit_buf_wr),
-	.dskCommitBufAddrInt(wc_int_commit_buf_addr),
-	.dskCommitBufDataInt(wc_int_commit_buf_data),
 	.dskCommitDoneExt(wc_ext_commit_done),
 	.dskCommitAddrExt(wc_ext_commit_addr),
-	.dskCommitBufWrExt(wc_ext_commit_buf_wr),
-	.dskCommitBufAddrExt(wc_ext_commit_buf_addr),
-	.dskCommitBufDataExt(wc_ext_commit_buf_data),
 
 	// block device interface for scsi disk
 	.img_mounted({img_mounted[4], img_mounted[1:0]}),
@@ -1021,9 +1026,6 @@ floppy_sd_writer wr_int
 
 	.commit_done(wc_int_commit_done),
 	.commit_addr(wc_int_commit_addr),
-	.commit_buf_wr(wc_int_commit_buf_wr),
-	.commit_buf_addr(wc_int_commit_buf_addr),
-	.commit_buf_data(wc_int_commit_buf_data),
 
 	.readonly(ldr_int_readonly),
 	.loader_busy(ldr_int_busy),
@@ -1032,6 +1034,12 @@ floppy_sd_writer wr_int
 	// that can produce a commit - 1600 blocks for an 800K image.
 	.size_blocks(ldr_int_size[21:9]),
 
+	// the block, read back out of SDRAM at write time (see sdram_out below)
+	.fetch_addr(wr_int_fetch_addr),
+	.fetch_req(wr_int_fetch_req),
+	.fetch_ack(wr_int_fetch_ack),
+	.fetch_data(sdram_out),
+
 	.sd_lba(wr_int_sd_lba),
 	.sd_wr(wr_int_sd_wr),
 	.sd_ack(sd_ack[2]),
@@ -1039,7 +1047,8 @@ floppy_sd_writer wr_int
 	.sd_buff_addr(sd_buff_addr[7:0]),
 	.sd_buff_din(wr_int_sd_buff_din),
 
-	.busy(wr_int_busy)
+	.busy(wr_int_busy),
+	.dbg(wr_int_dbg)
 );
 
 floppy_sd_writer wr_ext
@@ -1051,13 +1060,15 @@ floppy_sd_writer wr_ext
 
 	.commit_done(wc_ext_commit_done),
 	.commit_addr(wc_ext_commit_addr),
-	.commit_buf_wr(wc_ext_commit_buf_wr),
-	.commit_buf_addr(wc_ext_commit_buf_addr),
-	.commit_buf_data(wc_ext_commit_buf_data),
 
 	.readonly(ldr_ext_readonly),
 	.loader_busy(ldr_ext_busy),
 	.size_blocks(ldr_ext_size[21:9]),
+
+	.fetch_addr(wr_ext_fetch_addr),
+	.fetch_req(wr_ext_fetch_req),
+	.fetch_ack(wr_ext_fetch_ack),
+	.fetch_data(sdram_out),
 
 	.sd_lba(wr_ext_sd_lba),
 	.sd_wr(wr_ext_sd_wr),
@@ -1066,7 +1077,8 @@ floppy_sd_writer wr_ext
 	.sd_buff_addr(sd_buff_addr[7:0]),
 	.sd_buff_din(wr_ext_sd_buff_din),
 
-	.busy(wr_ext_busy)
+	.busy(wr_ext_busy),
+	.dbg(wr_ext_dbg)
 );
 
 // word written into SDRAM this cycle when dskLoadWrEn is high - selects
@@ -1213,7 +1225,7 @@ wire download_cycle = dio_download && dioBusControl;
 // disk region's first megabyte, which is exactly two 512KB slots -- so
 // Phase 2's four slots put slot 2 on top of the internal floppy image and
 // hung every 64K model. rtl/sdram_map.vh has the full account.
-wire dsk_cycle = dskReadAckInt || dskReadAckExt || dskLoadWrEn;
+wire dsk_cycle = dskReadAckInt || dskReadAckExt || dskLoadWrEn || dskLoadRdEn;
 
 wire [24:0] sdram_addr = download_cycle ? (`SDRAM_ROM_BASE  + dio_a[20:0])       :
                          ~_romOE        ? (`SDRAM_ROM_BASE  + rom_read_addr)     :
@@ -1223,7 +1235,7 @@ wire [24:0] sdram_addr = download_cycle ? (`SDRAM_ROM_BASE  + dio_a[20:0])      
 wire [15:0] sdram_din  = download_cycle ? dio_data  : dskLoadWrEn ? slot3_wr_data : memoryDataOut;
 wire  [1:0] sdram_ds   = download_cycle ? 2'b11     : dskLoadWrEn ? 2'b11          : { !_memoryUDS, !_memoryLDS };
 wire        sdram_we   = download_cycle ? dio_write : dskLoadWrEn ? 1'b1           : !_ramWE;
-wire        sdram_oe   = download_cycle ? 1'b0                  : (!_ramOE || !_romOE || dskReadAckInt || dskReadAckExt);
+wire        sdram_oe   = download_cycle ? 1'b0                  : (!_ramOE || !_romOE || dskReadAckInt || dskReadAckExt || dskLoadRdEn);
 wire [15:0] sdram_do   = download_cycle ? 16'hffff : (dskReadAckInt || dskReadAckExt) ? extra_rom_data_demux : sdram_out;
 
 // during rom/disk download ffff is returned so the screen is black during download
@@ -1287,7 +1299,9 @@ dbg_probes dbg_probes_inst
 	.scsi_hold  ( scsi_bus_hold           ),
 	.scsi_breach( scsi_frontier_evt       ),
 	.dbg_floppy ( dbg_floppy              ),
-	.dbg_dcd    ( dbg_dcd                 )
+	.dbg_dcd    ( dbg_dcd                 ),
+	.dbg_sdw_int( wr_int_dbg              ),
+	.dbg_sdw_ext( wr_ext_dbg              )
 );
 `endif
 

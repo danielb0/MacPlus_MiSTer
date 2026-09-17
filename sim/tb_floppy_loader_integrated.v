@@ -53,7 +53,10 @@ module tb_floppy_loader_integrated;
       .dskReadAddrExt(22'd0), .dskReadAckExt(dskReadAckExt),
       .dskLoadAddrInt(ldr_wr_addr), .dskLoadReqInt(ldr_wr_req), .dskLoadAckInt(dskLoadAckInt),
       .dskLoadAddrExt(22'd0),       .dskLoadReqExt(ldrB_wr_req), .dskLoadAckExt(dskLoadAckExt),
-      .dskLoadWrEn(dskLoadWrEn)
+      .dskLoadWrEn(dskLoadWrEn),
+      .dskFetchAddrInt(22'd0), .dskFetchReqInt(1'b0), .dskFetchAckInt(),
+      .dskFetchAddrExt(22'd0), .dskFetchReqExt(1'b0), .dskFetchAckExt(),
+      .dskLoadRdEn()
    );
 
    // ---- floppy_loader DUT (the "int" drive) ----

@@ -525,6 +525,64 @@ Two defects were found during verification and both were in the benches, not the
 
 ---
 
+### Phase 8 - The SD writer keeps no copy of the data (SDRAM-sourced, unbounded backlog)
+
+**The defect, found 2026-09-16 on the MacLC port of this exact module** (danielb0/MacLC_MiSTer, `floppy-write` at `ce07e67`, which carried a witness word the Plus never had). `rtl/floppy_sd_writer.v` holds two 256x16 shadow copies of committed sectors. A commit that arrives while both are still owned - queued, or mid-`sd_wr` - is captured into the buffer of an entry that has not drained yet: the header's own "third commit reuses the still-in-flight buffer" limit. On the LC a 450 KB Finder copy (Speedometer 3.23, ~900 sectors) hit it twice, and the image on the card had **four wrong sectors** in the application's resource fork - one never written, one torn, two carrying mixed data - while `hfs_check` reported the volume consistent, the disk mounted and listed normally, and the guest's own verify passed, because the verify reads SDRAM, which is right. Silent, and exactly the looks-fine-until-a-file-is-lost class.
+
+**Reproduced here first, on the shipped RTL (2026-09-17).** A scratch bench against the current `floppy_sd_writer.v`: commit A, commit B, hold `sd_ack` off, commit C, then serve. The block hps_io streamed for A's LBA was C's data, 256 of 256 words wrong, and C's own LBA was never presented at all - one sector wrong on the card and one lost, from three commits during a single stall. That is the failing test this phase starts from.
+
+**Why a fixed depth cannot be made safe.** Main opens a writable image `O_RDWR|O_SYNC` (`user_io.cpp`, `user_io_file_mount`), so every 512-byte block is a synchronous card write with exFAT bookkeeping behind it, and sync latency is bursty - tens to hundreds of milliseconds. Sectors arrive at the encoder's fixed cadence of 12.5 ms (782 byte cells x 16 us, every zone). Two buffers absorb one hiccup; a longer stall overwrites. Deepening the queue moves the cliff, it does not remove it, and the failure at the cliff is a torn sector, not a refusal.
+
+**Why it has never shown here, and why that proves nothing.** The largest sustained burst this core has run is Erase Disk (Phase 6): 1600 sectors gapless, byte-verified offline with zero survivors. But every format sector carries the same all-zero data field, so a torn write between two of them is byte-identical to a correct one; the erases bound only the 4-deep class (an `addr_q` entry overwritten before it drains, which leaves an old sector standing) at < ~1.25e-3 per sector and say nothing about the 3-deep one. Every other write test copied small files. The Phase 5 "stress the commit-queue depth" bullet was never run. MacPlus is raw-only - one sync write per sector, no read-modify-write - so it has ~4x the LC's slack: rarer, not immune. Its own aggravator is that six slots share one hps_io poll loop (`MacPlus.sv`, the `sd_rd`/`sd_wr` vectors): SCSI, CD and HD20 all contend with the floppy write slots, so the worst realistic case is a file copy onto a floppy while CD audio plays.
+
+**The fix is the LC's, ported, not redesigned** (danielb0/MacLC_MiSTer `floppy-write-sdram-src`, `60d1e95` + `ce07e67`, hardware-gated there 2026-09-16: the same 450 KB copy, zero refusals, both forks byte-identical to the source, on a DC42 and on a raw image). The writer keeps **no copy of the data**:
+
+1. **Queue sector NUMBERS.** On `commit_done && !readonly` push `commit_addr[21:9]` into a FIFO, 1024 x 13 bits (two M10K). `floppy_write_committer.v` has already landed the sector in SDRAM, and SDRAM always holds the newest version, so a sector re-written while still queued is queued twice and written twice with the latest contents - no dedupe, no bitmap, no in-flight tracking. 1024 pending is ~13 s of backlog at one sector per 12.5 ms; if even that fills the push is **refused and counted** (`dbg[31:24]`), never overwritten. That is the one loss path left, and it is loud.
+
+2. **Fetch the block from SDRAM at write time** into ONE 256x16 buffer, then present it to hps_io exactly as the shadow was (same output byte swap: SDRAM words are in the internal even-byte-high convention, the wire is the opposite). The committer's `sd_buf_*` shadow tap, and the `dskCommitBuf*` ports that threaded it through `floppy.v`, `iwm.v` and `dataController_top.sv`, go away.
+
+3. **The SDRAM read path is the part that does not port.** The LC shared its controller's Ethernet-DMA requester; this core's `rtl/sdram.v` is the MiST original and has no such port. What it has is `addrController_top.v`'s extra slot 3, today a write-only port for the loader and the committer. It gains a READ requester pair (`dskFetchAddrInt/Ext`, `dskFetchReqInt/Ext`, `dskFetchAckInt/Ext`, `dskLoadRdEn`) on the same protocol the write side was fixed to in Phase 1: the request is sampled once at the bus-cycle boundary (`busPhase == 3`), the grant and the address selection are held for the whole four-phase cycle, and the ack is a late pulse in `busPhase 3`. `sdram.v` issues ACTIVE from the values present in busPhase 0, the column from busPhase 1, and captures the read word at the end of busPhase 2 (`STATE_READ`), so the word sits in `dout` for the whole of busPhase 3 and the requester captures it on the same edge it sees the ack. `sdram.v` itself is untouched; `MacPlus.sv` adds `dskLoadRdEn` to `sdram_oe` and to the disk-region address select, and hands the writers `sdram_out`. Priority among the four registered requests is loader int, loader ext, fetch int, fetch ext - the fetch is the only client that can afford to wait. Each requester's selection comes from its own registered request, so a committer write and a writer fetch on the same slot interleave word by word without either losing one; the loader/committer data mux in `MacPlus.sv` is not touched.
+
+   Bandwidth: slot 3 recurs every 16 clk8 (~2 us), so a block fetch is ~0.5 ms alone and ~1 ms with the committer draining the next sector on the same slot, against the 12.5 ms sector cadence.
+
+4. **A remount ABORTS the writer** - FSM to idle, both request lines low, FIFO emptied - not just the queue. The inherited "clear the queue but leave `pstate` alone" was safe only while a sector was one hps_io request; the LC found the loader's acks on the shared slot walking a running FSM into an `sd_wr` against the new image. Here a sector is still one request, so it is latent, but the abort costs nothing and the bench pins it. A fetch withdrawn by the abort is harmless: the slot performs one read nobody consumes, and the writer only acts on an ack while its own request is up.
+
+5. **Unchanged:** `readonly` as the gate, `size_blocks` refusal, and the ack-timeout RE-PRESENTATION of the same block (hps_io captures `sd_lba` in one poll and acks in a later one, so a retired entry plus a late ack would stream a different block to a captured LBA).
+
+6. **A witness word** (`dbg`): `{refused[7:0], out_of_range[7:0], landed[7:0], 5'b0, pstate[2:0]}` per writer, the two writers packed into one new `PFSW` probe in `rtl/dbg_probes.sv` (`PRG1`, the older half of the SCSI access ring, is retired to make room: the deck's own header names it the cheapest thing to lose, and the wedge it served is closed). `scripts/read_probes.tcl` decodes it. The gate condition is refusals == 0 after a sustained copy - the instrument that found the defect on the LC, and the only way a clean copy here means anything.
+
+**One defect found in the LC's version while porting (2026-09-17), fixed here and to be reported back.** Its `P_IDLE` pops the queue with `rd_ptr <= rd_ptr + 1` and reads the head through a registered `q_head`, which lags the pointer by one cycle. On the ACCEPT path that is harmless - the FSM leaves `P_IDLE` for hundreds of cycles - but on the REFUSE path (out of range) it stays in `P_IDLE`, and the very next cycle pops again against the stale head: with `[X(out of range), Y, Z]` queued, X is refused twice, Y is written, and Z is never written. Rare (an out-of-range sector needs a malformed image or `track` past the file's end) but it loses a sector. The refuse path here goes through a one-cycle `P_SKIP` state so the head has moved on before the next pop, and the bench queues exactly that sequence.
+
+#### Verification (benches first, per this project's convention)
+
+1. **The failing test: the current writer, three commits during one stall** (above). Scratch-only, against the shipped RTL; the scenario is section 8 of the new bench.
+2. **`sim/tb_floppy_sd_writer.v` rewritten** around a slot-3 model (requests sampled at the bus-cycle boundary, one grant per 16 bus cycles, a one-clock ack, the word read out of a modelled SDRAM that FAILS the run on any fetch address outside the image): byte order (the headline check - the swap must mirror `floppy_loader.v`'s); read-only refusal; out-of-range refusal counted, and **refuse-then-two-more** (the LC defect above); remount drops the queue; ack timeout re-presents the same block; commit order; remount mid-fetch aborts (request low, the slot's stale grant harmless, no `sd_wr` on the loader's acks, the next sector clean); **three commits during one stall all land intact and in order**; **a sector re-committed while queued is written twice with the newest data**; **a full queue refuses and raises the witness, never overwrites**; reset after activity.
+3. **`sim/tb_slot3_fetch.v`, the seam:** the REAL `addrController_top.v` with the two-phase SDRAM model from `tb_floppy_loader_integrated.v` (RAS from busPhase 0, CAS from busPhase 1, and now the read word at the end of busPhase 2), the REAL `floppy_write_committer.v` and the REAL `floppy_sd_writer.v`, with the committer draining sector N+1 while the writer fetches sector N on the same slot. Every committed word lands, every fetched word is the one SDRAM holds, and the ack and the data agree in phase.
+4. **`sim/tb_loader_writer_roundtrip.v`** updated: the writer now fetches from a mock SDRAM holding internal-convention words; the loader must recover them byte-exact from what the writer put on the wire.
+5. Every bench that instantiates `addrController_top`, `floppy.v`, `iwm.v` or the committer updated for the port changes; all floppy/IWM regression benches still pass.
+6. Mutation sweep on the writer and the arbiter.
+7. `quartus_map --analysis_and_elaboration`, then (gated) a compile.
+8. **Hardware gate:** a ~450 KB Finder copy onto a floppy image, with CD audio playing (the worst realistic case), `PFSW` refusals == 0, then a byte-for-byte diff of the copied files' forks against the source volume (`scripts/hfs_integrity.py`). Structure checks alone pass on a corrupt copy - they did on the LC.
+
+#### What was built (2026-09-17)
+
+* **`rtl/floppy_sd_writer.v`** - rewritten as above: `q_mem` (1024x13), `blk` (256x16), states `P_IDLE/P_SKIP/P_FILL/P_WR/P_WAIT_ACK/P_WAIT_DONE`, `fetch_addr/req/ack/data` port, `dbg` witness.
+* **`rtl/addrController_top.v`** - `dskFetchAddr/Req/AckInt/Ext`, `dskLoadRdEn`; the fetch request registers sit beside the load ones, the grant excludes any load request, the address mux gains one line. The write side is byte-identical.
+* **`MacPlus.sv`** - `dskLoadRdEn` into `sdram_oe` and `dsk_cycle`; writers wired to the fetch ports and `sdram_out`; the `wc_*_commit_buf_*` wires gone; `wr_int_dbg`/`wr_ext_dbg` into the probe deck.
+* **`rtl/floppy_write_committer.v`, `rtl/floppy.v`, `rtl/iwm.v`, `rtl/dataController_top.sv`** - the shadow tap and its `dskCommitBuf*` ports removed.
+* **`rtl/dbg_probes.sv`, `scripts/read_probes.tcl`** - `PFSW` in `PRG1`'s node, decoded per writer.
+
+#### Verification
+
+* `sim/tb_floppy_sd_writer.v`: 11 sections, **5433 checks, 0 failures**. `sim/tb_slot3_fetch.v`: **784 checks, 0 failures** (one bench defect on the way: its stray-read counter also counted the IWM read windows, which read address 0 in that bench - now only a fetch outside the image counts). `sim/tb_loader_writer_roundtrip.v`: PASS.
+* Regressions re-run green: `tb_floppy_format`, `tb_floppy_sides`, `tb_floppy_loader_integrated`, `tb_floppy_loader_ext`, `tb_iwm_dcd`, `tb_iwm_latch` (its header's build line predates the DCD work - add `rtl/dcd.v rtl/dcd_link.v rtl/dcd_disk.v rtl/scsi.v`), `tb_floppy_write_path`.
+* `quartus_map --analysis_and_elaboration`: **0 errors, 83 warnings - the identical set the untouched branch head produces** (re-measured by stashing the change; the only diff is line-number shifts in `dbg_probes.sv`). The connectivity report has nothing on the new ports.
+* Mutation sweep: not yet run (script prepared, 21 mutants over the writer and the arbiter).
+
+**STATUS: implemented, benched, elaborated. NOT compiled, never on hardware.** The hardware gate is item 8 above.
+
+---
+
 ## 4. Risks
 
 | Risk | Severity | Mitigation |

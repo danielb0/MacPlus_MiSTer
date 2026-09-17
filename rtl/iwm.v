@@ -97,17 +97,11 @@ module iwm
 	// Bit assignments live in rtl/dcd.v and rtl/dcd_link.v.
 	output [31:0] dbg_dcd,
 
-	// SD persistence tap (Phase 4), per drive - see floppy.v's dskCommit* ports
+	// commit notice (Phase 4), per drive - see floppy.v's dskCommit* ports
 	output        dskCommitDoneInt,
 	output [21:0] dskCommitAddrInt,
-	output        dskCommitBufWrInt,
-	output [7:0]  dskCommitBufAddrInt,
-	output [15:0] dskCommitBufDataInt,
 	output        dskCommitDoneExt,
-	output [21:0] dskCommitAddrExt,
-	output        dskCommitBufWrExt,
-	output [7:0]  dskCommitBufAddrExt,
-	output [15:0] dskCommitBufDataExt
+	output [21:0] dskCommitAddrExt
 );
 
 	wire [7:0] dataInLo = dataIn[7:0];
@@ -300,10 +294,7 @@ module iwm
 		.dskWriteAck(dskWriteAckInt),
 
 		.dskCommitDone(dskCommitDoneInt),
-		.dskCommitAddr(dskCommitAddrInt),
-		.dskCommitBufWr(dskCommitBufWrInt),
-		.dskCommitBufAddr(dskCommitBufAddrInt),
-		.dskCommitBufData(dskCommitBufDataInt)
+		.dskCommitAddr(dskCommitAddrInt)
 	);
 
 	floppy floppyExt
@@ -358,10 +349,7 @@ module iwm
 		.dskWriteAck(dskWriteAckExt),
 
 		.dskCommitDone(dskCommitDoneExt),
-		.dskCommitAddr(dskCommitAddrExt),
-		.dskCommitBufWr(dskCommitBufWrExt),
-		.dskCommitBufAddr(dskCommitBufAddrExt),
-		.dskCommitBufData(dskCommitBufDataExt)
+		.dskCommitAddr(dskCommitAddrExt)
 	);
 
 	// ------------------------------------------------------------------
