@@ -382,8 +382,43 @@ for {set n 0} {$n < $samples} {incr n} {
 	} else {
 		puts "  PFSW  ABSENT from this bitstream -- predates the Phase 8 SD writer."
 	}
+	# PSND: the sound-scan phase probe (SOUND_PHASE_PLAN.md). Packing is in
+	# rtl/snd_phase_probe.sv and proven by sim/tb_snd_phase.v: [8:0] scan
+	# word at the first CPU write into the main sound buffer this frame,
+	# [17:9] the buffer word that write hit (the driver's start word S),
+	# [26:18] scan word when word 0 was written (the wrap), [31:27] frame
+	# counter. 511 in a word field means "did not happen this frame".
+	if {[have PSND]} {
+		set psnd    [b2i [rd PSND]]
+		set s_first [expr { $psnd        & 0x1ff}]
+		set s_word  [expr {($psnd >>  9) & 0x1ff}]
+		set s_wrap  [expr {($psnd >> 18) & 0x1ff}]
+		set s_frame [expr {($psnd >> 27) & 0x1f}]
+		if {$s_first == 511} {
+			puts [format "  PSND  frame %2d: no CPU write into the main sound buffer" $s_frame]
+		} else {
+			puts [format "  PSND  frame %2d: first write hit word %d while the scan was at word %d  (V+lat = %d words)" \
+			             $s_frame $s_word $s_first $s_first]
+			if {$s_first >= $s_word} {
+				puts "        LATE: the scan had already passed the start word -- the first part is stale for this frame."
+			}
+			if {$s_wrap == 511} {
+				puts "        word 0 was not written this frame"
+			} else {
+				puts [format "        word 0 written while the scan was at word %d" $s_wrap]
+				if {$s_wrap + 1 < $s_word} {
+					puts [format "        WRAP OVERTOOK THE SCAN: words %d..%d are overwritten before they are read -- a splice this frame." \
+					             [expr {$s_wrap + 1}] [expr {$s_word - 1}]]
+				} else {
+					puts "        wrap landed behind the scan: no splice this frame"
+				}
+			}
+		}
+	}
+
 	# The access ring, newest first. Entry = {rw,dack,reg,3'b0,val}. PRG1
-	# gave its hub node to PFSW, so the ring is two entries now.
+	# gave its hub node to PFSW, and PRG0's went to PSND, so this prints
+	# nothing on a current build and is kept for older bitstreams.
 	puts [format "  PRG   last 2 non-poll SCSI accesses (newest first); DACK reads so far: %d" [expr {($pscs >> 8) & 0xf}]]
 	foreach pr {PRG0} {
 		set w [b2i [rd $pr]]

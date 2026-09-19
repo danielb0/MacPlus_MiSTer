@@ -126,6 +126,9 @@ localparam CONF_STR = {
 	"O13,Model,Plus,SE,512K,128K,512Ke;",
 	"O5,Speed,8MHz,16MHz;",
 	"O6,Floppy Write,Off,On;",
+	// SOUND_PHASE_PLAN.md: the sound-buffer word the scan starts from on the
+	// vblank edge. 0 is the old behaviour. Bits 19-20 (J,K) were free.
+	"OJK,Sound Scan Phase,0,20,28,36;",
 	"ODE,CPU,68000,68010,68020;",
 	"D1O4,Memory,1MB,4MB;",
 	"-;",
@@ -520,6 +523,7 @@ wire [15:0] dataControllerDataOut;
 
 // audio
 wire snd_alt;
+wire [8:0] snd_index;   // scan word 0..369, for the PSND probe
 wire loadSound;
 wire snd_advance;
 
@@ -766,6 +770,8 @@ addrController_top ac0
 	.snd_alt(snd_alt),
 	.loadSound(loadSound),
 	.snd_advance(snd_advance),
+	.snd_phase(status[20:19]),
+	.snd_index(snd_index),
 
 	.dskReadAddrInt(dskReadAddrInt),
 	.dskReadAckInt(dskReadAckInt),
@@ -1276,6 +1282,20 @@ sdram sdram
 // JTAG In-System probes for the CD-ROM boot-hang hunt. Enabled by the
 // USE_SCSI_ISSP macro in MacPlus.qsf; drop the macro for a release build.
 `ifdef USE_SCSI_ISSP
+wire [31:0] dbg_snd;
+snd_phase_probe snd_phase_probe_inst
+(
+	.clk           ( clk_sys       ),
+	.clk8_en_p     ( clk8_en_p     ),
+	._vblank       ( _vblank       ),
+	.snd_index     ( snd_index     ),
+	.cpuAddr       ( cpuAddr       ),
+	._cpuAS        ( _cpuAS        ),
+	._cpuRW        ( _cpuRW        ),
+	.configRAMSize ( configRAMSize ),
+	.dbg           ( dbg_snd       )
+);
+
 dbg_probes dbg_probes_inst
 (
 	.clk        ( clk_sys                ),
@@ -1301,7 +1321,8 @@ dbg_probes dbg_probes_inst
 	.dbg_floppy ( dbg_floppy              ),
 	.dbg_dcd    ( dbg_dcd                 ),
 	.dbg_sdw_int( wr_int_dbg              ),
-	.dbg_sdw_ext( wr_ext_dbg              )
+	.dbg_sdw_ext( wr_ext_dbg              ),
+	.dbg_snd    ( dbg_snd                 )
 );
 `endif
 

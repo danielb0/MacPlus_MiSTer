@@ -244,6 +244,7 @@ set_global_assignment -name VERILOG_FILE rtl/cd_mix.v
 # no SEARCH_PATH needed (MacLC.qsf:373 registers it the same way).
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cd_audio.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/dbg_probes.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/snd_phase_probe.sv
 set_global_assignment -name VERILOG_FILE rtl/build_tag.v
 # JTAG probe deck (rtl/dbg_probes.sv). OFF for a release build -- the deck and
 # its taps are pruned entirely when the macro is absent, so this costs nothing.

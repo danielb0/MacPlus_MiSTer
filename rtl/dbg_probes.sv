@@ -30,8 +30,9 @@
 //   PIO3  {wr_stuck, d0_io_lba} -- the WRITE-side twin of PIOS
 //   PIO4  disk write/ack counts + live write handshake bits
 //   PHLD  CPU hold-off engagements + longest stall + frontier breaches
-//   PRG0  ring of the last 2 SCSI register accesses -- the CONVERSATION,
-//         not just its last line (PRG1 gave its slot to PFSW)
+//   PSND  sound-scan phase: the scan word at the first CPU write into the
+//         main sound buffer each frame, the word it hit, and the scan word
+//         at the wrap write (rtl/snd_phase_probe.sv; took PRG0's node)
 //   PFSW  the two floppy SD writers' witness: queue refusals (a sector
 //         LOST), out-of-range refusals, blocks landed -- see below
 //   PDMA  the discriminating word: DACK reads since the arm, watchdog fire
@@ -101,7 +102,11 @@ module dbg_probes (
 	// floppy_sd_writer witness words (rtl/floppy_sd_writer.v `dbg`), one
 	// per drive. Decoded and packed below as PFSW.
 	input  wire [31:0] dbg_sdw_int,
-	input  wire [31:0] dbg_sdw_ext
+	input  wire [31:0] dbg_sdw_ext,
+
+	// sound-scan phase word (rtl/snd_phase_probe.sv), PSND below. Took the
+	// hub node PRG0 held: the SCSI wedge that ring was built for is closed.
+	input  wire [31:0] dbg_snd
 );
 
 	wire dbg_bsy    = scsi_dbg[0];
@@ -889,13 +894,13 @@ module dbg_probes (
 		.sld_auto_instance_index ("YES")
 	) cp_pifd (.probe(pifd_r), .source(), .source_clk(clk), .source_ena(1'b1));
 
+	// PRG0/PRG1, the SCSI access ring, are gone: PRG1's hub node went to
+	// PFSW and PRG0's to PSND (SOUND_PHASE_PLAN.md). acc_hist is still
+	// maintained above so the ring can come back by re-adding the instance.
 	altsource_probe #(
-		.instance_id ("PRG0"), .probe_width (32), .source_width (1),
+		.instance_id ("PSND"), .probe_width (32), .source_width (1),
 		.sld_auto_instance_index ("YES")
-	) cp_prg0 (.probe(acc_hist[31:0]),   .source(), .source_clk(clk), .source_ena(1'b1));
-	// PRG1 (the older half of the ring) gave its hub node to PFSW: the
-	// SCSI wedge the ring was built for is closed, and two entries still
-	// carry a CDB handover.
+	) cp_psnd (.probe(dbg_snd), .source(), .source_clk(clk), .source_ena(1'b1));
 
 	// ---- PFSW: the floppy SD writers' witness (Phase 8) -----------------
 	// Per writer, from its dbg word: queue refusals and out-of-range

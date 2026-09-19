@@ -54,6 +54,8 @@ module addrController_top(
 	input  snd_alt,
 	output loadSound,
 	output snd_advance,
+	input [1:0] snd_phase,     // scan start word at vblank: 0 / 20 / 28 / 36 (SOUND_PHASE_PLAN.md)
+	output [8:0] snd_index,    // word the scan is on, 0..369, for the PSND probe
 		
 	// misc
 	input memoryOverlayOn,
@@ -133,6 +135,24 @@ module addrController_top(
 
 	wire [17:0] snd_div_next = snd_div + SND_STEP;
 
+	// Scan phase (SOUND_PHASE_PLAN.md). The scan used to start at word 0 on
+	// the vblank edge, the same edge that raises the VBL interrupt through VIA
+	// CA1, so the reader was at word 0 when the interrupt fired. Every
+	// buffer-filling driver measured (PoP's MDRV, the ROM's free-form driver,
+	// System 6.0.4's Sound Manager) writes from a start word tuned to a
+	// reader that is ~23-37 words in by the time the VBL task runs; at word 0
+	// the wrap part of the fill overtakes the reader and the stream splices
+	// twice a frame. snd_phase picks the word the scan starts from at the
+	// vblank edge; the scan then wraps 369 -> 0 mid-frame, so the frame is
+	// still exactly 370 words. Value 0 is the old behaviour.
+	wire [8:0] phase_words = (snd_phase == 2'd1) ? 9'd20 :
+	                         (snd_phase == 2'd2) ? 9'd28 :
+	                         (snd_phase == 2'd3) ? 9'd36 : 9'd0;
+	localparam [8:0] SND_LAST = 9'd369;
+	reg [21:0] sndBase;
+	reg  [8:0] sndWord;
+	assign snd_index = sndWord;
+
 	reg vblankD;
 	always @(posedge clk) begin
 		if (clk8_en_p) begin
@@ -141,12 +161,20 @@ module addrController_top(
 
 			// falling edge of _vblank = begin of vblank phase
 			if (vblankD && !_vblank) begin
-				audioAddr <= snd_alt ? 22'h3FA100 : 22'h3FFD00;
+				sndBase   <= snd_alt ? 22'h3FA100 : 22'h3FFD00;
+				sndWord   <= phase_words;
+				audioAddr <= (snd_alt ? 22'h3FA100 : 22'h3FFD00) + {12'd0, phase_words, 1'b0};
 				snd_div <= 18'd0;
 				sndAdvance <= 1'b1; // commit first sample at vblank
 			end else if (snd_div_next >= SND_SIZE) begin
 				snd_div <= snd_div_next - SND_SIZE;
-				audioAddr <= audioAddr + 22'd2;
+				if (sndWord == SND_LAST) begin
+					sndWord   <= 9'd0;
+					audioAddr <= sndBase;
+				end else begin
+					sndWord   <= sndWord + 9'd1;
+					audioAddr <= audioAddr + 22'd2;
+				end
 				sndAdvance <= 1'b1;
 			end else begin
 				snd_div <= snd_div_next;
