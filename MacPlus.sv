@@ -127,8 +127,10 @@ localparam CONF_STR = {
 	"O5,Speed,8MHz,16MHz;",
 	"O6,Floppy Write,Off,On;",
 	// SOUND_PHASE_PLAN.md: the sound-buffer word the scan starts from on the
-	// vblank edge. 0 is the old behaviour. Bits 19-20 (J,K) were free.
-	"OJK,Sound Scan Phase,0,20,28,36;",
+	// vblank edge. Index 0 MUST be 28, the hardware-confirmed value, so a
+	// fresh config gets it; 0 is the old (buzzing) behaviour, kept for
+	// measurement. Bits 19-20 (J,K) were free.
+	"OJK,Sound Scan Phase,28,0,20,36;",
 	"ODE,CPU,68000,68010,68020;",
 	"D1O4,Memory,1MB,4MB;",
 	"-;",

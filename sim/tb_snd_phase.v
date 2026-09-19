@@ -84,7 +84,7 @@ module tb_snd_phase;
    task scan_frame(input [1:0] ph);
       begin
          phase = ph;
-         p = (ph == 1) ? 20 : (ph == 2) ? 28 : (ph == 3) ? 36 : 0;
+         p = (ph == 1) ? 0 : (ph == 2) ? 20 : (ph == 3) ? 36 : 28;
          base = 22'h3FFD00;
          wait_frame_edge;          // the frame that first sees this phase
          wait_frame_edge;          // ... and the next, which starts from it
@@ -165,8 +165,8 @@ module tb_snd_phase;
       scan_frame(2'd2);
       scan_frame(2'd3);
 
-      $display("probe: PoP's shape at 4MB, phase 0");
-      phase = 2'd0; ramsize = 2'b11; sb = 24'h3FFD00;
+      $display("probe: PoP's shape at 4MB, scan start word 0 (phase index 1)");
+      phase = 2'd1; ramsize = 2'b11; sb = 24'h3FFD00;
       wait_frame_edge; @(negedge clk);    // after the edge's commit has landed
       frames0 = dbg[31:27];
       wait_words(5);                      // ~the VBL task latency (counts the reload pulse)
@@ -209,8 +209,8 @@ module tb_snd_phase;
       wait_frame_edge; @(negedge clk);
       check(dbg[8:0] == 9'h1FF, "PSND 1MB: a 4MB-buffer address is ignored");
 
-      $display("phase 28 with a write at word 37 lands behind the scan (the fix's premise)");
-      ramsize = 2'b11; sb = 24'h3FFD00; phase = 2'd2;
+      $display("scan start word 28 (the default, phase index 0): a write at word 37 lands behind the scan");
+      ramsize = 2'b11; sb = 24'h3FFD00; phase = 2'd0;
       wait_frame_edge; wait_frame_edge;
       wait_words(5);
       @(negedge clk); idx_first = snd_index;

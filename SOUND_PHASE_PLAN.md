@@ -108,4 +108,47 @@ Apple's own drivers assume it.
 
 ## Results
 
-(pending)
+Build `6aba5a1e` (`output_files/MacPlus_6aba5a1e_sndphase.rbf`): cold
+compile, 0 errors, 120 warnings (probe deck on), setup slack +0.261. Hardware
+2026-09-20, PoP music playing, PSND read with `read_probes.tcl 10 0.5`:
+
+| phase | first write hits | scan word then | word 0 written at | reader's verdict | by ear |
+|---|---|---|---|---|---|
+| 0 | 37 | 2-3 | 30 | WRAP OVERTOOK THE SCAN: words 31..36 | buzz (as before) |
+| 20 | 37 | 22-23 | 50 | no splice | clean |
+| 28 | 37 | 30-31 | 58 | no splice | **clean** |
+| 36 | 37 | 38-39 | 66 | LATE: first part stale | buzz again |
+
+Every sample agreed with its prediction, ten of ten at 0, eight of eight at
+28, six of six at 36, three of three at 20 (the other three frames in that
+capture had no buffer write: a pause in the music). Interrupt-to-task latency is 2-3 words (~0.1 ms), so
+the core's V = 0 put PoP's wrap six words short of the reader on every frame.
+
+Also seen while something other than PoP was making sound: a writer starting
+at word 50 with idle frames between, landing at scan word 33 at phase 28 with
+no splice. A start word of 50 is the ROM's free-form driver, exactly the
+"offsets 50 to 370, then 0 to 50" Mini vMac's author measured.
+
+**Verdict: the scan phase was the cause.** With V + lat = 30-31 words every
+driver in the table above is inside its window (PoP 9..37, ROM -1..50, Sound
+Manager 6.0.4 23..90). 28 is also the length of vertical blanking in lines,
+which is the natural hardware explanation: the scan wraps at one end of
+vertical blanking and the VBL interrupt fires at the other.
+
+**Control and side results (Daniel, 2026-09-20):**
+
+* Lode Runner is unaffected by the setting, as predicted for the ROM driver.
+  Its 16 MHz corruption is also unchanged, as expected: that is the CPU
+  filling at double rate against a fixed-rate drain, a different mechanism.
+* Lemmings is clean at 0, 20 and 28 and **distorted at 36**. So Lemmings also
+  carries a buffer-filling driver with a start word of about 37 to 39, which
+  36 + 2-3 words of latency overtakes. On real hardware it was never in
+  danger; a setting of 36 would have broken it.
+
+## Release form
+
+A constant 28, no OSD option, for the upstream re-cut: it is a hardware
+constant, 28 is the length of vertical blanking in lines, and every driver
+measured or documented sits inside its window there. This branch keeps the
+selector for future measurement, but its index 0 is now 28, so a fresh config
+gets the fix and only a deliberate change reaches the old behaviour.
