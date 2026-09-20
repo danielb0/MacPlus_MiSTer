@@ -152,3 +152,79 @@ constant, 28 is the length of vertical blanking in lines, and every driver
 measured or documented sits inside its window there. This branch keeps the
 selector for future measurement, but its index 0 is now 28, so a fresh config
 gets the fix and only a deliberate change reaches the old behaviour.
+
+## OPEN: the mouse effect on Lemmings (dug 2026-09-20, no build, no hardware)
+
+Daniel: Lemmings is clean at 0, the mouse distorts it at the higher settings,
+and at 16 MHz phase 20 is mouse-proof. Suspect was the core's USB-to-quadrature
+converter. Everything below was read from code; the one inference is marked.
+
+**Lemmings' driver, decoded.** Its `MDRV` 11 is the same Presage packer as
+PoP's and unpacks with `scripts/mdrv_unpack.py` (cipher over bytes [7:], LZSS
+input from byte 4). Data area `a4 = driver+$3700`. A VBL task (`_VInstall` at
+`$1cbe`, `vblCount = 1`, re-armed each run at `$236c`) runs at IPL 0. Two
+paths, chosen by `$76(a4)`:
+
+| path | start word S | first part | wrap part | window for V+lat |
+|---|---|---|---|---|
+| 11k (`$23cc`) | **32** (`adda.w #$40,a3`) | 32..369, 2 words per sample, ~30 cycles/word = ~28 reader words | 0..31 | **0.7 .. 32** |
+| 22k (`$30f2`) | 40 | 66 x 5 words | 8 x 5 words | ~10 .. 40 |
+
+The 22k path would buzz at phase 0 (lower bound) and 0 is clean, so the Plus
+runs the 11k path. Lower bounds here include the wrap-part write time (~2.6
+words), which the PoP-era formula omitted. Lemmings shows the system cursor
+(`SetCursor` x3, no `HideCursor`).
+
+**The margins at each setting (11k path):** phase 0 -> V+lat 2-3: 29 words
+above, ~2 below, and a delayed writer only helps the lower bound, so 0 is
+mouse-immune. Phase 20 -> 22-23: 9-10 words. **Phase 28 -> 30-31: 1-2 words
+(45-90 us).** Phase 36 -> 38-39: late. That reproduces every report, including
+16 MHz + 20 (fill and redraw both halve).
+
+**Plus ROM, VBL handler `$1B12` (v3; same offsets v1/v2):** `addq.l #1,Ticks`,
+clear VIA IFR, `move #$2000,sr` (IPL to 0), stack check, **`jsr jCrsrTask` at
+`$1B46`, THEN the VBL queue walk at `$1BC6`**. A moving mouse therefore costs a
+cursor redraw ahead of every VInstall'd filler, with mouse interrupts nesting
+inside. Real hardware does exactly this; the redraw's cost was not measured.
+
+**Plus ROM, one mouse interrupt:** level-2 entry `$1A84` -> ext/status
+`$1AB6`/`$1AC2` -> `ExtStsDT` ($2BE) -> mouse Y `$1C00` / X `$1BD8` (read VIA B,
+eor with the RR0 DCD bit, `addq/subq #1,MTemp`, `move.b CrsrCouple,CrsrNew`,
+rts). ~580 cycles with entry/`movem`/`rte` (standard 68000 timings, approximate)
+= ~73 us = **~1.6 sound words per interrupt**. One per DCD edge, no IUS reset;
+`rtl/scc.v` matches.
+
+**The core's mouse path** (`rtl/ps2_mouse.v`, `ce = clk8_en_p`): one quadrature
+edge per 4096 clk8 = 504 us, i.e. a **fixed 1984 edges/s per axis whenever the
+accumulator is non-zero**; the accumulator holds ~+-510, so a flick of a modern
+mouse drains at max rate for up to ~257 ms after the hand stops (also the
+"laggy cursor" complaint). Main sends one report per >= 16 ms, dx/dy clipped
+to +-255, unscaled (`input.cpp` mouse_req block, `user_io.cpp:4210`). Both axes
+saturated = ~4000 int/s x 73 us = ~29% of the CPU. A real Plus mouse is "90
+pulses per inch" (Guide ch.7), ~900/s/axis at a fast 10 in/s, never sustained.
+
+**So the converter IS unlike a real mouse (bursty, ~2x rate, sustained), but
+it is not what makes Lemmings fragile: at 28 a single interrupt in the
+VBL-to-first-write gap, or the cursor redraw, is enough.**
+
+**Inference, flagged:** if a real Plus had V+lat = 30-31, Lemmings (a
+mouse-driven game) would crackle on every mouse move on real hardware. That
+argues the true value is a few words lower. The driver windows (PoP 9..37, ROM
+-1..50, SM 6.0.4 ~20..90, Lemmings 0.7..32) intersect at about (23, 32); the
+centre is V+lat ~27, i.e. **phase ~24-25, which was never on the menu**.
+
+**Next steps, in order:**
+
+1. Zero-compile discriminator on `MacPlus_6aba5a1e_sndphase.rbf`, phase 28,
+   Lemmings playing: `quartus_stp -t scripts/read_probes.tcl 30 0.3` with the
+   mouse still, moving slowly (<= 1 count per frame: sets `CrsrNew` every frame
+   with ~1 interrupt), and flicked. PSND's first-write scan word shift in the
+   slow case is the cursor redraw (authentic); the extra shift when flicked is
+   the core's burst (ours). PSND is per-frame, not sticky. Also confirm whether
+   phase 20 at 8 MHz is mouse-clean (predicted: 9-10 words of margin).
+2. If the slow case alone reaches 32: put 24 (or 25) on the selector in place
+   of 36 and repeat the four-game set (PoP, Lemmings, Lode Runner, chime) with
+   the mouse moving. This is a compile: ask first.
+3. Separate, not this branch: a rate-proportional mouse drain (spread each
+   report's counts over its 16 ms) would make interrupt density track hand
+   speed like a real mouse and remove the cursor lag.
