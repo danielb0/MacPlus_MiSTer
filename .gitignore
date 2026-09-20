@@ -38,3 +38,4 @@ c5_pin_model_dump.txt
 *_netlist
 *.cdf
 /compile_log.txt
+/elab_log.txt
