@@ -367,3 +367,99 @@ works if the redraw roughly halved. So it is CPU-bound, and a real Plus at
    speed like a real mouse and remove the cursor lag. Confirmed defect
    independent of the phase question - but note it would NOT rescue phase 28,
    because the authentic 17-line redraw blows that margin on its own.
+
+## RESULTS: the 8-value build, and the mouse is the thing setting the ceiling
+
+Hardware 2026-09-21, build `MacPlus_a231e806_sndphase8.rbf` (menu
+`0,6,8,10,12,20,28,36`, default 0; cold compile 0 errors, 120 warnings, setup
+slack +0.590). System 7.1, Lemmings in-game with music.
+
+### By ear, first (Daniel)
+
+- **PoP is CLEAN at phase 6.** Predicted to BUZZ: 6 puts the reader 8 words in
+  and the recorded floor was 9. **The prediction FAILED.** PoP's floor is
+  between 2 (buzzes) and 8 (clean), not 9 -- the 28-word estimate for its
+  first part is too short, and a longer first part drags the floor down.
+- **Lemmings buzzes at 6 with the mouse moving; clean at 0.**
+
+### Run E -- phase 6, slow mouse, 45 samples
+
+The capture caught the setting being changed mid-run, which is a free control:
+
+| samples | `first_idx` | span | regime |
+|---|---|---|---|
+| 1-8 | 2 | 32 | phase 0, mouse still |
+| 9-13 | **8** (one 9) | 31-32 | phase 6, mouse still = 6+2 exactly |
+| rest | 16-35, median **25** | mostly 31-32 | phase 6, mouse moving |
+
+Median 25 = 6 + 2 + 17: **the 17-line cursor redraw reconfirmed at a different
+phase**, an independent check of the figure measured at phase 0.
+
+Splitting the 31 moving frames by fill span:
+
+| | n | max `first_idx` | LATE |
+|---|---|---|---|
+| normal span (31-32) | 26 | **30** | **0** |
+| elevated span (35-38) | 5 | 35 | 2 |
+
+### Run F -- phase 6, fast mouse, 50 samples
+
+**32 of 50 frames LATE (64%).** Every frame elevated-span (36-54, median 45);
+`first_idx` median 33, i.e. the MEDIAN is above the cliff. ~38 glitches a
+second, which is what a buzz is.
+
+### The conclusion, on solid numbers
+
+| condition | n | span | max `first_idx` | LATE |
+|---|---|---|---|---|
+| slow, normal-span frames | 26 | 31-32 | **30** | **0** |
+| slow, burst frames | 5 | 35-38 | 35 | 2 |
+| fast, all frames | 50 | 36-54 | 37 | **32 (64%)** |
+
+Monotonic. Frames whose fill ran its natural length never clipped; frames with
+extra interrupts clipped in proportion. Extra interrupts show up in both
+places at once -- they delay the first write AND lengthen the fill -- so high
+`first_idx` and high span co-occur, and they do.
+
+**Lemmings buzzing at phase 6 is entirely the core's mouse converter.** The
+authentic component never clips there. This upgrades the n=5 hint in run E to
+a result.
+
+**Do NOT use "the mouse moved slowly" as a proxy for an authentic interrupt
+rate.** "Cursor stops dead" only proves the accumulator is not backing up,
+i.e. rate <= 1984/s; a real 90-cpi mouse at the same hand speed is a few
+hundred. The only clean separation is the FILL SPAN: a frame at the natural
+31-32 had no extra interrupts in it, whatever the mouse was doing.
+
+### Revised band -- and 8, 10 and 12 are all too high
+
+Use the authentic WORST case, not the median. `first_idx` 30 at phase 6 on a
+normal-span frame means `lat + redraw` reaches **24** (median 19). For
+Lemmings never to clip:
+
+    phase + 24 < 32  =>  phase < 8
+
+PoP buzzes at 0 and is clean at 6, so its floor is in 1..6.
+
+**Band = phase 3..7, and 6 is inside it.** Phase 6 is already confirmed clean
+for PoP and is predicted clean for Lemmings once the mouse is faithful.
+
+The earlier estimate of 10 used the MEDIAN redraw of 17; the worst case of 24
+is the number that matters, because one clipped frame per second is audible.
+**The three values added to this build -- 8, 10, 12 -- are all at or above the
+ceiling even with a perfect mouse.** The one that mattered was 6.
+
+### Next step: the converter is now the BLOCKING item
+
+The phase cannot be settled while a defect sets its ceiling -- choosing a
+value now would mean accommodating a bug we intend to remove.
+
+`rtl/ps2_mouse.v` drains its accumulator at a fixed 1984 edges/s per axis
+whenever it is non-zero (12-bit divider on `clk8_en_p` = 8.125 MHz), and the
+accumulator holds ~+-510, so a flick sustains max rate for ~257 ms after the
+hand stops. Fix: spread each host report's counts across its ~16 ms so
+interrupt density tracks hand speed and the tail disappears. Bench, compile,
+then re-run PoP and Lemmings across 0/6/8 with the mouse moving.
+
+Prediction to test after the fix: **phase 6 clean in Lemmings with the mouse
+moving**, and 8/10/12 still clipping.

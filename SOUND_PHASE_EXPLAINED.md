@@ -147,12 +147,19 @@ And a real Mac Plus had no setting. It had one fixed value, permanently. So
 whatever that value was, every program that shipped and sounded fine had to
 work at it. Working backwards from what each program needs:
 
-- Prince of Persia needs the runner **at least 9 segments** in, or it laps
-  itself and buzzes.
-- Lemmings, with the mouse moving, needs the runner **under 15 segments** in,
-  or the cursor redraw pushes it past its deadline.
+- Prince of Persia needs the runner some distance in, or it laps itself and
+  buzzes. We know it buzzes at zero and is fine at six, so its limit is
+  somewhere in between.
+- Lemmings, with the mouse moving, needs the runner **under about 8 segments**
+  in, or the cursor redraw pushes it past its deadline.
 
-That leaves a narrow band, somewhere around **10**. Not 28.
+That leaves a narrow band, somewhere around **6**. Not 28.
+
+A later round of testing moved this number. An earlier draft said about 10,
+using the *typical* cost of a cursor redraw. But a glitch you can hear only
+needs the *worst* frame to fail, not the typical one, and the worst redraw we
+measured is noticeably more expensive than the typical one. Designing to the
+worst case pulls the answer down to around 6.
 
 The band being narrow is actually reassuring rather than worrying. Two
 different companies wrote those two programs, independently, tuning them
@@ -172,18 +179,39 @@ Measured and settled:
 - Prince of Persia's buzz is a timing race, and the core had the timing wrong.
 - The cursor redraw cost is real, is about 17 segments, and is authentic Mac
   behaviour that we should not try to "fix".
-- Our mouse handling floods the machine and needs fixing, separately.
 - A setting of 28 cannot be right, because it can't survive the authentic
   cursor redraw.
+- Our mouse handling floods the machine. This is no longer a side issue: it
+  is now the thing deciding how high the setting can go, which means it has
+  to be fixed before the setting can be chosen at all. Otherwise we'd be
+  picking a value to accommodate a fault we intend to remove.
+
+The evidence for that last point is the cleanest result of the whole exercise.
+We can tell, frame by frame, whether the Mac was interrupted more than it
+should have been - an over-interrupted frame takes visibly longer to do its
+work. Sorting the frames that way:
+
+| frames | how many | how many glitched |
+|---|---|---|
+| normal, not over-interrupted | 26 | **none** |
+| a few extra interrupts | 5 | 2 |
+| mouse moved fast, all flooded | 50 | **32** |
+
+No frame running at its natural speed ever glitched. Every glitch was in a
+frame our mouse handling had interfered with.
 
 Still open:
 
-- The exact right value. Around 10 on the evidence, but that needs a rebuild
-  and another round of listening tests before anyone should believe it.
-- One piece of evidence pointing the other way came from another emulator's
-  author and has never been independently checked. It's the only thing arguing
-  for a higher value, and our own measurements of a modern Mac system don't
-  match it.
+- The exact right value. Around 6 on the evidence, but that needs the mouse
+  fixed first, then a rebuild and another round of listening tests.
+- One piece of evidence pointing at a much higher value came from another
+  emulator's author and has never been independently checked. Our own
+  measurements don't match it.
+- Two predictions have already failed and been corrected along the way: that
+  Prince of Persia would glitch at a setting of 6 (it doesn't), and that a
+  setting of zero was safely clear of trouble (it is clear by a single
+  segment). Both are in the technical record. This is what the process is
+  supposed to look like - the value of a prediction is that it can be wrong.
 
 Nothing has been merged, and nothing has been released. It is worth being
 precise about what does and doesn't exist, because it's easy to get wrong:
