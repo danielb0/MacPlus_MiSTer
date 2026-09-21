@@ -17,7 +17,7 @@ module tb_snd_phase;
    reg clk = 0;
    always #5 clk = ~clk;
 
-   reg  [1:0]  phase = 2'd0;
+   reg  [2:0]  phase = 3'd0;
    reg  [1:0]  ramsize = 2'b11;
    reg  [23:0] cpuAddr = 24'd0;
    reg         _cpuAS = 1, _cpuRW = 1;
@@ -81,10 +81,11 @@ module tb_snd_phase;
    // ---- one frame of the scan, checked advance by advance ---------------
    integer n, p, expect_w, bad_seq, bad_addr;
    reg [21:0] base;
-   task scan_frame(input [1:0] ph);
+   task scan_frame(input [2:0] ph);
       begin
          phase = ph;
-         p = (ph == 1) ? 0 : (ph == 2) ? 20 : (ph == 3) ? 36 : 28;
+         p = (ph == 1) ? 6 : (ph == 2) ? 8 : (ph == 3) ? 10 :
+             (ph == 4) ? 12 : (ph == 5) ? 20 : (ph == 6) ? 28 : (ph == 7) ? 36 : 0;
          base = 22'h3FFD00;
          wait_frame_edge;          // the frame that first sees this phase
          wait_frame_edge;          // ... and the next, which starts from it
@@ -160,13 +161,17 @@ module tb_snd_phase;
       repeat (600000) @(posedge clk);
 
       $display("scan sequence per phase");
-      scan_frame(2'd0);
-      scan_frame(2'd1);
-      scan_frame(2'd2);
-      scan_frame(2'd3);
+      scan_frame(3'd0);
+      scan_frame(3'd1);
+      scan_frame(3'd2);
+      scan_frame(3'd3);
+      scan_frame(3'd4);
+      scan_frame(3'd5);
+      scan_frame(3'd6);
+      scan_frame(3'd7);
 
-      $display("probe: PoP's shape at 4MB, scan start word 0 (phase index 1)");
-      phase = 2'd1; ramsize = 2'b11; sb = 24'h3FFD00;
+      $display("probe: PoP's shape at 4MB, scan start word 0 (phase index 0)");
+      phase = 3'd0; ramsize = 2'b11; sb = 24'h3FFD00;
       wait_frame_edge; @(negedge clk);    // after the edge's commit has landed
       frames0 = dbg[31:27];
       wait_words(5);                      // ~the VBL task latency (counts the reload pulse)
@@ -209,8 +214,8 @@ module tb_snd_phase;
       wait_frame_edge; @(negedge clk);
       check(dbg[8:0] == 9'h1FF, "PSND 1MB: a 4MB-buffer address is ignored");
 
-      $display("scan start word 28 (the default, phase index 0): a write at word 37 lands behind the scan");
-      ramsize = 2'b11; sb = 24'h3FFD00; phase = 2'd0;
+      $display("scan start word 28 (phase index 6): a write at word 37 lands behind the scan");
+      ramsize = 2'b11; sb = 24'h3FFD00; phase = 3'd6;
       wait_frame_edge; wait_frame_edge;
       wait_words(5);
       @(negedge clk); idx_first = snd_index;

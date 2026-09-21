@@ -54,7 +54,7 @@ module addrController_top(
 	input  snd_alt,
 	output loadSound,
 	output snd_advance,
-	input [1:0] snd_phase,     // scan start word at vblank: 28 / 0 / 20 / 36 (SOUND_PHASE_PLAN.md)
+	input [2:0] snd_phase,     // scan start word at vblank: 0/6/8/10/12/20/28/36 (SOUND_PHASE_PLAN.md)
 	output [8:0] snd_index,    // word the scan is on, 0..369, for the PSND probe
 		
 	// misc
@@ -145,11 +145,24 @@ module addrController_top(
 	// twice a frame. snd_phase picks the word the scan starts from at the
 	// vblank edge; the scan then wraps 369 -> 0 mid-frame, so the frame is
 	// still exactly 370 words. Hardware-confirmed 2026-09-20: 20 and 28 play
-	// PoP clean, 0 and 36 buzz, each as the probe predicted. 28 is the
-	// default (index 0) and the release constant; 0 is the old behaviour.
-	wire [8:0] phase_words = (snd_phase == 2'd1) ? 9'd0  :
-	                         (snd_phase == 2'd2) ? 9'd20 :
-	                         (snd_phase == 2'd3) ? 9'd36 : 9'd28;
+	// PoP clean, 0 and 36 buzz, each as the probe predicted.
+	//
+	// 28 was the default and the intended release constant until the
+	// 2026-09-21 mouse run measured the cursor redraw at ~17 words. That is
+	// the ROM's own jCrsrTask, which runs before the VBL queue walk, so a
+	// real Plus pays it too -- and it leaves 28 no margin at all against
+	// Lemmings, whose start word is 32 (confirmed, 135 samples). The band
+	// that satisfies every driver MEASURED here is 8..12: PoP needs the
+	// reader at least 9 words in, Lemmings under 32 with the redraw counted.
+	// 6 and 12 are on the list as the falsification points either side.
+	// Index 0 is 0, the old behaviour, until a value is settled.
+	wire [8:0] phase_words = (snd_phase == 3'd1) ? 9'd6  :
+	                         (snd_phase == 3'd2) ? 9'd8  :
+	                         (snd_phase == 3'd3) ? 9'd10 :
+	                         (snd_phase == 3'd4) ? 9'd12 :
+	                         (snd_phase == 3'd5) ? 9'd20 :
+	                         (snd_phase == 3'd6) ? 9'd28 :
+	                         (snd_phase == 3'd7) ? 9'd36 : 9'd0;
 	localparam [8:0] SND_LAST = 9'd369;
 	reg [21:0] sndBase;
 	reg  [8:0] sndWord;

@@ -127,10 +127,14 @@ localparam CONF_STR = {
 	"O5,Speed,8MHz,16MHz;",
 	"O6,Floppy Write,Off,On;",
 	// SOUND_PHASE_PLAN.md: the sound-buffer word the scan starts from on the
-	// vblank edge. Index 0 MUST be 28, the hardware-confirmed value, so a
-	// fresh config gets it; 0 is the old (buzzing) behaviour, kept for
-	// measurement. Bits 19-20 (J,K) were free.
-	"OJK,Sound Scan Phase,28,0,20,36;",
+	// vblank edge. Listed ascending; index 0 is 0, the old behaviour, because
+	// this is a measurement build and no value is settled yet -- 28 was the
+	// default here until the 2026-09-21 mouse run contradicted it.
+	// 6/8 bracket PoP's floor (needs the reader >= 9 words in) and 10/12 the
+	// ceiling Lemmings imposes once the cursor redraw is counted.
+	// Bits 19-21 (J..L) were free; the field grew upward into 21, so no
+	// existing bit moved and "v,1;" below did not need a bump.
+	"OJL,Sound Scan Phase,0,6,8,10,12,20,28,36;",
 	"ODE,CPU,68000,68010,68020;",
 	"D1O4,Memory,1MB,4MB;",
 	"-;",
@@ -772,7 +776,7 @@ addrController_top ac0
 	.snd_alt(snd_alt),
 	.loadSound(loadSound),
 	.snd_advance(snd_advance),
-	.snd_phase(status[20:19]),
+	.snd_phase(status[21:19]),
 	.snd_index(snd_index),
 
 	.dskReadAddrInt(dskReadAddrInt),
