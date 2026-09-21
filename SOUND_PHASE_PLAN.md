@@ -228,3 +228,142 @@ centre is V+lat ~27, i.e. **phase ~24-25, which was never on the menu**.
 3. Separate, not this branch: a rate-proportional mouse drain (spread each
    report's counts over its 16 ms) would make interrupt density track hand
    speed like a real mouse and remove the cursor lag.
+
+## RESULTS: the mouse discriminator, run 2026-09-21
+
+Hardware, build `MacPlus_6aba5a1e_sndphase.rbf`, **phase 0**, System 7.1,
+Lemmings in-game with music. `quartus_stp -t scripts/read_probes.tcl`. No
+compile: this is the zero-compile test proposed above.
+
+| run | mouse | n | `first_idx` median | fill span median | LATE | splice |
+|---|---|---|---|---|---|---|
+| A | still | 30 | **2** (max 3) | **32** (also 35, 39) | 0 | 0 |
+| B | slow, cursor stops dead | 40 | **19** (max 26) | **32** (max 39) | 0 | 0 |
+| C | fast circles, cursor glides on | 45 | **26** (max 31) | **45** (max 56) | 0 | 0 |
+
+`first_word` = **32 on all 135 samples**. The 11k-path decode above is
+confirmed on hardware; Lemmings' S is 32 and the 22k path never runs.
+
+**The 17-word cost is a one-off ahead of the filler, not interrupts inside
+it.** Run B moved `first_idx` by 17 words but left the fill span at 32,
+identical to run A including its outlier values (35, 39, which occur with the
+mouse untouched and are therefore not mouse-related). A delay that shifts the
+start and leaves the fill length alone is the `jCrsrTask` signature: the ROM
+runs it before the VBL queue walk, so it delays the filler and does not
+lengthen it. **Cursor redraw = ~17 scan lines = ~0.77 ms.**
+
+**The core's excess interrupts ARE reaching the sound path, and the rate
+matches the RTL.** Run C's span grew from 32 to 45 - 13 words landing inside
+the fill, which run B did not have. 13 words x 45 us = 585 us inside a 2.0 ms
+fill window; at ~73 us per interrupt that is 8 interrupts, i.e. ~3960/s
+against the 3968/s predicted from the 12-bit divider in `rtl/ps2_mouse.v`
+(1984 per axis, two axes). The 73 us is an estimate from the ROM
+disassembly, so that agreement is not fully independent - but the span
+growing at all does not depend on it. Spans are bimodal at ~37 and ~45,
+consistent with one axis saturated (+5-6) versus both (+13).
+
+**Internal control:** five frames in run C where the hand paused returned to
+exactly `first=2, wrap=33-34, span=31-32` - the resting state, to the word.
+The shifts are real and entirely mouse-caused.
+
+**Cost split per frame, at phase 0:**
+
+| component | scan lines | authentic? |
+|---|---|---|
+| interrupt-to-task latency | 2 | yes |
+| cursor redraw (`jCrsrTask`) | ~17 | **yes** - same ROM, same code |
+| our excess interrupts, before the first write | +7 | **no, ours** |
+| our excess interrupts, during the fill | +13 | **no, ours** |
+
+**By ear at phase 0, mouse flicked: no distortion** (Daniel). Predicted: worst
+`first_idx` 31 against the cliff at 32, zero LATE frames. The model made a
+falsifiable prediction under the worst condition and survived - by one scan
+line. "Phase 0 is mouse-immune", claimed above from static analysis, is
+WRONG: it is mouse-marginal, and the core's own mouse defect eats 29 of its
+30 lines of headroom.
+
+**Also observed (Daniel):** moving the mouse quickly slows the game but not
+the music. That is the signature of interrupt-level work crowding out the
+foreground: the VBL task always gets its slot, the game loop gets what is
+left. It also corroborates the size - VBL-side occupancy is ~71 of 370 lines
+plus interrupts across the rest, roughly a third of the machine.
+
+### The System 6.0.4 lower bound does not survive
+
+Run D, same build, Finder under System 7.1, sampled alert sound clicked
+repeatedly with the mouse held still, 60 samples:
+
+    S=0  first_idx=2   wrap=2   span=0   (x5)
+    S=0  first_idx=93  wrap=93  span=0   (x1)
+    54 of 60 frames had no write
+
+7.1's alert-sound path begins its buffer write at **word 0**, ~2 lines after
+the VBL interrupt. It looks nothing like the S=90 driver behind the "System
+6.0.4 Sound Manager, 23..90" row in the table above - which was Mini vMac's
+author's measurement, borrowed, never verified here, and **the only
+constraint pushing the phase upward**.
+
+Caveat, honestly: six samples of a half-second sound, and the probe sees the
+first write, not the write order. A driver filling from word 0 and a driver
+ZEROING the buffer both present as S=0, span=0. This weakens the 23..90 row;
+it does not by itself establish 7.1's window.
+
+### Revised band, from measured constraints only
+
+With lat = 2 and redraw = 17, both measured here:
+
+| constraint | source | requires |
+|---|---|---|
+| PoP lower bound (buzzes at phase 0) | measured here | phase > 7 |
+| Lemmings + moving mouse (S = 32) | measured here | phase < 13 |
+| ROM free-form driver | third party | -1 .. 50 |
+| 7.1 alert sounds | measured here, thin | no upper requirement |
+| System 6.0.4 SM | borrowed, **now doubtful** | (> 23) |
+
+Drop the doubtful row and the band is **phase 8 to 12, centre 10**: PoP gets
+3 lines of margin at the bottom, Lemmings 3 at the top. The band being narrow
+is a point in its favour - two independently written commercial drivers tuned
+against the same hardware should bracket the true value tightly.
+
+**This contradicts the release constant of 28 recorded above.** The
+"28 = the 28 blanking lines" argument made 28 feel principled rather than
+fitted; on this reading it is a coincidence that happens to sit inside PoP's
+window, which is why everything keyboard-driven tested clean. Consistency
+check supporting the new reading: at phase 28 with a moving mouse PoP itself
+is at V+lat 47 against a ceiling of 37, so PoP should crackle too - it is not
+reported because it is keyboard-driven and the cursor sits still.
+
+Daniel's framing, which is the right one: a real Plus had ONE value, so the
+constraint set must intersect. It does, at 8..12. Neither "the phase was
+higher than 0" nor "some programs really did crackle" is forced.
+
+**The slow-mouse objection, and why it does not rescue 28:** the original
+mouse was far slower than a modern one, so our interrupt burst is definitely
+unfaithful (measured above). But `jCrsrTask` fires once per VBL whenever
+`CrsrNew` is set - one pixel of movement costs the same 16x16 erase-and-redraw
+as twenty. **It is a per-frame cost, not a per-distance cost.** A slow mouse
+pays 17 lines on more frames, not fewer lines per frame. The only relief is
+that a genuinely slow mouse may not move the cursor on every frame, which
+thins the crackle without removing it.
+
+Supporting the 17 lines being authentic rather than an artefact of our bus
+arbitration: phase 20 at 16 MHz is mouse-proof (Daniel, earlier), which only
+works if the redraw roughly halved. So it is CPU-bound, and a real Plus at
+7.8336 MHz pays about the same.
+
+### Next steps
+
+1. **One compile, then hardware:** extend the selector from `OJK` (bits 19-20,
+   4 options) to `OJL` (bits 19-21, 8 options) and ADD 8, 10 and 12 without
+   removing 0/20/28/36. Bit 21 is free and nothing uses 21 or above, so the
+   field grows upward, no existing bit moves, and `"v,1;"` does not need a
+   bump - an old config has bit 21 clear and indices 0-3 keep their meaning.
+   Then PoP and Lemmings, mouse still and mouse moving, by ear and on PSND.
+   If 10 is clean on all four, the release constant changes from 28 to 10.
+2. Sustained-sound measurement of 7.1's Sound Manager, to replace the thin
+   six-sample run D and settle whether it fills from 0 or was merely clearing.
+3. Separate, not this branch: a rate-proportional mouse drain (spread each
+   report's counts over its 16 ms) would make interrupt density track hand
+   speed like a real mouse and remove the cursor lag. Confirmed defect
+   independent of the phase question - but note it would NOT rescue phase 28,
+   because the authentic 17-line redraw blows that margin on its own.
