@@ -433,6 +433,11 @@ hundred. The only clean separation is the FILL SPAN: a frame at the natural
 
 ### Revised band -- and 8, 10 and 12 are all too high
 
+**WITHDRAWN in part by the review below (same day): the span discriminator
+cannot see interrupts that land BEFORE the first write, so the worst case of
+24 may include our own ticks. 8, 10 and 12 are NOT excluded. Kept as written
+for the record.**
+
 Use the authentic WORST case, not the median. `first_idx` 30 at phase 6 on a
 normal-span frame means `lat + redraw` reaches **24** (median 19). For
 Lemmings never to clip:
@@ -463,3 +468,148 @@ then re-run PoP and Lemmings across 0/6/8 with the mouse moving.
 
 Prediction to test after the fix: **phase 6 clean in Lemmings with the mouse
 moving**, and 8/10/12 still clipping.
+
+**Superseded by the review below: the fix as described here has no scale
+factor and would flood the Mac with interrupts, and the prediction needs a
+hand speed attached. The plan of record is the next section.**
+
+## REVIEW 2026-09-21: what the phase-6 runs do and do not establish
+
+A read of the three results sections above against `rtl/ps2_mouse.v`,
+`rtl/snd_phase_probe.sv`, `scripts/read_probes.tcl` and Main's `input.cpp`.
+What survives: the converter is unfaithful in exactly the way described (fixed
+drain of one edge per 4096 clk8 per axis, reports dropped while the backlog is
+256 or more, a tail of up to ~257 ms); Main sends the raw accumulated delta
+every 15 ms or more with `mouse_throttle` defaulting to 1; the measurements
+are sound; and the converter must be fixed before a phase is chosen. Three
+things do not survive.
+
+### 1. The span discriminator is one-sided
+
+`span = wrap_idx - first_idx` covers the FIRST PART of the fill only. An
+interrupt landing inside it lengthens the span, which is what runs E and F
+used. An interrupt landing in the PRE-WRITE window (latency + redraw, ~19
+words at phase 6) delays the first write and leaves the span untouched, so a
+"natural-span" frame can still carry our ticks in front of the fill. That is
+not a corner case: a frame whose accumulator ran dry just before the fill
+began has its last ticks exactly there.
+
+| quantity | value |
+|---|---|
+| tick spacing per axis (12-bit divider on clk8) | 504 us = ~11 scan words |
+| pre-write window at phase 6 (2 + 17) | ~19 words |
+| ticks a natural-span frame can hide there | 1..3 = 2..5 words |
+| worst natural-span `first_idx` minus the median (30 - 25) | 5 words |
+
+The excess of the worst case over the median is the size of the
+contamination, so the authentic worst `lat + redraw` is somewhere in
+**19..24**, and the Lemmings ceiling is somewhere in **phase < 8 .. phase <
+13**. The candidates 6, 8, 10 and 12 all remain. Nothing measured so far
+separates authentic redraw variance from converter contamination; only a
+faithful mouse or a two-sided instrument can.
+
+### 2. The prediction needs a hand speed
+
+A faithful mouse still interrupts. The Plus mouse is 90 pulses per inch per
+axis (Guide ch.7). Whether a "pulse" is one quadrature cycle (two X1 edges,
+two ROM interrupts) or one edge is not stated, so the count rate carries a
+factor-of-two ambiguity that the cursor-travel calibration in section 3
+settles. Using the doc's own ~1.6 words per interrupt:
+
+| hand | counts/s per axis (90 or 180 per inch) | interrupts in a 19-word window, two axes | cost |
+|---|---|---|---|
+| slow, 2 in/s | 180 / 360 | 0.3 / 0.6 | mostly none |
+| fast, 10 in/s diagonal | 900 / 1800 | 1.5 / 3 | 2.5 / 5 words |
+
+Against a worst authentic case of 24 that puts a fast hand at 26..29 words at
+phase 0, i.e. at or over the cliff at phase 6. So on a real Plus, Lemmings
+with a fast mouse may clip occasionally at the true phase; nobody knows, and
+the forum question (does a real Plus show the mouse effect?) is the one
+calibration point that would settle it.
+
+Predictions after the fix, each with its condition:
+
+- **Slow hand, any phase:** natural-span frames' `first_idx` should tighten.
+  If the max drops to about phase + 22, the 30 was contamination and the
+  ceiling moves up to phase < 10..11. If it stays at phase + 24, it was
+  authentic redraw variance and the ceiling stays at phase < 8.
+- **Phase 6, Lemmings, slow hand:** zero LATE frames.
+- **Phase 6, Lemmings, fast hand:** a residual LATE rate consistent with 2..5
+  words on top of the authentic worst case, not zero. A handful of late
+  frames here is Lemmings' own margin, not the fix failing.
+- **PoP:** unchanged at every phase (keyboard-driven, cursor still).
+- **Cursor:** the lag after a flick is gone, and 512 pixels of travel take
+  roughly the hand distance a real Plus mouse needed (5.7 in at 90 per inch,
+  2.8 in at 180).
+
+### 3. The fix is three parts, not one
+
+"Spread each report's counts over its 16 ms" has no scale factor. Main
+(`input.cpp`, `send_mouse_with_throttle`, `mouse_req` block) delivers the raw
+delta, up to +-255 per report, every 15 ms or more, and `mouse_throttle`
+defaults to 1. A modern mouse at 1000 counts per inch moving at 10 in/s
+delivers ~10,000 counts/s per axis; spread evenly at ~73 us per interrupt
+that is ~73% of the CPU on one axis. The current cap of 1984/s is the only
+thing keeping the machine alive today. The fix:
+
+1. **A divisor** from the host mouse's resolution to the Plus's 90 per inch.
+   Modern mice are 400..1600 per inch, so the divisor is somewhere in 4..18
+   and depends on the user's mouse. Recommendation: a fixed default chosen by
+   the travel calibration on the bench mouse, applied core-side so it does
+   not depend on `MiSTer.ini`. Whether to expose it in the OSD is Daniel's
+   call; a 2-bit selector would cost one config field.
+2. **A per-axis rate ceiling.** Keep the existing one edge per 4096 clk8
+   (1984/s): it is the right order of magnitude for the fastest physical flick
+   (20 in/s at 90..180 per inch = 1800..3600/s) and it is what the ROM has
+   already been shown to survive.
+3. **Even spreading** of the scaled residual across the report interval, so
+   interrupt density tracks hand speed. A per-axis DDA on clk8: add the
+   scaled count once per report, emit one edge each time the accumulator
+   crosses the interval quantum (~16 ms of clk8 per count), never faster than
+   the ceiling. Backlog bounded to about two reports' worth so the tail
+   cannot exceed ~30 ms, and counts beyond that are dropped, as now. The
+   interface (`x1 y1 x2 y2 button`) does not change, so `rtl/scc.v` and the
+   VIA port are untouched.
+
+Bench first, `sim/tb_ps2_mouse.v` (iverilog): stationary input emits no
+edges; a run of reports emits edges equal to the sum of the scaled deltas,
+rounding accounted for; no two edges on one axis closer than 4096 clk8; no
+edge later than ~two intervals after the last report; direction on `x2`/`y2`
+follows the sign. Then one compile, which is gated: ask first.
+
+### 4. Make the instrument two-sided in the same compile
+
+Count mouse interrupts per frame: `mouseX1`/`mouseY1` edges before the
+first write, and in the whole frame. That separates authentic redraw
+variance from converter ticks directly instead of inferring it from the span.
+The probe deck is at its hub-node ceiling (`rtl/dbg_probes.sv`), so the
+field has to come out of an existing word: PSND's 5-bit frame counter and
+`first_word` (always 32 for Lemmings, 37 for PoP, both known) are the
+candidates. Decide the packing before the compile and add the fields to
+`scripts/read_probes.tcl` and `sim/tb_snd_phase.v`.
+
+### 5. Read the hardware, not the drivers
+
+Everything above infers V from driver windows. On a real Plus the sound scan
+address and the VBL interrupt both come from the address-generation PALs
+(LAG, TSG and friends on the Apple schematic), and equations for the
+128K/512K family have, I believe, been reverse-engineered and published;
+the Plus reuses the family. If they can be found, they answer the one
+question this branch exists to answer directly: on which line the sound
+address counter wraps relative to the line on which VIA CA1 is asserted.
+Zero compiles. Do the search before the fix compile; 68kMLA needs the in-app
+browser (see memory), bitsavers via `bitsavers.trailing-edge.com`. Standing
+rule: read the documentation before forming the hypothesis.
+
+### Order of work
+
+1. PAL-equation search (no compile). If it lands, V is known and the rest
+   is confirmation.
+2. Converter fix in `rtl/ps2_mouse.v` with `sim/tb_ps2_mouse.v` green.
+3. Two-sided PSND repacking, bench updated.
+4. One compile carrying 2 and 3, selector unchanged (`0,6,8,10,12,20,28,36`).
+   Ask first.
+5. Hardware: cursor-travel calibration; Lemmings slow and fast at 6/8/10/12
+   with the new fields; PoP, Lode Runner and the chime as controls.
+6. Only then choose the phase and the release constant. Until then the
+   source at HEAD still builds a default of 0 and no value is settled.
