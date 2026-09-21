@@ -604,12 +604,118 @@ rule: read the documentation before forming the hypothesis.
 ### Order of work
 
 1. PAL-equation search (no compile). If it lands, V is known and the rest
-   is confirmation.
+   is confirmation. **DONE, next section: V = 0.**
 2. Converter fix in `rtl/ps2_mouse.v` with `sim/tb_ps2_mouse.v` green.
 3. Two-sided PSND repacking, bench updated.
 4. One compile carrying 2 and 3, selector unchanged (`0,6,8,10,12,20,28,36`).
    Ask first.
-5. Hardware: cursor-travel calibration; Lemmings slow and fast at 6/8/10/12
-   with the new fields; PoP, Lode Runner and the chime as controls.
-6. Only then choose the phase and the release constant. Until then the
-   source at HEAD still builds a default of 0 and no value is settled.
+5. Hardware: cursor-travel calibration; Lemmings slow and fast; PoP, Lode
+   Runner and the chime as controls.
+6. ~~Only then choose the phase and the release constant.~~ The phase is
+   settled at 0 by step 1; steps 2-5 are now planned in `MOUSE_PLAN.md`,
+   which also holds the shipping split between the two pieces of work.
+
+## RESULT 2026-09-21: the hardware fires the VBL at sound word 0. V = 0.
+
+Read from the machine, not inferred from drivers. Four links, each from a
+primary source; copies are in `C:/temp/Mac/PALs/`.
+
+**1. VIA CA1 is the LAG's VSYNC output, with nothing in between.** Bomarc's
+Mac Plus schematic (M0001A sheets 3 and 4, wiki.console5.com): VIA D11 pin 40
+(CA1) is the net VERT, and VERT is LAG E1 pin 13. Apple's own 050-0159-A
+shows the same net.
+
+**2. The ROM selects the negative edge.** Plus ROM v1/v2/v3 at offset $E2:
+`clr.b $1800(a5)` with a5 = $EFE1FE, i.e. PCR = 0, after `#$82 -> IER`.
+The 128K and 512K ROMs do the same at $9E. PCR bit 0 = 0 means CA1
+interrupts on the high-to-low transition, and `rtl/via6522.vhd:163` decodes
+it the same way (`ca1_event` on `ca1_d=1, ca1_c=0` when `pcr(0)=0`).
+
+**3. The LAG asserts VSYNC on the same term that resets the line counter.**
+Mac Plus LAG dump (16R8 342-0515, jed2eqn form, Wouter's page
+retro.co.za/ccc/mac/ReverseEngineering/PALs.html; pins per the same page:
+i2=VC0 i3=VC1 i4=VA3 i5=C1M i6=TC i7=VA2 i8=VA1 i9=VA0; rf13=/VSYNC
+rf14=/HSYNC rf18=RESLYN rf19=RESNYB):
+
+    /rf13 := /i6 * /rf13  +  i2 * /rf13  +  rf18        ; /VSYNC
+    /rf18 := i2 + i3 + /i5 + rf18                        ; RESLYN
+
+In this notation the pin goes LOW when the sum of products is true. So
+pin 13 (VSYNC, active low) is driven low the clock after pin 18 (RESLYN)
+goes high, and RESLYN goes high only when VC1:VC0 = 00 and C1M = 1: the
+frame reset. On the schematic pin 18 is the CLR of F1b, G1a and G1b, the
+upper twelve bits of the video counter (74LS393 CLR is active high), and
+pin 19 clears the low nibble. Polarity cross-check on the same dump: the
+same reading gives an HSYNC pulse of seven memory cycles per 44-cycle line
+and a RESNYB pulse at nibble 1111 or at the DMA cycle; the opposite reading
+gives a sync asserted for 37 of 44 cycles, which is absurd.
+
+The 128K reconstruction says the same in words. Jecel Assumpcao's Unitron
+notes (Kryten's page, `unitron1.png`): `/VSYNC := RESLIN + /VSYNC*/L28`,
+VSYNC set at the counter reset and held for the L28 window, with
+`/RESLIN := /L28*HSYNC ; tentamos gerar linha 370`.
+
+**4. The line counter IS the sound address, and it resets to word 0.**
+Jecel's row/column tables for the 128K: the sound row address is
+`PUP|3Q4|V12..V6`, the column mostly pull-ups plus the page bit, so
+A1..A9 of the sound fetch are the nine-bit line count `{3Q1,3Q4,V12..V6}`.
+His ranges: retrace lines `010000000..010011011` (128..155), active lines
+`010011100..111110001` (156..497). Checked against Apple's memory map
+rather than taken on trust: $1FFD00 (sound base) has A9..A1 = 128 and
+$1A700 (screen base) has A14..A6 = 156, in the same field the counter
+drives. 156 - 128 = 28 = the blanking lines. So the counter resets to the
+sound buffer's word 0, the 28 blanking lines come FIRST after the reset
+(words 0..27), and the 342 active lines follow (words 28..369).
+
+**Therefore:** the counter reset, the VSYNC assertion and the VBL interrupt
+are one event, and the sound scan is at word 0 when it happens. Real
+hardware is **phase 0**, the core's original behaviour. Interrupt-to-task
+latency puts the first driver write at word 2..3 on both.
+
+### What this overturns
+
+- **"28 = the 28 blanking lines" was the right number attached to the
+  wrong edge.** The VBL fires at the START of blanking and the scan wraps
+  there too; 28 is where the first VISIBLE line is fetched. The VBL is not
+  28 words after the wrap; it is at it.
+- **PoP's driver was never tuned to fit.** At V+lat = 2..3 its wrap
+  overtakes words ~31..36 on every frame. On a real Plus the loop runs at
+  7.8336 MHz against a 44.93 us line (352 cycles per word, vs 366 on this
+  core), so the first part ends about a word LATER relative to the scan:
+  real hardware is slightly worse, not better. **Prediction: PoP's music
+  buzzes on a real Macintosh Plus.** One report from a real-Plus owner
+  settles it, and that is the only open item on the sound side.
+- **The Mini vMac "23..90" Sound Manager window** cannot hold at V = 0
+  either, which the 7.1 alert-sound run already doubted. Mini vMac's
+  read-ahead fudges compensate for its own coarse per-SubTick execution,
+  not for a hardware phase.
+- **Phase 28 is an enhancement, not a restoration.** It makes PoP clean by
+  giving its filler headroom a real Plus never had. Whether to ship it is a
+  product decision under [[period-authenticity-matters]], not a bug fix.
+- **Lemmings at phase 0 is exactly what a real Plus does**, including the
+  17-line cursor redraw; the mouse-marginal result (worst 31 vs 32) came
+  from the core's bursty converter, which a real mouse does not have.
+
+### What stands
+
+- The PSND probe and every measurement in this document. They were right;
+  the premise that three drivers bracket the hardware was wrong, because
+  one of the three does not fit the hardware.
+- The mouse converter defect and its three-part fix (section 3 of the
+  review). It is a defect at any phase and it sets Lemmings' margin.
+- The release default must be **0**. The selector can stay on the dev
+  branch for measurement; whether an OSD option offering 20/28 as a
+  "PoP fix" ships upstream is Daniel's call.
+
+### Not settled, and not needed
+
+The LENGTH of the Plus's VSYNC pulse depends on BMU2 (20R4 342-0518),
+whose equations are only on wiki.pldarchive.co.uk behind a bot check
+(direct file links `.../pals/Macintosh_Plus_BMU2.zip` and `_LAG.zip`,
+plus untouched 128K/512K prototype dumps of LAG and BMU0; daanvdl's
+GitHub `mac128k-pal-replacements` has the 128K set as `Xgpro/Mac128K_PAL.zip`).
+Only the pulse's START matters for the interrupt, and that is settled by
+the LAG alone.
+
+The converter fix, the two-sided probe, the one compile and the hardware
+runs continue in `MOUSE_PLAN.md`, on this branch.
