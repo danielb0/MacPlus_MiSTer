@@ -788,3 +788,38 @@ evidently fine enough that the quantisation never surfaces.
 Not yet done, and minor: the cross-check that System's Mouse Tracking settings
 still shift the feel the way they do on a real Mac. The tracking curve is the
 ROM's, not ours, so this is a confirmation rather than a test of the fix.
+
+### Step 4, the control: PoP behaviour is UNCHANGED by the mouse fix
+
+Daniel, 2026-09-22 on `MacPlus_6e8d8dac_mousefix.rbf`: PoP behaves the same as
+before the converter fix.
+
+**This is the negative control and it had to pass.** The mouse fix touches no
+sound file; had PoP gone clean at phase 0, the converter change would have
+reached the sound path by a route not in the model, and the step 2 result
+would have been unsafe to trust.
+
+**It also closes the sound-phase chain, with the mouse defect removed as a
+confound** -- which is what the last two sessions existed to do:
+
+- the PAL/schematic/ROM read puts the VBL at sound word 0
+  (`SOUND_PHASE_PLAN.md`, "RESULT 2026-09-21"), so the authentic phase is 0;
+- our core at phase 0 buzzes on PoP;
+- the converter no longer contributes interrupts beyond what a faithful
+  180-per-inch mouse would (step 2: zero LATE in 80 frames, and matched-load
+  binning showing no residual burst);
+- therefore **a real Macintosh Plus buzzes playing Prince of Persia.**
+
+The remaining doubt is not about the mouse: it is whether our core at phase 0
+is unfaithful in some OTHER respect that matters to PoP. A first-hand listen
+from a real Plus owner is still the only thing that would close it
+independently.
+
+**Consequence for the release, per the shipping table:** the "buzzes
+(predicted)" row is the one we are in. Phase 28 is an ENHANCEMENT, not a
+restoration, so it ships only as a documented option defaulting to 0, or not
+at all. The mouse fix ships either way.
+
+Still outstanding in step 4: Bard's Tale (issue #23) at phase 0 with a moving
+mouse -- reported distorting at 20/28/36, same mechanism, predicted clean now
+-- plus Lode Runner and the boot chime as general sound regression.
