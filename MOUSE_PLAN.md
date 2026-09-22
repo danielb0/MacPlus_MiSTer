@@ -669,16 +669,35 @@ before the fix.** No frame came close to `first_idx` 32.
 #### The divisor is a GAIN control, not a load control
 
 The obvious check -- halve the rate at divisor 16, watch the span fall -- did
-not work, and the reason is the finding. **One interrupt is one pixel of
-cursor movement**, so
+not work, and the reason is the finding. The invariant is
 
-    interrupts per second = cursor pixels per second
+    interrupts per second = hand speed x counts per inch
 
-independently of the divisor. Daniel was circling the *cursor* at a similar
-on-screen speed in both runs, so the interrupt rate barely moved (median 27 ->
-23). The divisor changes how far the hand travels per pixel; it does not
-change what a given cursor movement costs. Crossing the screen costs 512
-interrupts at every setting, exactly as it did on real hardware.
+and `counts per inch = host cpi / divisor`. Daniel was circling the *cursor*
+at a similar on-screen speed in both runs, so he moved his hand proportionally
+further at the higher divisor and the interrupt rate barely moved (median 27
+-> 23). **The divisor changes how far the hand travels per screen pixel; it
+does not change what a given cursor movement costs.** At a fixed Mouse
+Tracking setting, crossing the screen costs the same number of interrupts at
+every divisor, exactly as on real hardware.
+
+**Correction, 2026-09-22.** This passage first read "one interrupt is one
+pixel of cursor movement, so interrupts per second = cursor pixels per
+second". **That holds only at 1:1.** The Mac's Mouse Tracking is mouse
+scaling -- "an operating-system option that increases the screen pointer
+movement as the mouse is moved faster" (Guide 2e glossary) -- so with scaling
+engaged one interrupt can move the pointer several pixels, and the
+interrupts-to-cursor-pixels ratio is a property of the OS setting, not a
+constant. The conclusion is unchanged, because at any FIXED tracking setting
+the ratio is fixed and cursor speed still determines the interrupt rate; only
+the phrasing was wrong, and wrong in a way someone could later reason from.
+
+**Consequence worth recording: the margins in this document are conservative.**
+Every capture was taken at Mouse Tracking "Very Slow", the least-scaled
+setting, so each pixel of cursor travel cost the most interrupts it could. A
+user on a faster tracking setting covers the same screen distance with less
+hand movement, hence fewer interrupts and MORE sound margin. Lemmings' 4 words
+at phase 0 is near a worst case, not a typical one.
 
 **Consequence: the pass criterion "fill span 31-32 on every frame regardless
 of hand" in "Hardware, in order" step 2 is unachievable by ANY converter,
