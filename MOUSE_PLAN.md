@@ -156,6 +156,52 @@ A mutation pass after green (per `macplus-core-conventions`): drop the
 ceiling, drop the remainder carry, double DIV, each must fail at least one
 row above.
 
+## RED RUN 2026-09-22: the bench fails on the module as it stands
+
+`sim/tb_ps2_mouse.v` written and run before any converter change. 12 of 49
+checks fail, and the three guard rows pass and must keep passing.
+
+    iverilog -g2012 -I rtl -y rtl -o sim/out/tb_ps2_mouse.vvp sim/tb_ps2_mouse.v
+    vvp sim/out/tb_ps2_mouse.vvp        # ~4.5 minutes, 3.09 s of simulated time
+
+| row | measured today | required |
+|---|---|---|
+| silence | 0 edges | 0 edges - PASSES |
+| burst | 200 edges, last 819136 ce (100.8 ms) after the report | 25 edges, last within 20 ms |
+| spreading | 714 edges, every gap exactly 4096 ce | 100 edges, gaps 13000..52000 ce |
+| remainder | 150 edges | 18 edges, none after the last report |
+| direction | 638 edges; signs already correct | 200 edges, signs unchanged |
+| ceiling and backlog | 515 edges, 119 still arriving past the 40 ms tail | tail ends within 40 ms |
+| backlog cap | 510 edges of the 765 sent, 425 past the tail | capped, tail within 40 ms |
+| both axes | 200 per axis, axes already independent | 25 per axis |
+| reset | lines clear, no edges after | unchanged - PASSES |
+| button | press/release track | unchanged - PASSES |
+
+The burst row reproduces the predicted figures exactly (200 edges at ~101 ms).
+The backlog-cap row needed three reports 1 ms apart, not the two in the table
+above: two reports do not drive `|acc|` past 255, so the drop never bites.
+510 = 2 x 255 is the drop, measured: one whole report discarded.
+
+Two things the bench settled that the plan had left loose:
+
+**`div` is a raw divisor port, not a selector index.** `rtl/ps2_mouse.v` takes
+`input [4:0] div` (host counts consumed per Plus count) and `MacPlus.sv` does
+the index-to-value mux. The module then does not depend on the still-open
+question of the value list or which value is index 0, and the bench asserts on
+divisors (8, 4, 1) rather than on OSD indices. Added unused in this commit so
+the bench elaborates against the unfixed module; `dataController_top.sv` ties
+it to `5'd8` until commit 3 routes the selector. Commit 2 must treat `div == 0`
+as 1.
+
+**The DDA as specified above has a hole.** "Emits when the phase reaches
+`1024*DIV`" and "a remainder smaller than DIV stays in the backlog" are not
+consistent: with the budget parked below `DIV` the phase keeps accruing and
+will eventually emit a count the backlog cannot pay for. The emit condition
+must be `phase >= 1024*DIV` **and** `|budget| >= DIV`, and the phase must be
+held (not accrued) whenever `|budget| < DIV`. The remainder row is what
+catches this - a naive implementation gives 19+ edges, or dribbles them out
+after the hand stops.
+
 ## The instrument: make PSND two-sided in the same compile
 
 The fill span in PSND sees only interrupts inside the driver's first part;

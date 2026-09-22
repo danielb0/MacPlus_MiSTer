@@ -605,6 +605,7 @@ module dataController_top(
 		.ce(clk8_en_p),
 		.reset(~_cpuReset),
 		.ps2_mouse(ps2_mouse),
+		.div(5'd8),				// MOUSE_PLAN.md: the OSD selector replaces this
 		.x1(mouseX1),
 		.y1(mouseY1),
 		.x2(mouseX2),

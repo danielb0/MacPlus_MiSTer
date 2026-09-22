@@ -20,6 +20,9 @@ module ps2_mouse
 
 	input [24:0] ps2_mouse,
 
+	/* MOUSE_PLAN.md: host counts consumed per Plus count. Unused until the fix. */
+	input  [4:0] div,
+
 	output reg x1,
 	output reg y1,
 	output reg x2,
