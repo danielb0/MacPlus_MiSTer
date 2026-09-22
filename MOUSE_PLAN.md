@@ -1056,3 +1056,45 @@ a familiar reference rather than a first listen.
 Step 4 status: PoP unchanged, Bard's Tale clean at 0 / distorted at 20 and 28
 (both confirmed on the probe), Lode Runner unchanged. **Outstanding: the boot
 chime.** Then step 5 -- 128K, 512K, 16 MHz turbo.
+
+### Step 4 COMPLETE, and step 5 begun
+
+Daniel, 2026-09-22: **boot chime is fine**, and **Lode Runner on the 512K
+sounds exactly the same**.
+
+Step 4 is therefore closed:
+
+| test | result |
+|---|---|
+| PoP | unchanged by the fix |
+| Bard's Tale, phase 0 | clean, 0 of 60 frames flagged |
+| Bard's Tale, phase 20 | **distorted**, 20 of 60, confirmed on the probe |
+| Bard's Tale, phase 28 | distorted |
+| Lode Runner | unchanged |
+| boot chime | fine |
+
+Step 5 has its first result: the 512K carries the same converter and the same
+sound path, and Lode Runner is unchanged there too.
+
+#### Turbo: settled statically, so the hardware step is a formality
+
+The plan's step 5 says "`clk8_en_p` is unchanged under turbo, so the rate is
+the same; confirm". Confirmed from the source rather than the bench:
+
+- `ps2_mouse` is clocked `clk32` with `ce = clk8_en_p`
+  (`rtl/dataController_top.sv:610`);
+- turbo reroutes only `cpu_en_p` -- `status_turbo ? clk16_en_p : clk8_en_p`
+  (`MacPlus.sv:661`). Nothing gates `clk8_en_p` itself;
+- `rtl/ps2_mouse.v` contains no reference to turbo or `clk16`.
+
+**So the mouse edge rate is identical in absolute time at 8 and 16 MHz.** The
+corollary is favourable: under turbo the ROM services each interrupt in about
+half the time, so the CPU load from the mouse HALVES. Turbo should be strictly
+better for sound, consistent with the existing observation that phase 20 at
+16 MHz is mouse-proof. A hardware pass is still worth having, but nothing is
+riding on it.
+
+**Outstanding in step 5: the 128K**, and a turbo listen for completeness. Worth
+checking the cursor itself moves correctly on 128K and 512K as well as the
+sound, since those models reach the VIA through the same path but were never
+the subject of a mouse test.
