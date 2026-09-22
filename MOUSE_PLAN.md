@@ -935,3 +935,47 @@ display-size model, withdrawn above): a tidy quantitative retrodiction built
 on a parameter I INFERRED rather than measured, presented as corroboration.
 Both times the arithmetic was right and the input was not. **Check what a
 derived parameter assumed before using it to explain a third party's report.**
+
+### RESOLVED: Bard's Tale DOES discriminate. Distorted at phase 28, clean at 0
+
+Daniel, 2026-09-22: **distorted sound at phase 28 on Bard's Tale with the
+mouse moving**, against clean at phase 0 with the mouse moving.
+
+**The correction above was right to make and the claim survives it.** The
+S ~= 41 figure was genuinely unsafe -- derived from a write rate calibrated on
+a heavier driver -- and the worry that a quiet program might discriminate
+badly was a legitimate one. It simply does not bite for this program, and we
+now know that by direct A/B rather than by inference. **Inference replaced by
+measurement is the outcome to want; the retraction cost nothing and bought
+certainty.**
+
+**S is now BRACKETED BY MEASUREMENT.** Worst `first_idx` was 29 at phase 0
+with a fast hand, and `first_idx` shifts one-for-one with the phase:
+
+| phase | worst `first_idx` | observed |
+|---|---|---|
+| 0 | 29 | clean |
+| 28 | 57 | **distorts** |
+
+**29 < S <= 57.** That is the `first_word` field dropped in the PSND repack,
+recovered by using the sound-phase selector itself as the instrument -- no
+compile, no probe change. **Worth remembering as a general technique: a
+menu-selectable offset on the axis a probe field used to report can substitute
+for the field.**
+
+**Pinning S makes Bard's Tale a real constraint on the phase.** It requires
+`phase + 29 < S`; an S of 41 would force phase < 12 independently of Lemmings.
+Three listens on the build already flashed would do it:
+
+| test | reads | clean means | distorted means |
+|---|---|---|---|
+| phase 28, mouse STILL | ~40 (still peak was 12) | S > 40 | S <= 40 |
+| phase 20, mouse moving | ~49 | S > 49 | S <= 49 |
+| phase 12, mouse moving | ~41 | S > 41 | S <= 41 |
+
+The first is the most informative single test.
+
+**Status of the phase evidence: the issue #23 report is corroborated at 28 on
+hardware.** Whether Bard's Tale counts as a fully independent third line
+depends on pinning S; until then it is a confirmed discriminator between 0 and
+28, which on its own already argues against 28 being a restoration.
