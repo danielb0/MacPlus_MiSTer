@@ -141,10 +141,8 @@ localparam CONF_STR = {
 	// Table 7-1) - so the pixel-exact divisor is the mouse's resolution
 	// over 180.
 	//
-	// It stays an option because no constant can be right: mice are
-	// 400..1600 cpi and up, and feel wants roughly double the pixel-exact
-	// value, because 512 pixels spanned 7.1 inches on a 9-inch CRT and
-	// span several times that on a modern display. It is the same
+	// It stays an option because no constant can be right: the user's mouse
+	// is 400..1600 cpi or more and only they know which. It is the same
 	// adjustment the hardware adapters that put a modern mouse on an old
 	// machine carry, not a debug knob.
 	//

@@ -547,6 +547,9 @@ the plan treated as the less likely one.
 
 ### Why Daniel's feel report says 14-16, and why it is not a contradiction
 
+**WITHDRAWN 2026-09-22 -- see "The feel report was
+an Atari ST" below. The discrepancy this section explains did not exist.**
+
 Daniel owned a Macintosh Plus until 2023 and reports that 14-16 "feels very
 much like a real Mac" -- that is 87-99 px/in, half the pixel-exact rate.
 
@@ -723,3 +726,40 @@ I predicted worst `first_idx` of 19..25 and ~13 words of headroom. It came in
 at **28 and 4 words** at divisor 8. Right direction, over-optimistic
 magnitude; the fix quadrupled the margin rather than restoring it fully, and
 what remains is authentic load rather than converter defect.
+
+### The feel report was an Atari ST: divisor 8 is authentic after all
+
+Daniel, on reflection: **setting 8 does feel authentic**, and the earlier
+"14-16 feels very much like a real Mac" was the **Atari ST** mouse, which was
+genuinely slow and does feel like our 16.
+
+**This removes the discrepancy rather than explaining it, so the display-size
+section above is withdrawn.** It was built to reconcile chapter 7 (180 per
+inch, divisor ~= cpi/180, so 8 for this mouse) with a feel report of 14-16.
+With the feel report corrected, both lines land on 8 and there is nothing left
+to reconcile.
+
+**The model was wrong in a way worth remembering, because it was convincing.**
+It predicted a specific number -- linear magnification 20.5/7.1 = 2.9 divided
+by a viewing-distance ratio of ~1.4, giving ~2.1 -- against a measured
+preference ratio of 1.8..2.1. That agreement was cited as evidence the model
+was "right rather than a story fitted after the fact". It was a story fitted
+after the fact. **A two-term model with an unmeasured parameter (viewing
+distance, estimated by me) will hit a single data point; one data point cannot
+test it.** The geometry is real and the arithmetic is correct -- it simply was
+not explaining anything, because the thing it explained had not happened.
+
+**What actually stands, and it is stronger:** the Guide's 180 per inch and
+Daniel's hands independently agree on divisor 8 for a ~1390 cpi mouse. Two
+routes converging beats either alone.
+
+**The selector decision is UNAFFECTED.** It rested on mice differing in
+resolution -- 400..1600 cpi and up -- which is still true and is still
+unknowable to the core. Only the secondary display-size argument is withdrawn.
+
+**Consequence for the release default.** The anchor is now pixel-exact,
+`cpi/180`, not a display-compensated value: 800 cpi wants 4, 1000 wants 6,
+1440 wants 8, 1600 wants 9. **Index 0 is currently 8**, which suits ~1440 cpi
+and leaves a low-resolution mouse feeling slow. A default of 6 or 7 would sit
+nearer the middle of the common range. Left open for the release cut; it needs
+no compile to change and no hardware step depends on it.
