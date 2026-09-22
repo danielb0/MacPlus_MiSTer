@@ -763,3 +763,28 @@ unknowable to the core. Only the secondary display-size argument is withdrawn.
 and leaves a low-resolution mouse feeling slow. A default of 6 or 7 would sit
 nearer the middle of the common range. Left open for the release cut; it needs
 no compile to change and no hardware step depends on it.
+
+### Step 3 PASSED 2026-09-22: feel, all four tests, at divisor 8
+
+Daniel, testing at setting 8 (the pixel-exact value, and the higher interrupt
+rate of the two candidates):
+
+| test | the defect it probes | result |
+|---|---|---|
+| move fast, stop dead | the tail, up to 257 ms of continued edges | **stops dead** |
+| Finder drag | the burst, a train at the ceiling per report | fine |
+| MacPaint freehand | flat 4096-tick spacing under sustained motion | **extremely precise** |
+| slow one-pixel nudge | fine motion below one divisor per report | **extremely precise** |
+
+All three original defects are closed on hardware: the tail, the burst and the
+absence of scale.
+
+**The one-pixel result beats the prediction.** The review flagged a design
+cost -- linear spreading forbids an immediate first count, so a single-count
+report emits up to ~16 ms later -- as something that might be felt on the
+smallest movements. It was not. The remainder carried in the backlog is
+evidently fine enough that the quantisation never surfaces.
+
+Not yet done, and minor: the cross-check that System's Mouse Tracking settings
+still shift the feel the way they do on a real Mac. The tracking curve is the
+ROM's, not ours, so this is a confirmation rather than a test of the fix.
