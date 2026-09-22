@@ -641,3 +641,85 @@ in "Hardware, in order" step 2: fill span 31-32 on every frame regardless of
 hand, worst `first_idx` <= 25, mouse edges before the first write <= 5 with a
 fast hand. PSND is not sticky -- only PDCD is -- so it reads live during play
 with `quartus_stp -t scripts/read_probes.tcl 40 0.5` and needs no reset.
+
+### Step 2 on PSND: 80 frames, zero LATE, and the span criterion was wrong
+
+Two captures of 40 frames each, `scripts/read_probes.tcl 40 0.5`, Lemmings at
+sound phase 0, fast circles throughout. PSND is not sticky, so it reads live
+during play with no reset.
+
+| | divisor 8 | divisor 16 |
+|---|---|---|
+| still frames | `first_idx` 2-3, span 31-32 | `first_idx` 2, span 31-32 |
+| moving `first_idx` | median 22, **max 28** | median 21, **max 24** |
+| moving span | median 37, max 41 | median 35, max 40 |
+| edges before first write | median 2, max 3 | median 1, max 2 |
+| edges in frame | median 27, max 45 | median 23, max 31 |
+| **LATE frames** | **0 of 40** | **0 of 40** |
+
+The still baseline reproduces 2026-09-21 exactly (`first_idx` 2, span 31-32),
+so the instrument is reading true.
+
+**Margin to the cliff: 4 words at divisor 8, 8 at divisor 16, against 1 word
+before the fix.** No frame came close to `first_idx` 32.
+
+#### The divisor is a GAIN control, not a load control
+
+The obvious check -- halve the rate at divisor 16, watch the span fall -- did
+not work, and the reason is the finding. **One interrupt is one pixel of
+cursor movement**, so
+
+    interrupts per second = cursor pixels per second
+
+independently of the divisor. Daniel was circling the *cursor* at a similar
+on-screen speed in both runs, so the interrupt rate barely moved (median 27 ->
+23). The divisor changes how far the hand travels per pixel; it does not
+change what a given cursor movement costs. Crossing the screen costs 512
+interrupts at every setting, exactly as it did on real hardware.
+
+**Consequence: the pass criterion "fill span 31-32 on every frame regardless
+of hand" in "Hardware, in order" step 2 is unachievable by ANY converter,
+including a perfect one and including a real Macintosh Plus.** It was wrong in
+principle, not merely strict -- it was written when a faithful mouse was
+believed to be 90 counts per inch and gentle. **Restate it as: zero LATE
+frames, and worst `first_idx` at least several words clear of `S`.** By that
+criterion step 2 passes on 80 of 80 frames.
+
+#### The fix is confirmed by the matched-load comparison
+
+Binning both runs by edges-in-frame, the spans are indistinguishable between
+divisors at equal load:
+
+| edges/frame | span, divisor 8 | span, divisor 16 |
+|---|---|---|
+| 11-20 | median 33 | median 35 |
+| 21-30 | median 37 | median 35 |
+| 31-40 | median 37 | median 38 |
+
+**Span is a function of interrupt count alone, not of the divisor.** A
+residual burst would make divisor 8 worse at matched load, because it doubles
+the count available to cluster. It does not. Together with pre-write edges of
+2-3 (the 2..5 band predicted for a faithful 180-per-inch mouse) and a
+per-axis rate well under the 33-per-frame ceiling, the converter is behaving
+as designed.
+
+#### Unplanned: the 73 us per interrupt estimate is now corroborated
+
+Pooled over both runs, `span ~= 31.7 + 0.162 * edges_in_frame`. The fill spans
+32 of the 370 words in a frame, so only ~8.6% of a frame's interrupts land
+inside it, and a scan word is 44.9 us. That predicts a slope of
+`0.086 * 73/44.9 = 0.14` against **0.162 measured**, implying ~84 us per
+interrupt.
+
+This matters because the ~73 us figure was my own ROM estimate, and the
+2026-09-21 record explicitly flagged the agreement it produced as "not fully
+independent". A regression of span against a separately counted edge total
+shares none of that arithmetic, so the number is now corroborated to within
+15% by a second route.
+
+#### A prediction of mine that failed
+
+I predicted worst `first_idx` of 19..25 and ~13 words of headroom. It came in
+at **28 and 4 words** at divisor 8. Right direction, over-optimistic
+magnitude; the fix quadrupled the margin rather than restoring it fully, and
+what remains is authentic load rather than converter defect.
