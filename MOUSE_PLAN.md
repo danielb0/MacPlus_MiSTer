@@ -826,6 +826,10 @@ mouse -- reported distorting at 20/28/36, same mechanism, predicted clean now
 
 ### Step 4: Bard's Tale is clean at phase 0, and it argues AGAINST 28
 
+**PARTLY WITHDRAWN -- see the CORRECTION section below. The S~=41 figure
+and everything resting on it (the issue #23 table, the LATE count, the
+"third independent line") do not hold.**
+
 Daniel reported it quiet while moving the mouse and asked for a probe. 60
 PSND frames, sound playing throughout (no idle frames), mouse still for the
 first half and fast circles for the second.
@@ -881,3 +885,53 @@ authentic phase is low and that 28 is not a restoration.
   not the mouse's -- these are frames with zero mouse edges.
 - Peak 60 edges/frame is the fastest hand captured in this session (Lemmings
   peaked at 45) and still sits under the two-axis ceiling of 66.
+
+### CORRECTION: the Bard's Tale S inference is unsafe, and issue #23 is NOT explained
+
+Daniel, immediately after the capture above: **Bard's Tale has simple
+single-track music, much less sound than PoP and Lemmings.** That undercuts
+the inference the previous section rests on.
+
+**Why `S ~= 41` does not hold.** S was derived from the still-frame span using
+a write rate calibrated on Lemmings, whose 4-voice mixer writes at almost
+exactly one buffer word per scan word -- which is *why* Lemmings is the
+binding case. A single-track driver does much less work per word, so it writes
+FASTER than the scan and finishes early. For a light driver the span is a
+**lower bound on S, not an estimate of it**: S >= 41, possibly well above.
+
+**Consequences, all retractions:**
+
+- **The issue #23 retrodiction is withdrawn.** The table predicting LATE at
+  phases 20/28/36 assumed a cliff at exactly 41. If S is materially larger,
+  worst `first_idx` of ~57 at phase 28 may sit comfortably inside the buffer,
+  and the distortion reported in that issue needs another explanation.
+- **Bard's Tale is NOT a third independent line against 28.** Back to two: the
+  PAL read, and PoP buzzing at 0. The claim that three lines agreed was
+  overstated within an hour of making it.
+- **"Zero LATE frames" was computed against the same unsafe S** and inherits
+  its uncertainty. The robust version is weaker and sufficient: the driver's
+  first write lands by scan word 29 even with a fast hand, and it sounds
+  clean.
+
+**The methodological point is Daniel's and it is the valuable part: a program
+with simple music has a large margin, so it stays clean across a wide range of
+phases and discriminates badly. Its quietness is exactly what makes it
+uninformative.** A clean result from a light driver is weak evidence about the
+phase; only the heavy drivers -- Lemmings at S=32 and PoP -- bind. Choose test
+programs by how little headroom they have, not by whether a user reported them.
+
+**What survives:** Bard's Tale is a good regression test. It is clean, its
+first write lands by scan word 29 under a fast hand, and it carried mouse load
+comparable to Lemmings (peak 60 edges/frame against 45). It says the converter
+fix holds on a third program. It says nothing reliable about the phase.
+
+**The decisive test is cheap and needs no compile: select phase 28 in the OSD
+and listen to Bard's Tale.** If it distorts, issue #23 is confirmed, the cliff
+really is near 41 and the retrodiction is reinstated. If it stays clean at 28,
+the retrodiction is dead and issue #23 was reporting something else.
+
+**Pattern worth noting, second occurrence this session** (the first was the
+display-size model, withdrawn above): a tidy quantitative retrodiction built
+on a parameter I INFERRED rather than measured, presented as corroboration.
+Both times the arithmetic was right and the input was not. **Check what a
+derived parameter assumed before using it to explain a third party's report.**
