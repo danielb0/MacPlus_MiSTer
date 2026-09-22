@@ -135,20 +135,23 @@ localparam CONF_STR = {
 	// Bits 19-21 (J..L) were free; the field grew upward into 21, so no
 	// existing bit moved and "v,1;" below did not need a bump.
 	"OJL,Sound Scan Phase,0,6,8,10,12,20,28,36;",
-	// MOUSE_PLAN.md: host mouse counts consumed per Plus mouse count. A real
-	// Plus mouse is 90 counts per inch and a modern one is 400..1600, so the
-	// right divisor is a property of the user's mouse, not of the core - the
-	// same adjustment the hardware adapters that put a modern mouse on an old
-	// machine carry, which is why this is a real option and not a debug knob.
+	// MOUSE_PLAN.md: host mouse counts consumed per Plus mouse count. The
+	// Plus counts 180 per inch - 90 quadrature pulses, and the SCC
+	// interrupts on both edges (Guide to the Macintosh Family Hardware 2e,
+	// Table 7-1) - so the pixel-exact divisor is the mouse's resolution
+	// over 180.
 	//
-	// Sixteen values on bits 22-25 (M..P, all free) because this build is also
-	// how the value gets calibrated, and there are two unknowns to sweep: the
-	// 400..1600 cpi spread, and whether the ROM counts one interrupt per
-	// quadrature pulse or per edge, which is a factor of two on top of it.
-	// Index 0 is the default, as with CD Volume above, so 8 leads and the rest
-	// ascend. The labels are the raw divisors while this is a calibration
-	// build; they become user-facing before any release cut.
-	"OMP,Mouse Speed,8,1,2,3,4,5,6,7,9,10,11,12,13,14,16,18;",
+	// It stays an option because no constant can be right: mice are
+	// 400..1600 cpi and up, and feel wants roughly double the pixel-exact
+	// value, because 512 pixels spanned 7.1 inches on a 9-inch CRT and
+	// span several times that on a modern display. It is the same
+	// adjustment the hardware adapters that put a modern mouse on an old
+	// machine carry, not a debug knob.
+	//
+	// Sixteen consecutive divisors, 1..16, on bits 22-25 (M..P, all free).
+	// Index 0 is the default, as with CD Volume above, so 8 leads and the
+	// rest ascend.
+	"OMP,Mouse Speed,8,1,2,3,4,5,6,7,9,10,11,12,13,14,15,16;",
 	"ODE,CPU,68000,68010,68020;",
 	"D1O4,Memory,1MB,4MB;",
 	"-;",
@@ -169,7 +172,7 @@ wire status_turbo = status[5];
 reg [4:0] mouse_div;
 always @(*) begin
 	case (status[25:22])
-		4'd0:  mouse_div = 5'd8;   // default: an 800..1000 cpi mouse, pulse-per-count
+		4'd0:  mouse_div = 5'd8;   // default: pixel-exact for a ~1440 cpi mouse
 		4'd1:  mouse_div = 5'd1;
 		4'd2:  mouse_div = 5'd2;
 		4'd3:  mouse_div = 5'd3;
@@ -183,8 +186,8 @@ always @(*) begin
 		4'd11: mouse_div = 5'd12;
 		4'd12: mouse_div = 5'd13;
 		4'd13: mouse_div = 5'd14;
-		4'd14: mouse_div = 5'd16;
-		4'd15: mouse_div = 5'd18;
+		4'd14: mouse_div = 5'd15;
+		4'd15: mouse_div = 5'd16;
 	endcase
 end
 

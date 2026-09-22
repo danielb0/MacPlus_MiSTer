@@ -582,20 +582,28 @@ actually reports, AND in the display-size effect, which it cannot express at
 all. A bare number asserts only "bigger is slower", which the user resolves by
 turning it. The interface should not claim more than it can deliver.
 
-**Revised list** -- bare divisors, consecutive, no gaps (the old list omitted
-15 and 17 to reach 18 inside sixteen slots):
+**The list, Daniel's call: 1..16.** Bare divisors, consecutive, no gaps
+(the old list omitted 15 and 17 to reach 18 inside sixteen slots):
 
-    "OMP,Mouse Speed,8,2,3,4,5,6,7,9,10,11,12,13,14,15,16,17;",
+    "OMP,Mouse Speed,8,1,2,3,4,5,6,7,9,10,11,12,13,14,15,16;",
 
 Sixteen slots: default 8 at index 0 because `status` powers up at zero, then
-**2 through 17 with no gaps**. Index 0 is now the pixel-exact value for a
-~1440 cpi mouse rather than an arbitrary middle. The range covers pixel-exact
-for 360..3060 cpi and reaches roughly double that for display-size
-compensation.
+**1 through 16 with no gaps**. 1..16 fits four bits exactly and reads as a
+range rather than a list to be looked up. Index 0 is the pixel-exact value for
+a ~1440 cpi mouse.
 
-Still open for the release cut: whether `div`, currently `input [4:0]`
-(max 31), wants widening; a 3200 cpi mouse wanting display compensation would
-ask for 35.
+**The ceiling is worth knowing.** Pixel-exact is `cpi/180` and feel wants
+roughly double that, so 16 covers feel up to ~1440 cpi and pixel-exact up to
+2880. A 1600 cpi mouse wanting full display compensation would ask ~18 and
+gets 16 instead -- about 11% fast, well inside what the next value down
+would cost anyway. Above that a user lowers the mouse's own resolution.
+`div` is `input [4:0]` (max 31) and does not constrain this; the menu does.
+
+**Applied to `MacPlus.sv` now, not deferred**, so the config string, the
+index-to-divisor mux and this document agree. That means the source no longer
+matches `MacPlus_6e8d8dac_mousefix.rbf`: the flashed build still offers
+`...,14,16,18` and has no 15. Nothing in the hardware order needs 15, and 8,
+14 and 16 are all reachable in it, so the Lemmings run is unaffected.
 
 ### Corrections to earlier sections of this document
 
