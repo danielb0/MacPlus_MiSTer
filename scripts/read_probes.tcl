@@ -382,35 +382,54 @@ for {set n 0} {$n < $samples} {incr n} {
 	} else {
 		puts "  PFSW  ABSENT from this bitstream -- predates the Phase 8 SD writer."
 	}
-	# PSND: the sound-scan phase probe (SOUND_PHASE_PLAN.md). Packing is in
-	# rtl/snd_phase_probe.sv and proven by sim/tb_snd_phase.v: [8:0] scan
-	# word at the first CPU write into the main sound buffer this frame,
-	# [17:9] the buffer word that write hit (the driver's start word S),
-	# [26:18] scan word when word 0 was written (the wrap), [31:27] frame
-	# counter. 511 in a word field means "did not happen this frame".
+	# PSND: the sound-scan phase probe (SOUND_PHASE_PLAN.md, MOUSE_PLAN.md).
+	# Packing is in rtl/snd_phase_probe.sv and proven by sim/tb_snd_phase.v:
+	# [8:0] scan word at the first CPU write into the main sound buffer this
+	# frame, [17:9] scan word when word 0 was written (the wrap), [21:18]
+	# mouse quadrature edges before that first write (saturating at 15),
+	# [27:22] mouse edges in the whole frame (saturating at 63), [31:28]
+	# frame counter. 511 in a word field means "did not happen this frame".
+	#
+	# The driver's start word S used to be reported from [17:9]. The mouse
+	# fields took its space because S is a per-program constant already
+	# known before the capture, while the mouse load was not measurable any
+	# other way: the span this word yields (wrap minus first) is blind to
+	# interrupts landing before the first write. The LATE and splice
+	# verdicts still need S, so it is an ASSUMPTION here and every line
+	# resting on it says so. Set psnd_S for the program under test -- 32 for
+	# Lemmings, 37 for Prince of Persia, each confirmed on every sample.
+	set psnd_S 32
 	if {[have PSND]} {
 		set psnd    [b2i [rd PSND]]
 		set s_first [expr { $psnd        & 0x1ff}]
-		set s_word  [expr {($psnd >>  9) & 0x1ff}]
-		set s_wrap  [expr {($psnd >> 18) & 0x1ff}]
-		set s_frame [expr {($psnd >> 27) & 0x1f}]
+		set s_wrap  [expr {($psnd >>  9) & 0x1ff}]
+		set s_mpre  [expr {($psnd >> 18) & 0xf}]
+		set s_mfrm  [expr {($psnd >> 22) & 0x3f}]
+		set s_frame [expr {($psnd >> 28) & 0xf}]
+		set mpre_s $s_mpre
+		if {$s_mpre == 15} { set mpre_s "15+" }
+		set mfrm_s $s_mfrm
+		if {$s_mfrm == 63} { set mfrm_s "63+" }
 		if {$s_first == 511} {
-			puts [format "  PSND  frame %2d: no CPU write into the main sound buffer" $s_frame]
+			puts [format "  PSND  frame %2d: no CPU write into the main sound buffer  (mouse %s in frame)" \
+			             $s_frame $mfrm_s]
 		} else {
-			puts [format "  PSND  frame %2d: first write hit word %d while the scan was at word %d  (V+lat = %d words)" \
-			             $s_frame $s_word $s_first $s_first]
-			if {$s_first >= $s_word} {
-				puts "        LATE: the scan had already passed the start word -- the first part is stale for this frame."
+			puts [format "  PSND  frame %2d: first write while the scan was at word %d  (V+lat = %d words)" \
+			             $s_frame $s_first $s_first]
+			puts [format "        mouse edges: %s before the first write, %s in the frame" $mpre_s $mfrm_s]
+			if {$s_first >= $psnd_S} {
+				puts [format "        LATE: the scan had already passed word %d -- the first part is stale for this frame.  (S assumed %d)" \
+				             $psnd_S $psnd_S]
 			}
 			if {$s_wrap == 511} {
 				puts "        word 0 was not written this frame"
 			} else {
 				puts [format "        word 0 written while the scan was at word %d" $s_wrap]
-				if {$s_wrap + 1 < $s_word} {
-					puts [format "        WRAP OVERTOOK THE SCAN: words %d..%d are overwritten before they are read -- a splice this frame." \
-					             [expr {$s_wrap + 1}] [expr {$s_word - 1}]]
+				if {$s_wrap + 1 < $psnd_S} {
+					puts [format "        WRAP OVERTOOK THE SCAN: words %d..%d are overwritten before they are read -- a splice this frame.  (S assumed %d)" \
+					             [expr {$s_wrap + 1}] [expr {$psnd_S - 1}] $psnd_S]
 				} else {
-					puts "        wrap landed behind the scan: no splice this frame"
+					puts [format "        wrap landed behind the scan: no splice this frame  (S assumed %d)" $psnd_S]
 				}
 			}
 		}

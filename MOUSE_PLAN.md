@@ -345,6 +345,66 @@ Prediction to test against, at phase 0 after the fix: a still mouse reads
 right 2..5 edges in the pre-write window and 8..15 in the frame, which is
 what a real 90-per-inch mouse would also produce.
 
+## COMMIT 4 2026-09-22: PSND repacked, mouse load measured directly
+
+The plan's split above is superseded in one respect: the fields are sized to
+their predicted ranges rather than 6 and 6, which is what leaves the frame
+counter 4 bits instead of 2.
+
+| bits | field | was |
+|---|---|---|
+| [8:0] | `first_idx` | same |
+| [17:9] | `wrap_idx` | [26:18] |
+| [21:18] | mouse edges before the first write, saturating at 15 | new |
+| [27:22] | mouse edges in the whole frame, saturating at 63 | new |
+| [31:28] | frame counter | 5 bits at [31:27] |
+
+`first_word` is gone. It was the only field here already known before the
+capture - 32 on every Lemmings sample, 37 on every PoP sample - while the
+mouse load was not obtainable any other way, because the span this word
+yields is blind to interrupts before the first write. One edge on either
+axis is one DCD interrupt, so both axes count into the same totals and a
+diagonal step counts two.
+
+Width choices: the prediction for a fast hand is 2..5 pre-write and 8..15
+per frame, so 4 bits (saturate 15) and 6 bits (saturate 63) each carry
+several times the expected range. A saturated pre-write field still says
+">= 15", which is decisive on its own. Today's unfixed converter peaks near
+33 edges a frame, so 6 bits also captures the before picture.
+
+### What dropping `first_word` cost, and what was done about it
+
+Two things read it, and neither was free to lose:
+
+**`scripts/read_probes.tcl` derived the LATE and splice verdicts from it.**
+S is now an assumption in the script, `set psnd_S 32`, and every line
+resting on it prints "(S assumed 32)" so a capture of the wrong program
+cannot quietly produce a confident wrong verdict. 32 Lemmings, 37 PoP.
+
+**`sim/tb_snd_phase.v` used it to prove the buffer-word arithmetic**, in
+particular at 1MB where `top_bits` differs. Replaced with a write to word 0
+at 1MB, which exercises the same `buf_off` subtraction through the wrap
+detect. The phase-28 splice check now compares the wrap against the literal
+37 it wrote, rather than against a reported field.
+
+### Bench
+
+49/49. The PoP-shape frame now injects 3 edges before the driver runs and 4
+inside the fill and checks the probe reads 3 and 7; a diagonal test proves
+one count per axis per step; a saturation test drives 80 edges and checks
+15 and 63; and a following frame checks both counters clear on the frame
+edge. `mouseX1`/`mouseY1` come out of `dataController_top` as `dbg_mouseX1`
+and `dbg_mouseY1`, matching the `dbg_floppy`/`dbg_dcd` naming already there,
+and `MacPlus.sv` carries them to the probe.
+
+### Prediction for the hardware run
+
+At phase 0 after the converter fix: a still mouse reads 0/0; a slow hand a
+handful per frame; a fast diagonal hand with the divisor set right 2..5 in
+the pre-write window and 8..15 in the frame, which is what a real 90-per-inch
+mouse would also produce. A pre-write field reading 15+ with a fast hand
+would mean the divisor is still too small, not that the fix failed.
+
 ## One compile, gated
 
 One Quartus compile carrying: the converter fix, the mouse-speed selector,

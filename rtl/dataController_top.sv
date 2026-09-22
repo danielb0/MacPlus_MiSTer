@@ -61,6 +61,10 @@ module dataController_top(
 	// mouse:
 	input [24:0] ps2_mouse,
 	input [4:0] mouseDiv,   // host counts per Plus count, see rtl/ps2_mouse.v
+	// Quadrature out to the sound-phase probe, which counts one DCD
+	// interrupt per edge. JTAG telemetry only; pruned with the probe deck.
+	output dbg_mouseX1,
+	output dbg_mouseY1,
 	
 	// serial:
 	input serialIn, 
@@ -237,6 +241,8 @@ module dataController_top(
 	wire [7:0] sccDataOut;
 	wire [7:0] scsiDataOut;
 	wire mouseX1, mouseX2, mouseY1, mouseY2, mouseButton;
+	assign dbg_mouseX1 = mouseX1;
+	assign dbg_mouseY1 = mouseY1;
 	
 	// interrupt control
 	assign _cpuIPL = 

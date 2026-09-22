@@ -55,11 +55,30 @@ module tb_snd_phase;
    );
 
    wire [31:0] dbg;
+   reg  mX1 = 1'b0, mY1 = 1'b0;
    snd_phase_probe probe (
       .clk(clk), .clk8_en_p(clk8_en_p), ._vblank(_vblank), .snd_index(snd_index),
       .cpuAddr(cpuAddr), ._cpuAS(_cpuAS), ._cpuRW(_cpuRW),
-      .configRAMSize(ramsize), .dbg(dbg)
+      .configRAMSize(ramsize), .mouseX1(mX1), .mouseY1(mY1), .dbg(dbg)
    );
+
+   // One quadrature edge on either axis is one DCD interrupt. Toggling on the
+   // negedge leaves each change unambiguous at the probe's own posedge.
+   integer mk;
+   task mouse_edges(input integer nx, input integer ny);
+      begin
+         for (mk = 0; mk < nx; mk = mk + 1) begin @(negedge clk); mX1 = ~mX1; end
+         for (mk = 0; mk < ny; mk = mk + 1) begin @(negedge clk); mY1 = ~mY1; end
+      end
+   endtask
+
+   task mouse_diagonal(input integer steps);   // both axes at once: two per step
+      begin
+         for (mk = 0; mk < steps; mk = mk + 1) begin
+            @(negedge clk); mX1 = ~mX1; mY1 = ~mY1;
+         end
+      end
+   endtask
 
    integer fails = 0, tests = 0;
    task check(input cond, input [639:0] what);
@@ -173,29 +192,46 @@ module tb_snd_phase;
       $display("probe: PoP's shape at 4MB, scan start word 0 (phase index 0)");
       phase = 3'd0; ramsize = 2'b11; sb = 24'h3FFD00;
       wait_frame_edge; @(negedge clk);    // after the edge's commit has landed
-      frames0 = dbg[31:27];
+      frames0 = dbg[31:28];
+      mouse_edges(2, 1);                  // 3 DCD interrupts before the driver runs
       wait_words(5);                      // ~the VBL task latency (counts the reload pulse)
       @(negedge clk); idx_first = snd_index;
       cpu_write(sb + 24'd74);             // word 37, the driver's S
       cpu_write(sb + 24'd76);             // word 38: not "first" any more
+      mouse_edges(4, 0);                  // 4 more, now inside the fill
       wait_words(28);                     // the first part takes ~28 words
       @(negedge clk); idx_wrap = snd_index;
       cpu_write(sb);                      // word 0, the wrap
       cpu_write(sb + 24'd2);
       wait_frame_edge; @(negedge clk);
-      check(dbg[17:9]  == 9'd37, "PSND first word hit = 37");
       check(dbg[8:0] == idx_first || dbg[8:0] == idx_first + 1, "PSND scan word at first write");
-      check(dbg[26:18] == idx_wrap || dbg[26:18] == idx_wrap + 1, "PSND scan word at the wrap write");
-      check(dbg[31:27] == ((frames0 + 1) & 5'h1f), "PSND frame counter advanced by one");
-      $display("  first write: word %0d at scan %0d (expected ~%0d); wrap at scan %0d (expected ~%0d); frame %0d",
-               dbg[17:9], dbg[8:0], idx_first, dbg[26:18], idx_wrap, dbg[31:27]);
+      check(dbg[17:9] == idx_wrap || dbg[17:9] == idx_wrap + 1, "PSND scan word at the wrap write");
+      check(dbg[21:18] == 4'd3,  "PSND mouse edges before the first write");
+      check(dbg[27:22] == 6'd7,  "PSND mouse edges in the whole frame");
+      check(dbg[31:28] == ((frames0 + 1) & 4'hf), "PSND frame counter advanced by one");
+      $display("  first write at scan %0d (expected ~%0d); wrap at scan %0d (expected ~%0d); mouse %0d/%0d; frame %0d",
+               dbg[8:0], idx_first, dbg[17:9], idx_wrap, dbg[21:18], dbg[27:22], dbg[31:28]);
+
+      $display("probe: a diagonal step is two interrupts, and both counters saturate");
+      wait_frame_edge; @(negedge clk);
+      mouse_diagonal(5);                  // 10 edges, all before any write
+      wait_frame_edge; @(negedge clk);
+      check(dbg[27:22] == 6'd10, "PSND a diagonal step counts once per axis");
+      check(dbg[21:18] == 4'd10, "PSND pre-write count sees the same edges");
+      wait_frame_edge; @(negedge clk);
+      mouse_diagonal(40);                 // 80 edges, past both field widths
+      wait_frame_edge; @(negedge clk);
+      check(dbg[21:18] == 4'd15, "PSND pre-write mouse count saturates at 15");
+      check(dbg[27:22] == 6'd63, "PSND frame mouse count saturates at 63");
+      wait_frame_edge; @(negedge clk);
+      check(dbg[21:18] == 4'd0 && dbg[27:22] == 6'd0, "PSND mouse counters clear on the frame edge");
 
       $display("probe: a frame with no buffer write reads 511s; writes outside the buffer are ignored");
       cpu_write(24'h3FFCFE);              // one word below the buffer
       cpu_write(24'h3FFFE4);              // one word above it
       cpu_write(24'h2FFD00);              // right offset, wrong page
       wait_frame_edge; @(negedge clk);
-      check(dbg[8:0] == 9'h1FF && dbg[17:9] == 9'h1FF && dbg[26:18] == 9'h1FF, "PSND idle frame = 511/511/511");
+      check(dbg[8:0] == 9'h1FF && dbg[17:9] == 9'h1FF, "PSND idle frame = 511/511");
 
       $display("probe: 1MB decode, reads on the buffer are not writes");
       ramsize = 2'b10; sb = 24'h0FFD00;
@@ -205,9 +241,17 @@ module tb_snd_phase;
       @(negedge clk); idx_first = snd_index;
       cpu_write(sb + 24'd180);            // word 90
       wait_frame_edge; @(negedge clk);
-      check(dbg[17:9] == 9'd90, "PSND 1MB: first write word = 90");
       check(dbg[8:0] == idx_first || dbg[8:0] == idx_first + 1, "PSND 1MB: scan word at first write");
-      check(dbg[26:18] == 9'h1FF, "PSND 1MB: no wrap write");
+      check(dbg[17:9] == 9'h1FF, "PSND 1MB: no wrap write");
+      // The buffer-word arithmetic used to be checked through first_word, which
+      // the mouse fields replaced. Word 0 at this RAM size exercises the same
+      // buf_off subtraction, through the wrap detect.
+      wait_frame_edge;
+      wait_words(20);
+      @(negedge clk); idx_wrap = snd_index;
+      cpu_write(sb);                      // word 0 at 1MB
+      wait_frame_edge; @(negedge clk);
+      check(dbg[17:9] == idx_wrap || dbg[17:9] == idx_wrap + 1, "PSND 1MB: word 0 registers as the wrap");
       // at 1MB the 4MB address must NOT decode
       wait_frame_edge;
       cpu_write(24'h3FFD00);
@@ -226,8 +270,9 @@ module tb_snd_phase;
       @(negedge clk); idx_wrap = snd_index;
       cpu_write(sb);
       wait_frame_edge; @(negedge clk);
-      check(dbg[26:18] + 1 >= dbg[17:9], "phase 28: wrap write lands at or behind the start word (no splice)");
-      $display("  scan at first write %0d, at wrap %0d, start word %0d", dbg[8:0], dbg[26:18], dbg[17:9]);
+      // S is 37, the word written above; the probe no longer reports it.
+      check(dbg[17:9] + 1 >= 9'd37, "phase 28: wrap write lands at or behind the start word (no splice)");
+      $display("  scan at first write %0d, at wrap %0d, start word 37", dbg[8:0], dbg[17:9]);
 
       if (fails == 0) $display("PASS: %0d/%0d", tests, tests);
       else            $display("FAIL: %0d of %0d", fails, tests);

@@ -311,6 +311,8 @@ reg         ioctl_wait = 0;
 
 wire [10:0] ps2_key;
 wire [24:0] ps2_mouse;
+// Mouse quadrature into the sound-phase probe (MOUSE_PLAN.md); dev only.
+wire dbg_mouseX1, dbg_mouseY1;
 wire        capslock;
 
 wire [24:0] ioctl_addr;
@@ -885,6 +887,8 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.capslock(capslock),
 	.ps2_mouse(ps2_mouse),
 	.mouseDiv(mouse_div),
+	.dbg_mouseX1(dbg_mouseX1),
+	.dbg_mouseY1(dbg_mouseY1),
 	// serial uart
 	.serialIn(serialIn),
 	.serialOut(serialOut),
@@ -1339,6 +1343,8 @@ snd_phase_probe snd_phase_probe_inst
 	._cpuAS        ( _cpuAS        ),
 	._cpuRW        ( _cpuRW        ),
 	.configRAMSize ( configRAMSize ),
+	.mouseX1       ( dbg_mouseX1   ),
+	.mouseY1       ( dbg_mouseY1   ),
 	.dbg           ( dbg_snd       )
 );
 
