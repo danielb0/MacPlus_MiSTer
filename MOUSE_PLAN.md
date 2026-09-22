@@ -979,3 +979,66 @@ The first is the most informative single test.
 hardware.** Whether Bard's Tale counts as a fully independent third line
 depends on pinning S; until then it is a confirmed discriminator between 0 and
 28, which on its own already argues against 28 being a restoration.
+
+### Phase 20 CONFIRMED distorted on the probe -- and an analysis defect that nearly hid it
+
+Daniel heard some distortion at phase 20 on Bard's Tale with the mouse moving,
+and asked for a probe. The probe confirms it.
+
+| | phase 0 (clean by ear) | phase 20 (distorted by ear) |
+|---|---|---|
+| still `first_idx` min/med/max | 3/4/12 | 23/23/24 |
+| moving `first_idx` min/med/max | 11/23/**29** | 24/44/**88** |
+| frames with `first_idx` >= 32 | **0 of 60** | **20 of 60** |
+| edges/frame max | 60 | 60 |
+
+Mouse load is identical between the two captures, so the comparison is fair.
+
+#### The analysis defect, which would have produced the opposite conclusion
+
+The first parse of the phase-20 capture decoded only 40 of 60 frames. The
+regex required `mouse edges:` and `word 0 written` on adjacent lines, and
+`read_probes.tcl` prints its LATE warning BETWEEN them -- so **every LATE
+frame silently failed to match and vanished from the statistics.** What
+survived was 37 still frames and 3 moving ones with a worst `first_idx` of 30,
+from which the conclusion drawn was going to be "the mouse was barely moved
+and the probe cannot confirm anything". Both halves of that were artefacts of
+the parser.
+
+**It was caught only because 60 frames went in and 40 came out.** Record the
+habit, not just the bug: **make a parser account for every record it was given,
+and fail loudly when it cannot.** A filter that drops exactly the anomalous
+rows is the worst possible failure mode, because the remaining data looks
+clean and self-consistent.
+
+**Unaffected by the defect** -- both verified by re-parsing with the fixed
+reader: the Lemmings step-2 captures decoded 40 of 40 with zero flagged
+frames, and Bard's Tale at phase 0 decoded 60 of 60 with zero. Nothing was
+hidden in either, so the step-2 verdict stands exactly as recorded.
+
+#### New finding: degradation past the cliff is NON-LINEAR
+
+- **Still frames shift by exactly the phase**: median 4 at phase 0 -> 23 at
+  phase 20, a delta of 19 against the 20 expected. The one-for-one shift
+  assumption is confirmed, for still frames.
+- **Moving frames do not**: worst 29 at phase 0 -> **88** at phase 20, where a
+  linear shift predicts ~49.
+
+Once the driver falls behind, it cascades: a late fill starts the next one
+later still. **So the bracketing table above, which computes "worst
+`first_idx` = 29 + phase", is valid ONLY for still frames.** It was used to
+estimate the moving case at phases 20 and 28; those estimates are withdrawn.
+The still-frame column of that table stands.
+
+#### S for Bard's Tale, updated
+
+Clean at worst 29 (phase 0) and distorted with a moving median of 44 (phase
+20) gives **29 < S <~ 44**. The span-derived 41 retracted earlier sits inside
+that window -- the value was plausible even though its derivation was not
+sound, which is a reason to have retracted the *reasoning* rather than the
+number.
+
+**Still the single most informative outstanding test: phase 28 with the mouse
+completely STILL.** Still frames are the regime where the linear shift holds,
+so that reads ~32 and a clean/distorted verdict there pins S against a number
+we can trust.
