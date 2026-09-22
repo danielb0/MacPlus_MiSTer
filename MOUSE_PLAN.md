@@ -823,3 +823,61 @@ at all. The mouse fix ships either way.
 Still outstanding in step 4: Bard's Tale (issue #23) at phase 0 with a moving
 mouse -- reported distorting at 20/28/36, same mechanism, predicted clean now
 -- plus Lode Runner and the boot chime as general sound regression.
+
+### Step 4: Bard's Tale is clean at phase 0, and it argues AGAINST 28
+
+Daniel reported it quiet while moving the mouse and asked for a probe. 60
+PSND frames, sound playing throughout (no idle frames), mouse still for the
+first half and fast circles for the second.
+
+| | still (40 frames) | fast circles (20 frames) |
+|---|---|---|
+| `first_idx` | median 4, max 12 | median 23, **max 29** |
+| span | median 41 (40-50) | median 50, max 59 |
+| edges before first write | 0 | median 2, max 5 |
+| edges in frame | 0 | median 39, max 60 |
+| **LATE frames** | **0** | **0** |
+
+**S ~= 41 for Bard's Tale, DERIVED not assumed.** `read_probes.tcl` prints
+"(S assumed 32)" because `first_word` was dropped in the PSND repack, and 32
+is Lemmings' value; those lines are wrong for this program and were discarded.
+On a still frame the fill span is approximately S -- which is how Lemmings'
+31-32 span matched its known S of 32 -- so the still-frame span gives S here.
+
+**Zero LATE in 60 frames, with 12 words of margin** against Lemmings' 4. The
+difference is entirely S: a driver that starts at word 41 has more room before
+the scan catches it than one starting at 32. **Lemmings remains the binding
+case, which is why it was the right program to design against.**
+
+#### What this says about issue #23, and it is the valuable part
+
+Issue #23 reported Bard's Tale distorting at phases 20, 28 and 36. `first_idx`
+shifts one-for-one with the phase while S is fixed by the driver, so this
+measurement predicts:
+
+| phase | worst `first_idx` | vs cliff at S=41 |
+|---|---|---|
+| 0 | 29 | clean, 12 to spare |
+| 20 | ~49 | LATE |
+| 28 | ~57 | LATE |
+| 36 | ~65 | LATE |
+
+**That reproduces the bug report exactly**, and puts the breakpoint at phase
+~12. So Bard's Tale is a SECOND commercial driver arguing independently for a
+low phase and against 28 -- and unlike our own measurements it arrives from a
+user's bug report, so it is not downstream of any modelling of ours.
+
+Together with PoP buzzing at 0 (unchanged by the mouse fix) and the PAL read
+putting the VBL at word 0, three independent lines now agree that the
+authentic phase is low and that 28 is not a restoration.
+
+#### Caveats
+
+- **The S inference is softer than Lemmings'.** Still-frame spans ranged 40-50
+  rather than a tight 31-32, so S is ~41 with slack. The margin stays >= 11
+  on any reading in that range, so the verdict does not depend on it.
+- **Bard's Tale has variable foreground load of its own**: still-frame
+  `first_idx` reached 12, against Lemmings' 2-3. That variance is the game's,
+  not the mouse's -- these are frames with zero mouse edges.
+- Peak 60 edges/frame is the fastest hand captured in this session (Lemmings
+  peaked at 45) and still sits under the two-axis ceiling of 66.
