@@ -202,6 +202,76 @@ held (not accrued) whenever `|budget| < DIV`. The remainder row is what
 catches this - a naive implementation gives 19+ edges, or dribbles them out
 after the hand stops.
 
+## GREEN 2026-09-22: `rtl/ps2_mouse.v` fixed, 53/53, mutation swept
+
+Commit 2. `ps2_mouse` keeps the interface and now holds only the divisor,
+the report strobe and the fine-tick prescaler; the per-axis emitter is a new
+`ps2_mouse_axis` in the same file, instantiated twice.
+
+| row | before | after |
+|---|---|---|
+| burst | 200 edges, last 100.8 ms after the report | **25 edges, last 16.1 ms** |
+| spreading | 714 edges, every gap 4096 ce | **100 edges, gaps 21760..46208 ce** |
+| remainder | 150 edges | **18, none after the hand stops** |
+| direction | 638 edges | **180, net travel 0** |
+| ceiling and backlog | 119 edges past the 40 ms tail | **0 past it, worst window 32** |
+| backlog cap | 510 of 765 sent, 425 past the tail | **68, 0 past the tail** |
+| resume after a pause | (new row) | first count 23273 ce after the report |
+| both axes | 200 per axis | **25 and 25, diagonal +-25** |
+
+Two things the plan's design section had wrong, both found by the bench:
+
+**The DDA rate must be `|budget|` LATCHED AT THE REPORT, not the live
+backlog.** Clocking the DDA from the backlog as it drains gives a harmonic
+decay, not linear spreading: the 25 counts of a +200 report at DIV 8 would
+have taken 1024*H(25) = 3908 fine ticks, i.e. 61.6 ms, against the 16.1 ms
+the row requires. `rate` is therefore its own register, reloaded on each
+strobe.
+
+**A ceiling-blocked axis must have its phase clamped at the threshold.**
+Otherwise it banks credit while it waits and releases a burst when the
+ceiling lifts - the defect being fixed, reappearing at a smaller scale.
+
+### Direction is 180, and 180 is the derived floor
+
+A report interval is 1015.6 fine ticks, but draining 40 host units at DIV 4
+takes 1024. So at every reversal the one count still in flight is cancelled
+by the report that reverses it rather than being emitted. At most one count
+per boundary over 20 reports puts the floor at 200 - 20 = 180, which is what
+it measures. Sustained motion loses nothing: the spreading row is exactly
+100 of 100, because there the remainder adds to the next report's rate
+instead of opposing it.
+
+### Mutation sweep
+
+Five of seven mutants die. The two survivors are equivalent, not gaps:
+
+| mutation | result |
+|---|---|
+| `okce` forced true (no ceiling) | dies, 2 rows |
+| `divq` doubled | dies, 9 rows |
+| backlog discarded at each report | dies, 9 rows |
+| phase accrues while `|budget| < div` | dies, the resume row |
+| that, and no clamp | dies, 2 asserts of the resume row |
+| phase remainder discarded on emit | **survives** |
+| clamp removed alone | **survives** |
+
+**Phase remainder discarded: equivalent.** The discarded part is at most
+`rate - 1` of phase, which is under one fine tick (128 ce) of timing per
+count, against nominal gaps of ~26000 ce. It is below the emitter's own
+quantisation, so no timing assert can see it at any honest tolerance.
+
+**Clamp removed alone: redundant, and kept anyway.** With the `can` gate in
+place the phase cannot bank during a still period, and while the ceiling
+blocks with the backlog above `div` the excess is bounded by the backlog cap.
+The clamp is retained because it is what keeps the phase bound simple:
+`thresh + rate` = 33728 worst case, rather than a bound that depends on how
+long the ceiling can block. Removing both it and the `can` gate does fail.
+
+The `resume` row was added because of this sweep: the original nine rows all
+reset between tests, so none of them left a sub-`div` remainder sitting
+through a still period, which is the only place banked phase shows.
+
 ## The instrument: make PSND two-sided in the same compile
 
 The fill span in PSND sees only interrupts inside the driver's first part;

@@ -250,9 +250,19 @@ module tb_ps2_mouse;
             check((xpos - xpos_prev) == -(xn - xn_prev), "direction: an edge decoded positive inside a -40 report's interval");
       end
       wait_ce(40 * CE_MS);
+      // The total is a band, not a number. 800 host units at DIV 4 cannot
+      // give more than 200 counts. At the low end, a report interval is
+      // 1015.6 fine ticks but draining 40 units at DIV 4 takes 1024, so at
+      // every reversal the one count still in flight is cancelled by the
+      // report that reverses it instead of being emitted - correct, and at
+      // most one count per boundary, so not below 200 - 20. Sustained
+      // motion loses nothing: the spreading row above is exactly 100 of
+      // 100, because there the remainder adds to the next report's rate.
+      // Today's module gives 638.
       $display("  decoded travel %0d counts over %0d edges", xpos, xn);
-      check(xpos == 0,   "direction: equal travel each way did not decode to zero");
-      check(xn   == 200, "direction: 20 reports of 40 at DIV 4 is not 200 counts");
+      check(xpos == 0,  "direction: equal travel each way did not decode to zero");
+      check(xn   <= 200, "direction: more counts than the host units divided by DIV");
+      check(xn   >= 180, "direction: the reversal cancelled more than a rounding remainder");
 
       // ---- ceiling and backlog ----------------------------------------------
       // 10 reports of +255 at DIV 4 is ~64 counts per interval, twice what
@@ -292,6 +302,27 @@ module tb_ps2_mouse;
       wait_ce(260 * CE_MS);
       $display("  x edges %0d, %0d of them after the 40 ms tail", xn, xn - n_tail);
       check(xn == n_tail, "backlog cap: 765 host units were queued, not capped");
+
+      // ---- resume after a pause ----------------------------------------------
+      // A gesture that ends on a sub-DIV remainder leaves a rate latched and a
+      // phase part of the way to the next count. If the emitter keeps accruing
+      // phase through the still period it banks credit, and the next gesture
+      // discharges it at the ceiling -- the original defect in a narrow case.
+      // The first count of the new gesture must arrive one nominal spacing
+      // after the report, not immediately.
+      $display("resume: 7 reports of +3, 500 ms still, then +40, DIV 8");
+      div = 5'd8;
+      do_reset;
+      for (i = 0; i < 7; i = i + 1) begin send_report(9'sd3, 9'sd0); wait_ce(CE_RPT); end
+      wait_ce(500 * CE_MS);
+      clear_stats;
+      send_report(9'sd40, 9'sd0);
+      wait_ce(40 * CE_MS);
+      $display("  first count %0d ce after the report, %0d counts, min gap %0d",
+               xt[0] - strobe_ce, xn, xgap_min);
+      check(xn == 5, "resume: 45 host units at DIV 8 did not give 5 counts");
+      check((xt[0] - strobe_ce) >= 13000, "resume: the first count rode out on banked phase");
+      check(xgap_min >= 13000, "resume: the new gesture came out at the ceiling");
 
       // ---- both axes ---------------------------------------------------------
       $display("both axes: 5 reports each of x only, y only, then both, DIV 8");
