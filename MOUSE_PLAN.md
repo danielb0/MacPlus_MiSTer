@@ -617,3 +617,27 @@ matches `MacPlus_6e8d8dac_mousefix.rbf`: the flashed build still offers
   hardware was wrong -- it is stated plainly in chapter 7 and cost one download
   and two greps. [[feedback-read-the-spec-for-historical-hardware]] applies:
   the documentation was not read until after two sessions of inference.
+
+### Step 2, by ear: Lemmings at phase 0 is CLEAN with a moving mouse
+
+`MacPlus_6e8d8dac_mousefix.rbf`, System 7.1, sound phase 0, **mouse speed 8
+and 16, hand fast and slow, circles and straight lines: no mouse noise.**
+
+That is the first time this core has been clean at phase 0 with a moving mouse
+on merit. The 2026-09-21 run was also clean by ear at phase 0, but with one
+scan line of margin (worst `first_idx` 31 against the cliff at 32) and only
+because the converter's own burst had eaten 29 of the 30 lines of headroom;
+the same build clipped 64% of frames at phase 6 with a fast hand.
+
+**Divisor 8 is the load-bearing half of this result.** It is the pixel-exact
+value for this mouse (~174 px/in) and therefore twice the interrupt rate of
+16, so the fix is holding at the higher rate rather than only at the
+comfortable one. Fast circles at 8 is the worst combination the build offers.
+
+**Still to do: the PSND capture.** By ear establishes that we are under the
+cliff, not how far under, and "clean by ear at phase 0" is precisely the
+reading that misled this investigation once already. The quantitative pass is
+in "Hardware, in order" step 2: fill span 31-32 on every frame regardless of
+hand, worst `first_idx` <= 25, mouse edges before the first write <= 5 with a
+fast hand. PSND is not sticky -- only PDCD is -- so it reads live during play
+with `quartus_stp -t scripts/read_probes.tcl 40 0.5` and needs no reset.
