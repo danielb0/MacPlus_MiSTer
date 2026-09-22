@@ -60,6 +60,7 @@ module dataController_top(
 	 
 	// mouse:
 	input [24:0] ps2_mouse,
+	input [4:0] mouseDiv,   // host counts per Plus count, see rtl/ps2_mouse.v
 	
 	// serial:
 	input serialIn, 
@@ -605,7 +606,7 @@ module dataController_top(
 		.ce(clk8_en_p),
 		.reset(~_cpuReset),
 		.ps2_mouse(ps2_mouse),
-		.div(5'd8),				// MOUSE_PLAN.md: the OSD selector replaces this
+		.div(mouseDiv),
 		.x1(mouseX1),
 		.y1(mouseY1),
 		.x2(mouseX2),

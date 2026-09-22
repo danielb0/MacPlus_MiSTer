@@ -272,6 +272,49 @@ The `resume` row was added because of this sweep: the original nine rows all
 reset between tests, so none of them left a sub-`div` remainder sitting
 through a still period, which is the only place banked phase shows.
 
+## COMMIT 3 2026-09-22: Mouse Speed in the OSD, sixteen values on bits 22-25
+
+Supersedes the "Dev build: a 3-bit OSD selector" bullet above in two ways.
+
+**It ships, and it is not a debug knob.** Daniel's call, and the reasoning is
+better than the one in that bullet: the hardware devices that put a modern
+mouse on an old machine carry exactly this adjustment, so the faithful
+comparison is not the Plus - which of course had no such control - but the
+adapter standing between the two. Correcting the record on the argument that
+bullet used: "a mouse-speed option is ordinary on MiSTer cores" was asserted
+without checking and does not survive one. Of the cores available to check,
+only BBC Micro has any mouse menu item at all (`Mouse as Joystick`), and
+MacLC, the nearest relative, has none. The case rests on the adapter
+precedent, not on core convention.
+
+**Sixteen values, not eight.** Bits 22-25 (M..P) are all free, and the extra
+bit costs nothing while this build is also how the divisor gets calibrated -
+there are two unknowns to sweep, the 400..1600 cpi spread and the factor of
+two in pulse-versus-edge.
+
+    "OMP,Mouse Speed,8,1,2,3,4,5,6,7,9,10,11,12,13,14,16,18;",
+
+Index 0 is the default because `status` powers up at zero, the same
+constraint the CD Volume line documents, so 8 leads and the rest ascend.
+The labels are the raw divisors while this is a calibration build; they
+become user-facing before the release cut, and that relabelling is the only
+part of this deferred.
+
+No config version bump: bits 22-25 were unused, so no existing field moved.
+Audited every `status[]` reference - 0, 1-3, 4, 5, 6, 7-8, 10, 11-12, 13-14,
+15-16, 18, 19-21 and now 22-25, with 9, 17 and 26 up still free.
+
+The index-to-divisor mux sits in `MacPlus.sv` beside the config string that
+defines the list, so `rtl/ps2_mouse.v` keeps a plain divisor port and never
+depends on what the menu offers. Four address bits is well inside the range
+where a case is the right shape ([[macplus-lookup-table-width-rule]]).
+
+**Inert on the SE**, which takes its mouse through `rtl/adb.sv`:
+`via_pb_i` masks the quadrature bits with `{3{machineType}}`
+(`dataController_top.sv:342`). The item still appears on an SE. Greying it
+with a `status_menumask` bit is a one-line job and belongs in the release
+cut, not here.
+
 ## The instrument: make PSND two-sided in the same compile
 
 The fill span in PSND sees only interrupts inside the driver's first part;

@@ -135,6 +135,20 @@ localparam CONF_STR = {
 	// Bits 19-21 (J..L) were free; the field grew upward into 21, so no
 	// existing bit moved and "v,1;" below did not need a bump.
 	"OJL,Sound Scan Phase,0,6,8,10,12,20,28,36;",
+	// MOUSE_PLAN.md: host mouse counts consumed per Plus mouse count. A real
+	// Plus mouse is 90 counts per inch and a modern one is 400..1600, so the
+	// right divisor is a property of the user's mouse, not of the core - the
+	// same adjustment the hardware adapters that put a modern mouse on an old
+	// machine carry, which is why this is a real option and not a debug knob.
+	//
+	// Sixteen values on bits 22-25 (M..P, all free) because this build is also
+	// how the value gets calibrated, and there are two unknowns to sweep: the
+	// 400..1600 cpi spread, and whether the ROM counts one interrupt per
+	// quadrature pulse or per edge, which is a factor of two on top of it.
+	// Index 0 is the default, as with CD Volume above, so 8 leads and the rest
+	// ascend. The labels are the raw divisors while this is a calibration
+	// build; they become user-facing before any release cut.
+	"OMP,Mouse Speed,8,1,2,3,4,5,6,7,9,10,11,12,13,14,16,18;",
 	"ODE,CPU,68000,68010,68020;",
 	"D1O4,Memory,1MB,4MB;",
 	"-;",
@@ -148,6 +162,31 @@ localparam CONF_STR = {
 };
 
 wire status_turbo = status[5];
+
+// MOUSE_PLAN.md: OSD index -> host counts per Plus count. The list and its
+// labels live together in CONF_STR above, and rtl/ps2_mouse.v takes the
+// divisor itself, so the converter never has to know what the menu offers.
+reg [4:0] mouse_div;
+always @(*) begin
+	case (status[25:22])
+		4'd0:  mouse_div = 5'd8;   // default: an 800..1000 cpi mouse, pulse-per-count
+		4'd1:  mouse_div = 5'd1;
+		4'd2:  mouse_div = 5'd2;
+		4'd3:  mouse_div = 5'd3;
+		4'd4:  mouse_div = 5'd4;
+		4'd5:  mouse_div = 5'd5;
+		4'd6:  mouse_div = 5'd6;
+		4'd7:  mouse_div = 5'd7;
+		4'd8:  mouse_div = 5'd9;
+		4'd9:  mouse_div = 5'd10;
+		4'd10: mouse_div = 5'd11;
+		4'd11: mouse_div = 5'd12;
+		4'd12: mouse_div = 5'd13;
+		4'd13: mouse_div = 5'd14;
+		4'd14: mouse_div = 5'd16;
+		4'd15: mouse_div = 5'd18;
+	endcase
+end
 
 // Which OSD items are unavailable on the selected model. Declared here
 // because hps_io below consumes it; it is DRIVEN further down, beside the
@@ -845,6 +884,7 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.ps2_key(ps2_key), 
 	.capslock(capslock),
 	.ps2_mouse(ps2_mouse),
+	.mouseDiv(mouse_div),
 	// serial uart
 	.serialIn(serialIn),
 	.serialOut(serialOut),
