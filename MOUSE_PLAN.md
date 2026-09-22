@@ -1042,3 +1042,17 @@ number.
 completely STILL.** Still frames are the regime where the linear shift holds,
 so that reads ~32 and a clean/distorted verdict there pins S against a number
 we can trust.
+
+### Step 4 regression: Lode Runner sounds exactly the same
+
+Daniel, 2026-09-22: unchanged by the mouse fix.
+
+Second negative control after PoP, and the same reasoning applies -- the
+converter fix touches no sound file, so any change here would have meant it
+reached the sound path by an unmodelled route. Lode Runner was part of the
+Phase 3 CD-audio regression set, so "exactly the same" is being judged against
+a familiar reference rather than a first listen.
+
+Step 4 status: PoP unchanged, Bard's Tale clean at 0 / distorted at 20 and 28
+(both confirmed on the probe), Lode Runner unchanged. **Outstanding: the boot
+chime.** Then step 5 -- 128K, 512K, 16 MHz turbo.
