@@ -480,3 +480,132 @@ shipping, its config line removed. The 3-way re-cut recipe in
   and the CRT Collective post are the two candidates found; 68kMLA would
   be the place to ask) before the release decision, or release the mouse
   fix alone without waiting.
+
+## COMPILE AND CALIBRATION 2026-09-22: `MacPlus_6e8d8dac_mousefix.rbf`
+
+The gated compile is done: cold, 0 errors, no `Smart recompilation skipped`
+lines, timing met with no negative slack (worst setup +0.296 on the HDMI PLL,
+core PLL +1.225), 20,883 / 41,910 ALMs. It carries all four commits, both
+selectors and `USE_SCSI_ISSP`.
+
+Process note for the next one: **stamp `rtl/build_tag.v` BEFORE launching and
+archive BEFORE reverting it.** The file is committed as zeros deliberately, so
+an unstamped build reports `bitstream=UNSTAMPED` and `archive_build.ps1`
+refuses to file it; `archive_build.ps1` reads the SHA out of that same file to
+name its output, so the revert has to come last.
+
+### Step 1 result: the converter tracks linearly, and the axes agree
+
+Daniel's mouse is a Logitech G309 (HERO 25K), measured by screen-edge sweeps
+at System 7.1 with Mouse Tracking on "Very Slow" -- **there is no "Tablet"
+setting on this System**, so acceleration could not be switched off and had to
+be defeated by moving slowly instead.
+
+| divisor | X (512 px) | Y (342 px) | implied px/in | implied host cpi |
+|---|---|---|---|---|
+| 14 | 13 cm | 7 cm | 100 / 124 | 1400 / 1737 |
+| 16 | 15 cm | 9.5 cm | 86.7 / 91.4 | 1387 / 1463 |
+
+**The 24% axis disagreement at divisor 14 was measurement artefact, not an RTL
+defect.** The divisor-14 sweeps were shorter, so the hand was faster for the
+same natural motion, and the Mac's own tracking curve inflated them -- Y worst
+because its sweep was shortest. At divisor 16 both sweeps are longer and the
+spread collapses to 5.5%. The G309's sensor is specified "zero
+smoothing/acceleration/filtering", so the mouse cannot have caused it.
+
+**The converter's linearity is confirmed to 1%:** the implied host resolution
+is 1400 cpi from the divisor-14 sweep and 1387 from the divisor-16 sweep, two
+independent measurements at different divisors.
+
+Contamination pulls both ways and both are defeated by moving slowly, which is
+why the slow sweeps are the ones to trust: Mac tracking inflates px/in with a
+fast hand, while Main's +-255-per-report clip deflates it (counts are lost
+above `17000/cpi` inches per second).
+
+### Step 1 conclusion: it is 180 counts per inch, not 90
+
+**Settled from the Guide to the Macintosh Family Hardware 2e, chapter 7**
+(full text at archive.org, `apple-guide-macintosh-family-hardware`):
+
+- Macintosh Plus specifications, p. 46827 of the text dump: "Mechanical/optical
+  mechanism generating **90 pulses per inch** on each axis of travel".
+- The quadrature section: "The mouse driver can then read bits in the SCC to
+  determine which mouse-interrupt signal caused the interrupt, and **whether
+  the interrupt was caused by a rising edge or a falling edge** of the signal."
+- **Table 7-1 gives a direction for all four cases** -- `X1 rising / X2 low ->
+  Left`, `X1 falling / X2 low -> Right`, and likewise for Y1/Y2.
+
+So the ROM acts on **every edge**, and 90 pulses per inch is **180 interrupts
+per inch**. Our `rtl/scc.v` already models this correctly: `dcd_ip_a = (dcd_a
+!= dcd_latch_a)` is a change detect, so each toggle of `x1` raises exactly one
+interrupt, exactly as the real SCC does.
+
+**Pixel-exact divisor = host cpi / 180.** For the G309 at ~1390 cpi that is
+7.7, i.e. **divisor 8 -- the existing default**. The factor-of-two ambiguity
+that this menu was built to sweep is now closed, and it closed on the branch
+the plan treated as the less likely one.
+
+### Why Daniel's feel report says 14-16, and why it is not a contradiction
+
+Daniel owned a Macintosh Plus until 2023 and reports that 14-16 "feels very
+much like a real Mac" -- that is 87-99 px/in, half the pixel-exact rate.
+
+**Both are right, because they measure different things.** On a real Plus 512
+pixels span 7.1 inches of glass, so crossing the screen costs 2.8 inches of
+hand: a hand-to-screen gain of ~2.5x. A hand remembers that gain, not pixels
+per inch, and preserving it on a modern display scales the required hand
+movement with the PHYSICAL width of the image. At the real Plus's gain a
+15-inch-wide image wants ~15 cm of hand to cross -- which is what divisor 16
+measured.
+
+So:
+
+- **divisor ~= cpi/180** reproduces the Plus's pixel arithmetic exactly;
+- **roughly double that** reproduces its feel on a display several times the
+  size of a 9-inch CRT.
+
+Which is right depends on the user's monitor, which no label can encode.
+
+### DECISION: the selector ships, with bare numbers, consecutive
+
+Daniel's call, and the argument that settles it: **every user has a different
+mouse, so no baked-in constant can be right.** Setting one particular mouse to
+match a Plus exactly does nothing for anyone else. The display-size finding
+above strengthens this -- the correct value depends on the user's monitor as
+well as the user's mouse.
+
+**Labelling the menu by mouse DPI was considered and rejected.** Daniel:
+"it commits us to being accurate." A label reading "1000 DPI" asserts that
+selecting it is correct for a 1000-DPI mouse, and that assertion inherits every
+error in our pulse-versus-edge answer, in whatever the mouse's software
+actually reports, AND in the display-size effect, which it cannot express at
+all. A bare number asserts only "bigger is slower", which the user resolves by
+turning it. The interface should not claim more than it can deliver.
+
+**Revised list** -- bare divisors, consecutive, no gaps (the old list omitted
+15 and 17 to reach 18 inside sixteen slots):
+
+    "OMP,Mouse Speed,8,2,3,4,5,6,7,9,10,11,12,13,14,15,16,17;",
+
+Sixteen slots: default 8 at index 0 because `status` powers up at zero, then
+**2 through 17 with no gaps**. Index 0 is now the pixel-exact value for a
+~1440 cpi mouse rather than an arbitrary middle. The range covers pixel-exact
+for 360..3060 cpi and reaches roughly double that for display-size
+compensation.
+
+Still open for the release cut: whether `div`, currently `input [4:0]`
+(max 31), wants widening; a 3200 cpi mouse wanting display compensation would
+ask for 35.
+
+### Corrections to earlier sections of this document
+
+- The value list `2,3,4,6,8,11,16,1` in "Open decisions" is superseded twice
+  over: first by the sixteen-value list in commit 3, now by the consecutive
+  list above.
+- "Pick the DIV that gives 90" in "Hardware, in order" step 1 should read
+  **180**. The step's method is unaffected; only the target changes. At 180 the
+  screen-width sweep is 7.2 cm, not 14.5 cm.
+- The reasoning that the pulse-versus-edge question could only be closed on
+  hardware was wrong -- it is stated plainly in chapter 7 and cost one download
+  and two greps. [[feedback-read-the-spec-for-historical-hardware]] applies:
+  the documentation was not read until after two sessions of inference.
