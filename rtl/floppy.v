@@ -63,6 +63,12 @@ module floppy
 	input clk,
 	input cep,
 	input cen,
+	// 1 when this cep is also a CPU clock. A disk byte is 128 IWM clocks, and
+	// the IWM's FCLK IS the CPU's C8M, so the byte timers count CPU clocks:
+	// the .Sony read loop fits that budget exactly once the core has real
+	// wait states, and misses it if bytes come 128 clk8 apart while the CPU
+	// is trimmed to 7.8336 MHz (cpu_wait.v). SDRAM acks stay on every cep.
+	input cpu_tick,
 
 	input _reset,
 	input ca0,				// PH0
@@ -359,7 +365,7 @@ module floppy
 			decReady <= 1'b0; // default; pulsed for exactly one cep below
 
 			// byte pacing runs on the same clk8 cadence as diskDataByteTimer
-			if (cep && writeBusyReg) begin
+			if (cep && cpu_tick && writeBusyReg) begin
 				if (_enable == 1'b1) begin
 					// drive deselected mid-byte: it never reached the media
 					writeBusyReg     <= 1'b0;
@@ -505,7 +511,7 @@ module floppy
 		else begin			
 			if(cep) begin
 			// at time 0, latch a new byte and advance the drive head
-			if (diskDataByteTimer == 0 && readyToAdvanceHead && diskImageData != 0) begin
+			if (cpu_tick && diskDataByteTimer == 0 && readyToAdvanceHead && diskImageData != 0) begin
 				diskDataIn <= diskImageData;
 				newByteReady <= 1;
 				diskDataByteTimer <= 1;  // make timer run again
@@ -521,7 +527,7 @@ module floppy
 			// is 8MHZ/128 = 16us
 			else begin
 				// a timer governs when the next disk byte will become available
-				diskDataByteTimer <= diskDataByteTimer + 1'b1;
+				if (cpu_tick) diskDataByteTimer <= diskDataByteTimer + 1'b1;
 
 				newByteReady <= 1'b0;
 

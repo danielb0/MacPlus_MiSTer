@@ -3,6 +3,7 @@ module dataController_top(
 	input clk32,					// 32.5 MHz pixel clock
 	input clk8_en_p,
 	input clk8_en_n,
+	input cpu_skip,     // this clk8 is not a CPU clock (cpu_wait.v)
 	input clk16_en_n,		// for the IWM read-latch clear only, see iwm.v
 	input E_rising,
 	input E_falling,
@@ -521,6 +522,7 @@ module dataController_top(
 		.cen(clk8_en_n),
 		.cen16(clk16_en_n),
 		.turbo(turbo),
+		.cpu_tick(!cpu_skip),
 		._reset(_cpuReset),
 		.selectIWM(selectIWM),
 		._cpuRW(_cpuRW),

@@ -134,7 +134,7 @@ module tb_iwm_dcd;
 	reg         dcd_img_readonly = 1'b0;
 
 	iwm dut (
-		.clk(clk), .cep(cep), .cen(cen), .cen16(cen16), .turbo(TURBO[0]),
+		.clk(clk), .cep(cep), .cen(cen), .cpu_tick(1'b1), .cen16(cen16), .turbo(TURBO[0]),
 		._reset(_reset),
 		.selectIWM(selectIWM),
 		._cpuRW(_cpuRW),

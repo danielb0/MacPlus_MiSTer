@@ -48,7 +48,7 @@
 // Run from the repo ROOT (the sim/*.v files $readmemh relative paths):
 //   iverilog -g2012 -o /tmp/t.vvp sim/tb_iwm_latch.v rtl/iwm.v rtl/floppy.v \
 //       rtl/floppy_track_encoder.v rtl/floppy_track_decoder.v \
-//       rtl/floppy_write_committer.v && vvp /tmp/t.vvp
+//       rtl/floppy_write_committer.v rtl/dcd.v rtl/dcd_link.v rtl/dcd_disk.v \n//       rtl/scsi.v -I rtl && vvp /tmp/t.vvp
 //
 module tb_iwm_latch;
 
@@ -87,7 +87,7 @@ module tb_iwm_latch;
    reg turbo = 1'b0;
 
    iwm dut (
-      .clk(clk), .cep(cep), .cen(cen),
+      .clk(clk), .cep(cep), .cen(cen), .cpu_tick(1'b1),
 `ifdef IWM_HAS_TURBO
       .cen16(cen16), .turbo(turbo),
 `endif

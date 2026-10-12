@@ -36,7 +36,7 @@ module tb_drive_tach;
 	wire [7:0] rd400, rd800;
 
 	floppy dut400 (
-		.clk(clk), .cep(1'b1), .cen(1'b1), ._reset(rst_n),
+		.clk(clk), .cep(1'b1), .cen(1'b1), .cpu_tick(1'b1), ._reset(rst_n),
 		.ca2(1'b0), .ca1(1'b1), .ca0(1'b1), .SEL(1'b1),
 		.lstrb(1'b1), ._enable(1'b0), .writeData(8'h00), .readData(rd400),
 		.advanceDriveHead(1'b0), .insertDisk(1'b0), .img800k(1'b0),
@@ -46,7 +46,7 @@ module tb_drive_tach;
 	);
 
 	floppy dut800 (
-		.clk(clk), .cep(1'b1), .cen(1'b1), ._reset(rst_n),
+		.clk(clk), .cep(1'b1), .cen(1'b1), .cpu_tick(1'b1), ._reset(rst_n),
 		.ca2(1'b0), .ca1(1'b1), .ca0(1'b1), .SEL(1'b1),
 		.lstrb(1'b1), ._enable(1'b0), .writeData(8'h00), .readData(rd800),
 		.advanceDriveHead(1'b0), .insertDisk(1'b0), .img800k(1'b0),

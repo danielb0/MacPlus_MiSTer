@@ -878,6 +878,7 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.clk32(clk_sys), 
 	.clk8_en_p(clk8_en_p),
 	.clk8_en_n(clk8_en_n),
+	.cpu_skip(cpu_skip),
 	.clk16_en_n(clk16_en_n),
 	.E_rising(E_rising),
 	.E_falling(E_falling),

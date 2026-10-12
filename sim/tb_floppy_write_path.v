@@ -58,7 +58,7 @@ module tb_floppy_write_path;
    reg         dskWriteAck = 1'b0;
 
    floppy dut (
-      .clk(clk), .cep(cep), .cen(cen),
+      .clk(clk), .cep(cep), .cen(cen), .cpu_tick(1'b1),
       ._reset(_reset),
       .ca0(ca0), .ca1(ca1), .ca2(ca2), .SEL(SEL), .lstrb(lstrb),
       ._enable(_enable),

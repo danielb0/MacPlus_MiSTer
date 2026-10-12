@@ -337,6 +337,29 @@ Original Phase 2 text:
   - Bard's Tale
   - Erase Disk
 
+**Phase 5 REGRESSION: floppies would not mount on `0bf0de6d`** (Daniel,
+2026-10-12). The IWM's FCLK is the CPU's C8M, so a GCR byte is 128 CPU
+clocks on a real Plus. floppy.v counted 128 clk8, which is 123-124 CPU clocks
+once trimmed, and the .Sony read loop overran. It fits 128 exactly with the
+real wait states (`fa939f22` mounted fine).
+
+**FIX:** a `cpu_tick` input (= !cpu_skip, through dataController and iwm) gates
+floppy.v's read byte timer, its fire moment and the write byte timer.
+SDRAM acks and everything else stay on every cep.
+- `sim/tb_floppy_byte_clock.v`: exactly 128 CPU clocks per byte, read and write,
+  trimmed (133-134 clk8) and untrimmed (128 clk8). Without the gates it FAILS
+  at 123-124 CPU clocks.
+- The seven floppy/IWM benches pass with `cpu_tick` = 1.
+- Elaboration 0 errors, 83 warnings.
+
+**Also on `0bf0de6d`:** System Picker (Plus mode, System 7) crashed with error 28
+when its menu was opened mid-search, and the disk now gives error 39
+(probably -39 eofErr). No SCSI mechanism found: ncr5380 is edge-driven off
+the CPU strobes on the 32.5 MHz clock, as asynchronous as a real 5380. Open:
+retest on the floppy-fixed build with a COPY of the image, and bisect on
+`fa939f22` if it recurs. `hfs_integrity.py` on the damaged image would tell
+crash damage (catalog/Desktop) from transfer damage (scattered bytes).
+
 **Phase 5 (optional): the 3.7% clock.** COMPILED 2026-10-12:
 `output_files/MacPlus_0bf0de6d_cputrim.rbf`.
 - 0 errors, 120 warnings.

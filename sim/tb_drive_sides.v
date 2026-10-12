@@ -33,7 +33,7 @@ module tb_drive_sides;
 
 	// Two drives differing ONLY in the mechanism bit, read side by side.
 	floppy dut800 (
-		.clk(clk), .cep(1'b1), .cen(1'b1), ._reset(1'b1),
+		.clk(clk), .cep(1'b1), .cen(1'b1), .cpu_tick(1'b1), ._reset(1'b1),
 		.ca2(addr[3]), .ca1(addr[2]), .ca0(addr[1]), .SEL(addr[0]),
 		.lstrb(1'b1), ._enable(1'b0), .writeData(8'h00), .readData(rd800),
 		.advanceDriveHead(1'b0), .insertDisk(1'b0),
@@ -43,7 +43,7 @@ module tb_drive_sides;
 	);
 
 	floppy dut400 (
-		.clk(clk), .cep(1'b1), .cen(1'b1), ._reset(1'b1),
+		.clk(clk), .cep(1'b1), .cen(1'b1), .cpu_tick(1'b1), ._reset(1'b1),
 		.ca2(addr[3]), .ca1(addr[2]), .ca0(addr[1]), .SEL(addr[0]),
 		.lstrb(1'b1), ._enable(1'b0), .writeData(8'h00), .readData(rd400),
 		.advanceDriveHead(1'b0), .insertDisk(1'b0),
