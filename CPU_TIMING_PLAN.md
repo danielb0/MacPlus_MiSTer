@@ -216,7 +216,26 @@ see "Alignment" above.
   not yield a consistent model, fall back to the Guide's description and record
   that choice.
 
-**Phase 1: failing bench.**
+**Phase 1: failing bench.** DONE 2026-10-12. `sim/tb_cpu_wait.v` runs the REAL
+fx68k against `rtl/cpu_wait.v` (a stub that holds nothing, i.e. today's
+behaviour). It checks every bus cycle's waits against the Phase 0 table and
+the loop periods against hand timing:
+
+| Loop | Bare | Grid | RAM in display |
+|---|---|---|---|
+| nop/nop/dbra | 18 | 20 | 32 |
+| PoP fill | 30 | 32 | 56 |
+
+It also checks ROM, SCC, IWM, the assumed SE rule and turbo. Against the stub:
+**FAIL, 15,238 of 16,632 cycles wrong**, loops at 18/30, turbo ok.
+
+iverilog cannot compile fx68k as written (unpacked structs, piecewise-driven
+struct ports, enum ?:), so `sim/fx68k_iverilog.py` writes a sim-only copy to
+`sim/out/fx68k_sim.sv`: the structs are packed and the driving module's
+members are flattened. `rtl/fx68k` is untouched. Run from `rtl/fx68k`, because
+fx68k loads its microcode ROMs from the cwd. About 20 s.
+
+Original Phase 1 text:
 - An iverilog bench of fx68k against the real address/DTACK path, running a
   RAM-bound loop and a ROM-bound loop.
 - It measures clocks per iteration and asserts the Phase 0 prediction for
