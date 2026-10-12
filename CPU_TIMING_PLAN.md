@@ -286,7 +286,23 @@ Original Phase 2 text:
 - 0 errors, 120 warnings (the debug-deck count).
 - Worst setup slack +0.380 ns, no negative slack.
 - 50% ALMs, 135/553 RAM blocks, Fitter peak 9,056 MB.
-- Awaiting the hardware results.
+- **HARDWARE 2026-10-12: ALL TESTS PASS** (Daniel), PoP included.
+- Speedometer 3.2, Plus mode, 8 MHz, against the real Plus 0.880 / 0.933 / 0.996
+  (`C:/temp/Mac/Screenshots/20261012_175052-screen.png`):
+
+| Test | Real Plus | Core before | Core now | Now / real | Now / 1.0372 |
+|---|---|---|---|---|---|
+| CPU | 0.880 | 1.355 (x1.540) | 0.920 | x1.045 | 0.887 |
+| Graphics | 0.933 | 1.132 (x1.213) | 0.968 | x1.038 | 0.933 |
+| Math | 0.996 | 1.201 (x1.206) | 1.034 | x1.038 | 0.997 |
+| Old PR | 0.879 | 1.177 | 0.916 | x1.042 | 0.883 |
+| New PR | 0.872 | 1.147 | 0.908 | x1.041 | 0.875 |
+
+  Every test is now 1.038-1.045 of the real Plus. That is the 3.72% clock
+  (8.125 / 7.8336 MHz) and nothing else: divided out, Graphics and Math match
+  to the third decimal and CPU is within 0.8%. The contention model is complete;
+  the remaining error is Phase 5.
+- SE-mode figures not yet reported.
 - Speedometer at 8 MHz, Plus and SE modes.
 - Targets: Plus CPU about 0.91 (0.88 x 1.037 for the clock), SE about 1.02.
   Graphics and Math should fall towards 0.93 and 1.00.
