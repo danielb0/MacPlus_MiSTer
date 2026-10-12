@@ -633,6 +633,8 @@ assign wc_ext_wr_ack  = slot3_ext_ack & ~ldr_ext_wr_req;
 wire wp_int = ~status[6] | ldr_int_readonly;
 wire wp_ext = ~status[6] | ldr_ext_readonly;
 
+wire cpu_wait_hold;  // see cpu_wait below
+
 // dtack generation in turbo mode
 reg  turbo_dtack_en, cpuBusControl_d;
 always @(posedge clk_sys) begin
@@ -656,12 +658,34 @@ assign      _cpuVPA = (cpuFC == 3'b111) ? 1'b0 : ~(!_cpuAS && cpuAddr[23:21] == 
 // pseudo-DMA window; register reads, and every other device, are untouched.
 // Bounded by the target's ~516 ms io-stall watchdog, which aborts the command
 // and thereby releases the hold.
-assign      _cpuDTACK = ~(!_cpuAS && cpuAddr[23:21] != 3'b111) | (status_turbo & !turbo_dtack_en) | scsi_bus_hold;
+assign      _cpuDTACK = ~(!_cpuAS && cpuAddr[23:21] != 3'b111) | (status_turbo & !turbo_dtack_en) | scsi_bus_hold | cpu_wait_hold;
 
 wire        cpu_en_p      = status_turbo ? clk16_en_p : clk8_en_p;
 wire        cpu_en_n      = status_turbo ? clk16_en_n : clk8_en_n;
 
 wire        is68000       = status_cpu == 0;
+
+// The real machines' wait states at 8 MHz (CPU_TIMING_PLAN.md): RAM and ROM
+// on the TSM's 4-clock grid, display RAM on video's alternate slots, the SCC
+// on C1M. Turbo and the 68010/68020 options keep today's zero-wait timing.
+cpu_wait cpu_wait
+(
+	.clk         ( clk_sys                  ),
+	.clk8_en_p   ( clk8_en_p                ),
+	.authentic   ( !status_turbo && is68000 ),
+	.machineType ( machineType              ),
+	._vblank     ( _vblank                  ),
+	.snd_advance ( snd_advance              ),
+	._cpuAS      ( _cpuAS                   ),
+	.selectRAM   ( selectRAM                ),
+	.selectROM   ( selectROM                ),
+	.selectSCSI  ( selectSCSI               ),
+	.selectIWM   ( selectIWM                ),
+	.selectSCC   ( selectSCC                ),
+	.phase       (                          ),
+	.display     (                          ),
+	.hold        ( cpu_wait_hold            )
+);
 assign      _cpuReset_o   = is68000 ? fx68_reset_n : tg68_reset_n;
 assign      _cpuRW        = is68000 ? fx68_rw : tg68_rw;
 assign      _cpuAS        = is68000 ? fx68_as_n : tg68_as_n;

@@ -9,18 +9,28 @@
 //   RAM during display                waits = (5 - phi) mod 8
 //   SCC                               waits = 1 + (4 - phi) mod 8
 //
-// (scripts/tsm_pal_model.py). The SE is assumed to keep the grid with one
-// display slot in four. `phase` is the 16-clock slot frame both use.
+// (scripts/tsm_pal_model.py). The SE is ASSUMED to keep the grid with one
+// display slot in four; no BBU equations exist. The VIA is VPA/E-clock
+// timed, which fx68k already models, so it is not held here.
 //
-// PHASE 1 STUB: holds nothing, which is the core's behaviour today. The bench
-// sim/tb_cpu_wait.v must fail against it.
+// fx68k samples DTACK on phi2 of S4 and leaves S4 on the next phi1. S0 sits
+// at phase phi, so the S4 sample with w waits sees phase phi + 2 + w. Every
+// rule above is "waits = (target - phi) mod G", so DTACK reduces to a phase
+// window: release only when phase = target + 2.
+//
+// Contention follows a virtual Mac raster locked to the sound scan, not the
+// core's VGA-shaped display: line 0 starts at the VBL (the scan is at word 0
+// there on a real Plus), one line per sound word, lines 0-27 blank, and the
+// first 256/352 of every later line is display. The last slot of every line
+// is the sound/disk-speed fetch.
 //
 module cpu_wait(
 	input        clk,
 	input        clk8_en_p,     // CPU phi1, once per 8 MHz clock
 	input        authentic,     // 8 MHz authentic timing; 0 under turbo
 	input        machineType,   // 0 = Plus/512K/128K, 1 = SE
-	input        display,       // video owns its RAM slots now
+	input        _vblank,       // falling edge = VBL = line 0
+	input        snd_advance,   // one pulse per sound word = per Mac line
 	input        _cpuAS,
 	input        selectRAM,
 	input        selectROM,
@@ -28,13 +38,54 @@ module cpu_wait(
 	input        selectIWM,
 	input        selectSCC,
 	output [3:0] phase,         // C8M clock within the 16-clock slot frame
+	output       display,       // video owns its RAM slots now
 	output       hold           // 1 = withhold DTACK
 );
 
+	// 16-clock slot frame: the Plus uses phase[2:0] as C1M, the SE all four
 	reg [3:0] ph = 4'd0;
 	always @(posedge clk) if (clk8_en_p) ph <= ph + 4'd1;
 	assign phase = ph;
 
-	assign hold = 1'b0;
+	// virtual raster. A core line is ~366 clk8 (135,408 / 370), so the real
+	// 256/352 display share is 266 clocks, and the sound slot the last 8.
+	localparam [8:0] FIRST_DISPLAY_LINE = 9'd28;
+	localparam [8:0] DISPLAY_CLOCKS     = 9'd266;
+	localparam [8:0] SOUND_SLOT_CLOCK   = 9'd358;
+
+	reg       vblankD = 1'b1, frame_pending = 1'b0;
+	reg [8:0] line = 9'd0, xclk = 9'd0;
+	always @(posedge clk) if (clk8_en_p) begin
+		vblankD <= _vblank;
+		if (vblankD && !_vblank) frame_pending <= 1'b1;
+		if (snd_advance) begin
+			// the scan's first advance follows the VBL edge by one clock
+			line          <= frame_pending ? 9'd0 : line + 9'd1;
+			frame_pending <= 1'b0;
+			xclk          <= 9'd0;
+		end else if (xclk != 9'h1FF)
+			xclk <= xclk + 9'd1;
+	end
+	assign display = (line >= FIRST_DISPLAY_LINE && xclk < DISPLAY_CLOCKS) ||
+	                 xclk >= SOUND_SLOT_CLOCK;
+
+	// clocks since AS fell, to keep the SCC from completing on its first sample
+	reg [1:0] as_age = 2'd0;
+	always @(posedge clk)
+		if (_cpuAS) as_age <= 2'd0;
+		else if (clk8_en_p && as_age != 2'd3) as_age <= as_age + 2'd1;
+
+	// release windows: phase = target + 2
+	wire grid_ok    = ph[1:0] == 2'd3;                       // target 1 mod 4
+	wire plus_slot  = ph[2:0] == 3'd7;                       // target 5 mod 8
+	wire se_slot    = grid_ok && ph != 4'd3;                 // not video's slot
+	wire ram_ok     = !display ? grid_ok : machineType ? se_slot : plus_slot;
+	wire scc_ok     = plus_slot && as_age >= 2'd2;
+
+	wire release_ok = selectSCC ? scc_ok :
+	                  selectRAM ? ram_ok :
+	                  (selectROM | selectIWM | selectSCSI) ? grid_ok : 1'b1;
+
+	assign hold = authentic && !_cpuAS && !release_ok;
 
 endmodule

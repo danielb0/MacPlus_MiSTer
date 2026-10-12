@@ -59,14 +59,16 @@ module tb_cpu_wait;
 		end
 
 	wire [3:0] phase;
-	wire       hold;
+	wire       hold, dut_display;
+	reg        vblank_n = 1, snd_adv = 0;
 	cpu_wait dut (
 		.clk(clk), .clk8_en_p(enPhi1), .authentic(authentic),
-		.machineType(machineType), .display(display), ._cpuAS(ASn),
+		.machineType(machineType), ._vblank(vblank_n), .snd_advance(snd_adv),
+		._cpuAS(ASn),
 		.selectRAM(!ASn && isRAM), .selectROM(!ASn && isROM),
 		.selectSCSI(!ASn && isSCSI), .selectIWM(!ASn && isIWM),
 		.selectSCC(!ASn && isSCC),
-		.phase(phase), .hold(hold));
+		.phase(phase), .display(dut_display), .hold(hold));
 
 	fx68k cpu (
 		.clk(clk), .HALTn(1'b1), .extReset(reset), .pwrUp(reset),
@@ -173,15 +175,26 @@ module tb_cpu_wait;
 			ram['h106] = 16'h3C3C; ram['h107] = 16'h0FFF; ram['h108] = 16'h169A;
 			ram['h109] = 16'h47EB; ram['h10A] = 16'h0002; ram['h10B] = 16'h51CE;
 			ram['h10C] = 16'hFFF8; ram['h10D] = 16'h60FE;
-			// $0300 / $400300: mixed internal delays, SCC and IWM reads
+			// $02F2 / $4002F2: mixed internal delays, SCC, SCSI and IWM reads.
+			// The SCSI and IWM reads use -(a4) and -(a3): predecrement is "n nr",
+			// so its 2 internal clocks put the device read itself off the grid.
+			// An absolute or indexed read ("n np nr") follows a prefetch and is
+			// always ON it, so a missing device rule would hide there. The
+			// lsl.l d2,d0 with d2 counting up (8 + 2n clocks) slides every later
+			// access 2 clocks per iteration, so each access type meets every
+			// phase -- a fixed loop lands each access on ONE phase only, and
+			// then a missing rule can hide on a phase that needs no waits.
+			ram['h179] = 16'h7600; ram['h17A] = 16'h267C; ram['h17B] = 16'h00DF;
+			ram['h17C] = 16'hE1FF; ram['h17D] = 16'h287C; ram['h17E] = 16'h005C;
+			ram['h17F] = 16'h0000;
 			ram['h180] = 16'h247C; ram['h181] = 16'h0000; ram['h182] = 16'h2000;
 			ram['h183] = 16'h3C3C; ram['h184] = 16'h7FFF; ram['h185] = 16'hE388;
-			ram['h186] = 16'h3012; ram['h187] = 16'hE588; ram['h188] = 16'hC141;
+			ram['h186] = 16'h3012; ram['h187] = 16'hE588; ram['h188] = 16'h1224;
 			ram['h189] = 16'h1239; ram['h18A] = 16'h009F; ram['h18B] = 16'hFFF8;
-			ram['h18C] = 16'hE388; ram['h18D] = 16'h1239; ram['h18E] = 16'h00DF;
-			ram['h18F] = 16'hE1FF; ram['h190] = 16'h4E71; ram['h191] = 16'h3012;
+			ram['h18C] = 16'hE5A8; ram['h18D] = 16'h1223; ram['h18E] = 16'h4E71;
+			ram['h18F] = 16'h4E71; ram['h190] = 16'h5242; ram['h191] = 16'h3012;
 			ram['h192] = 16'h51CE; ram['h193] = 16'hFFE4;
-			for (i = 0; i < 20; i = i + 1) rom['h180 + i] = ram['h180 + i];
+			for (i = 0; i < 27; i = i + 1) rom['h179 + i] = ram['h179 + i];
 		end
 	endtask
 
@@ -191,6 +204,7 @@ module tb_cpu_wait;
 			load_programs;
 			ram[2] = start[23:16]; ram[3] = start[15:0];
 			display = d; machineType = mt; authentic = au;
+			force dut.display = d;
 			reset = 1; repeat (40) @(posedge clk); #1 reset = 0;
 			repeat (4000) @(posedge clk);                   // reset, vectors, setup
 			loop_pc = lpc; last_fetch = -1; n_periods = 0;
@@ -210,6 +224,33 @@ module tb_cpu_wait;
 		end
 	endtask
 
+	// the virtual raster: line 0 at the VBL edge, one line per sound word,
+	// lines 0-27 blank, then 266 of ~366 clocks display, and the last 8 clocks
+	// of every line the sound slot. Drive one frame and sample per line.
+	task check_raster;
+		integer ln, x, bad;
+		begin
+			bad = 0;
+			@(posedge clk) while (!enPhi1) @(posedge clk);
+			#1 vblank_n = 0;                                   // VBL
+			repeat (4) @(posedge clk);                         // one clk8 later:
+			#1 snd_adv = 1; repeat (4) @(posedge clk); #1 snd_adv = 0;  // first advance
+			for (ln = 0; ln < 370; ln = ln + 1) begin
+				for (x = 1; x < 366; x = x + 1) begin
+					repeat (4) @(posedge clk); #1;
+					if (dut_display !== ((ln >= 28 && x < 266) || x >= 358)) begin
+						if (bad < 4) $display("    RASTER line %0d clock %0d: display %b", ln, x, dut_display);
+						bad = bad + 1;
+					end
+				end
+				if (ln == 10) vblank_n = 1;
+				snd_adv = 1; repeat (4) @(posedge clk); #1 snd_adv = 0;
+			end
+			$display("  %0s virtual raster: %0d wrong samples in one frame", bad ? "FAIL" : "ok  ", bad);
+			n_bad_total = n_bad_total + bad;
+		end
+	endtask
+
 	initial begin
 		$display("tb_cpu_wait: Plus TSM wait states on the real fx68k");
 		//    name                       start      loop pc    disp SE auth period
@@ -219,13 +260,15 @@ module tb_cpu_wait;
 		run("nop loop, ROM, display",  24'h400100, 24'h400104, 1, 0, 1, 20);
 		run("PoP fill, RAM, blank",    24'h000200, 24'h000210, 0, 0, 1, 32);
 		run("PoP fill, RAM, display",  24'h000200, 24'h000210, 1, 0, 1, 56);
-		run("mixed, RAM, blank",       24'h000300, 24'h00030A, 0, 0, 1, 0);
-		run("mixed, RAM, display",     24'h000300, 24'h00030A, 1, 0, 1, 0);
-		run("mixed, ROM, blank",       24'h400300, 24'h40030A, 0, 0, 1, 0);
-		run("mixed, ROM, display",     24'h400300, 24'h40030A, 1, 0, 1, 0);
-		run("SE: mixed, RAM, display", 24'h000300, 24'h00030A, 1, 1, 1, 0);
+		run("mixed, RAM, blank",       24'h0002F2, 24'h00030A, 0, 0, 1, 0);
+		run("mixed, RAM, display",     24'h0002F2, 24'h00030A, 1, 0, 1, 0);
+		run("mixed, ROM, blank",       24'h4002F2, 24'h40030A, 0, 0, 1, 0);
+		run("mixed, ROM, display",     24'h4002F2, 24'h40030A, 1, 0, 1, 0);
+		run("SE: mixed, RAM, display", 24'h0002F2, 24'h00030A, 1, 1, 1, 0);
 		run("SE: PoP fill, display",   24'h000200, 24'h000210, 1, 1, 1, 0);
 		run("turbo: PoP fill, display",24'h000200, 24'h000210, 1, 0, 0, 30);
+		release dut.display;
+		check_raster;
 		if (n_bad_total == 0)
 			$display("PASS: %0d bus cycles checked", n_checked_total);
 		else

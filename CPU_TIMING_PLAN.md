@@ -242,7 +242,35 @@ Original Phase 1 text:
   active-display, blanking and SE cases.
 - It must FAIL on the current RTL: RAM runs at ROM speed.
 
-**Phase 2: implement.**
+**Phase 2: implement.** DONE 2026-10-12, NOT YET COMPILED.
+- `rtl/cpu_wait.v` turns each rule into a DTACK phase window. fx68k samples
+  DTACK on phi2 of S4, which sees phase = phi + 2 + waits, so it releases at
+  `target + 2`:
+  - grid: phase[1:0] = 3
+  - Plus display RAM: phase[2:0] = 7
+  - SE display RAM: grid, but not phase 3 of 16
+  - SCC: phase[2:0] = 7, and AS low for at least 2 clocks
+- It also holds the virtual raster: line 0 at the VBL, one line per
+  `snd_advance`, display from line 28 for 266 of ~366 clocks, and the last 8
+  clocks of every line for the sound slot.
+- `MacPlus.sv` ORs `cpu_wait_hold` into `_cpuDTACK`, with
+  authentic = !turbo && 68000. The 68010/68020 options are not authentic
+  machines and keep zero waits.
+- Registered in `files.qip`.
+- Gates passed:
+  - `tb_cpu_wait` PASS: 11,973 cycles, all loop periods, turbo and raster.
+  - Quartus analysis & elaboration: 0 errors, 83 warnings (the baseline),
+    none in `cpu_wait`.
+- **Mutation sweep: all 9 caught.** The windows, the SCC first-sample guard,
+  the SE video slot, the display gate, the first display line, the sound slot,
+  and the IWM and SCSI grid rules.
+- The IWM and SCSI rules first SURVIVED their mutations. Their reads were
+  absolute and indexed, and "n np nr" puts the read right after a prefetch, so
+  it is always on the grid. The bench now reads them with predecrement ("n nr"),
+  which puts the read itself off the grid. Lesson: a deterministic loop lands
+  each access on ONE phase, so a missing rule can hide on a zero-wait phase.
+
+Original Phase 2 text:
 - The wait generator goes in `addrController_top.v`, next to `busCycle`; the
   DTACK term goes in `MacPlus.sv`.
 - Model-gated on `machineType`; bypassed under `status_turbo`.
