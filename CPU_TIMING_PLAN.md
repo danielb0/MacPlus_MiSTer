@@ -388,8 +388,15 @@ not, for the 800K table and the 400K PWM map alike.
 `C:/temp/Mac/Screenshots/20261012_212144-screen.png`):** CPU 0.880 (real Plus
 0.880), Graphics 0.929 (0.933), Math 0.994 (0.996), Disk 0.745 (0.740), Old PR
 0.879, New PR 0.872. Every test within 0.7% of the real machine; the earlier
-Graphics outlier was System 7, not the core. PoP, HD20, System Picker on a copy
-and the regression set still to run.
+Graphics outlier was System 7, not the core.
+
+**PoP on bf2c0945: CLEAN at sound phase 0** (Daniel, 2026-10-12: "It was the CPU
+timing that was causing it"). The buzz was the core's missing contention, as
+Phase 0's model predicted; the phase selector was the wrong knob and the
+release drops it. Speedometer 3.23 gave an address error on quit; the real
+Plus did not, but Daniel has seen Speedometer destabilise other Systems and
+cores, so it is parked as a weak witness. HD20, System Picker on a copy and
+general stability still to run.
 
 **Also on `0bf0de6d`:** System Picker (Plus mode, System 7) crashed with error 28
 when its menu was opened mid-search, and the disk now gives error 39
