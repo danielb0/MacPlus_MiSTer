@@ -384,7 +384,8 @@ not, for the 800K table and the 400K PWM map alike.
 (0 errors, 120 warnings, slack +0.437 ns, Fitter 9,063 MB). **Floppies mount**
 (Daniel). **Floppy write passed:** formatted an 800K disk, copied Speedometer 3.23
 onto it, unmounted, remounted and ran it from there. PoP loads and quits
-repeatedly without a crash.
+repeatedly without a crash. **HD20 passed:** booted from it, copied Word 4 on,
+restarted, ran Word; the DCD byte budget needs no change under the trim.
 
 **Speedometer 3.23 on System 6.0.8, Plus mode, bf2c0945 (screenshot
 `C:/temp/Mac/Screenshots/20261012_212144-screen.png`):** CPU 0.880 (real Plus
