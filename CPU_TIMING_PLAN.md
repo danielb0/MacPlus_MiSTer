@@ -342,7 +342,24 @@ Original Phase 2 text:
 - 0 errors, 120 warnings.
 - Worst slack +0.215 ns, none negative.
 - Fitter peak 9,074 MB.
-- Awaiting hardware.
+- **HARDWARE 2026-10-12, Plus mode** (`20261012_185817-screen.png`). The menu
+  bar shows Balloon Help, so this run is on **System 7**. The real Plus and the
+  untrimmed run (`175052`, no Help menu) were on **6.0.8**.
+
+| Test | Real Plus | Untrimmed | Trimmed | x real | Predicted |
+|---|---|---|---|---|---|
+| CPU | 0.880 | 0.920 | 0.878 | 0.998 | 0.887 |
+| Graphics | 0.933 | 0.968 | 0.899 | 0.964 | 0.933 |
+| Math | 0.996 | 1.034 | 0.997 | 1.001 | 0.997 |
+| Disk | 0.740 | 0.770 | 0.737 | 0.996 | 0.742 |
+| Old PR | 0.879 | 0.916 | 0.868 | 0.987 | 0.883 |
+| New PR | 0.872 | 0.908 | 0.861 | 0.987 | 0.875 |
+
+  CPU and Math are within 0.2% of the real Plus. Graphics is 3.6% low, which
+  is the one outlier. The System differs from the reference run, and
+  Graphics is where System 7's QuickDraw patches would show. Re-run on 6.0.8
+  before reading anything into it. The PR composites are low only through
+  Graphics.
 - `cpu_wait` drops the CPU's clock (phi2 and phi1 together) for 5,168 of every
   135,408 clk8, using Bresenham, registered on phi1. That gives 130,240 CPU
   clocks per frame, as on a real Plus, so lines are 352 CPU clocks and
