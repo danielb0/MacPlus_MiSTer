@@ -67,7 +67,11 @@ module floppy
 	// the IWM's FCLK IS the CPU's C8M, so the byte timers count CPU clocks:
 	// the .Sony read loop fits that budget exactly once the core has real
 	// wait states, and misses it if bytes come 128 clk8 apart while the CPU
-	// is trimmed to 7.8336 MHz (cpu_wait.v). SDRAM acks stay on every cep.
+	// is trimmed to 7.8336 MHz (cpu_wait.v). The tachometer counts CPU clocks
+	// too: the ROM times TACH against its own clock and the periods below were
+	// calibrated to its acceptance windows (~2.5% wide, see the table), so a
+	// tach on clk8 reads 3.6% fast once the CPU is trimmed and no disk mounts.
+	// SDRAM acks stay on every cep.
 	input cpu_tick,
 
 	input _reset,
@@ -834,7 +838,7 @@ module floppy
 			driveRegs[`DRIVE_REG_TACH] <= 1'b0;
 			driveTachTimer <= 0;
 		end 
-		else if(cep) begin
+		else if(cep && cpu_tick) begin  // CPU clocks: the ROM measures TACH in them
 			if (driveTachTimer == driveTachPeriod) begin
 				driveTachTimer <= 0;
 				driveRegs[`DRIVE_REG_TACH] <= ~driveRegs[`DRIVE_REG_TACH];

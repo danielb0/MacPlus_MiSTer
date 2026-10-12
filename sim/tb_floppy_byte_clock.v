@@ -130,16 +130,43 @@ module tb_floppy_byte_clock;
       end
    endtask
 
+   // TACH half period in CPU clocks (track 0: 9996+1 timer states). The ROM
+   // times the tach against its own clock and accepts ~2.5% either side, so
+   // a tach counted in clk8 reads 3.6% fast under the trim: no mount.
+   task measure_tach(input [8*12:1] label, input integer want_cpu);
+      integer k, cc, cmin, cmax; reg prev;
+      begin
+         cmin = 1 << 30; cmax = 0;
+         prev = dut.driveRegs[7];
+         while (dut.driveRegs[7] == prev) @(posedge clk);
+         for (k = 0; k < 4; k = k + 1) begin
+            prev = dut.driveRegs[7]; cc = 0;
+            while (dut.driveRegs[7] == prev) begin
+               @(posedge clk);
+               if (cep && cpu_tick) cc = cc + 1;
+            end
+            if (cc < cmin) cmin = cc; if (cc > cmax) cmax = cc;
+         end
+         if (cmin != want_cpu || cmax != want_cpu) begin
+            $display("  FAIL %0s tach: %0d..%0d CPU clocks per half period (want %0d)", label, cmin, cmax, want_cpu);
+            fails = fails + 1;
+         end else
+            $display("  ok   %0s tach: %0d CPU clocks per half period", label, cmin);
+      end
+   endtask
+
    initial begin
       $display("tb_floppy_byte_clock: disk bytes in CPU clocks");
       repeat (20) @(posedge clk); #1 _reset = 1;
       trim = 0; repeat (2000) @(posedge clk);
       measure_reads ("untrimmed", 128, 128, 128);
       measure_writes("untrimmed", 128);
+      measure_tach  ("untrimmed", 9997);
       trim = 1; repeat (2000) @(posedge clk);
       // 128 CPU clocks with ~1 skip in 26 clk8: 132..134 clk8
       measure_reads ("trimmed", 128, 132, 134);
       measure_writes("trimmed", 128);
+      measure_tach  ("trimmed", 9997);
       if (fails == 0) $display("PASS: disk bytes are 128 CPU clocks");
       else            $display("FAIL: %0d checks", fails);
       $finish;
