@@ -281,7 +281,12 @@ Original Phase 2 text:
   SCSI back-pressure (`seam20`), and the sound-phase probe.
 - Mutation check: removing the gate must fail Phase 1.
 
-**Phase 4: hardware (compile is GATED: ask first).**
+**Phase 4: hardware (compile is GATED: ask first).** COMPILED 2026-10-12:
+`output_files/MacPlus_fa939f22_cputiming.rbf`.
+- 0 errors, 120 warnings (the debug-deck count).
+- Worst setup slack +0.380 ns, no negative slack.
+- 50% ALMs, 135/553 RAM blocks, Fitter peak 9,056 MB.
+- Awaiting the hardware results.
 - Speedometer at 8 MHz, Plus and SE modes.
 - Targets: Plus CPU about 0.91 (0.88 x 1.037 for the clock), SE about 1.02.
   Graphics and Math should fall towards 0.93 and 1.00.
