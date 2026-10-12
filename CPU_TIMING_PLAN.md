@@ -68,18 +68,41 @@ until the access falls in a CPU-owned slot:
 - **Turbo (16 MHz):** unchanged. It is the deliberate non-authentic option.
 - **No OSD option.** Authentic timing becomes the 8 MHz behaviour.
 
-**Timing reference: the core's own display, not a virtual Mac raster.** We take
-"active" from `videoTimer.v` (`_hblank`, `_vblank`), so the CPU slows down
-exactly while the beam the software can see is drawing. The core's raster is
-VGA-shaped (168 x 806 at the CPU clock, each Mac line drawn twice). Its CPU
-share per frame works out within about 2% of the real machine's:
+**Timing reference: a virtual Mac raster locked to the sound scan, NOT the core's
+display.**
 
-- **Core:** 684 x (16 + 10) + 122 x 42 - 370 = 22,538 slots in 135,408 clocks,
-  which is 0.666.
-- **Real Plus:** 21,246 x 4 / 130,240 = 0.652.
+- One virtual line = one sound word (the existing `audioAddr` advance, about 366
+  clocks on the core).
+- Line 0 starts at the VBL, when the scan is at word 0.
+- Lines 0-27 are blanking.
+- Lines 28-369 are active for the first 256/352 of each line.
 
-A virtual 352 x 370 counter would match the real ratio exactly. But it would
-drift against the frame that VBL-synchronised software actually sees.
+On a real Plus the line counter that drives video also drives the sound address
+and the VBL. Contention, the sound scan and the VBL are therefore one clock
+domain, and the software that is timing-critical is all timed against that
+domain: VBL-driven buffer fillers and the mouse-interrupt load against the
+sound buffer.
+
+We rejected the core's own display (`videoTimer.v` `_hblank`/`_vblank`) as the
+reference. It has about 56 words of blanking after the VBL instead of 28, so a
+fill routine that the real machine slows down at line 28 would run uncontended
+on the core. The displayed beam position was never authentic on the core, so
+we lose nothing visible.
+
+The CPU share per frame with the virtual raster is the real 0.652. The core's
+display would have given 0.666.
+
+**Worked prediction: PoP.**
+- The music fill writes words 37-369, then 0-36, at 30 clocks per word,
+  starting at about word 2.5 after the VBL.
+- Uncontended, it wraps at line ~31 and overwrites words 31-36 before they are
+  read. That is the buzz.
+- With contention from line 28, its last ~34 words run at roughly 2x, so the
+  wrap moves to about line 34. The overwritten range shrinks to 34-36 and the
+  buzz remains at phase 0, which agrees with the PAL result.
+- PoP becomes clean at phase 0 only if it costs at least 36.5 clocks per word
+  overall, i.e. Phase 0 finds alignment waits in blanking. That would contradict
+  "a real Plus buzzes", and the real Plus (recapped) can settle it by ear.
 
 **Mechanism.** We hold DTACK and the CPU stays in S4/S5. `dataController_top.sv`
 re-latches `cpu_data` on every CPU slot from the held address, so reads stay
@@ -140,6 +163,13 @@ correct. Writes repeat harmlessly. Turbo's `turbo_dtack_en` and the SCSI
   change. A PLL change moves video, so prefer the wait state.
 
 ## Risks
+
+- **Everything calibrated on the fast core must be re-measured.** Anything
+  whose timing is pinned to CPU speed moves. That includes the sound-phase
+  results: interrupt latency lat = 2-3 words, the Bard's Tale bracket
+  29 < S <= 57, and the PoP/Lemmings phase table. It also includes the
+  mouse-fix sound margins. Re-run the `sound-phase` step-4 regression set on
+  this branch before either branch goes upstream.
 
 - **Lemmings sound margin.** The mouse-fix measurements (4 words at phase 0,
   Very Slow) were taken on the fast core. A slower CPU spends longer in the
