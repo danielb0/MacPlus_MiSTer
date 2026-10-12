@@ -80,6 +80,23 @@ reads. Assumption: the same 4-clock grid, with display RAM losing one 4-clock
 slot in four (16-clock period) instead of one in two. The acceptance test is
 Speedometer against the real SE's 0.98.
 
+**SE caveats: everything for the SE is assumption, and only the average is
+testable.**
+1. **The bus grid is assumed.** No BBU logic exists to simulate.
+2. **Sound phase 0 is a Plus result.** It came from the Plus LAG PAL, schematic
+   and ROM. The SE generates VSYNC and the sound scan inside the BBU, and its
+   phase has never been checked.
+3. **The interrupt latency is unmeasured.** The SE's VBL handler also services
+   ADB, so lat is probably longer.
+4. **PoP on the SE is marginal.** Under the assumed timing a display word costs
+   37-40 clocks against the Plus's 56. That is clean for lat >= 3 words, or for
+   40+ clocks per word, but word 36 is overwritten at 36 clocks with lat 2-2.5.
+   The Plus margin is wide; the SE margin is not.
+5. **There is no real SE to test on.** The only acceptance check is Speedometer
+   CPU against Low End Mac's 0.98 (System 7.5.5, Speedometer 3.06). That tests
+   the average slowdown, not the alignment or the sound phase. PoP-on-SE
+   results from the core say nothing about a real SE.
+
 **128K/512K:** BMU0 instead of BMU2, but the same TSM design ("still the same
 design", Jecel). They use the Plus rules.
 
