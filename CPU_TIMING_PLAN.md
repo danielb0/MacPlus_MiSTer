@@ -356,7 +356,29 @@ SDRAM acks and everything else stay on every cep.
 - 0 errors, 120 warnings.
 - Worst slack +0.191 ns, none negative.
 - Fitter peak 9,058 MB.
-- Awaiting hardware.
+- **HARDWARE 2026-10-12: still no floppy mount** (Daniel).
+
+**Second half of the regression: the TACH (`bf2c094`).** The byte rate was
+only half of it. The ROM times the drive's TACH against its own clock, and
+floppy.v's per-track periods (9996 clk8 on track 0) were calibrated on Plus
+Too to land the ROM's timing value at $117B inside an acceptance window of
+$1135-$11E9, about 2.5% either side. Counted in clk8 with the CPU trimmed,
+the half period is 9615 CPU clocks, 3.8% short: the timing value lands
+below the window and the drive never passes the speed check. (The ROM holds
+no literal copy of those window words; the Plus Too calibration note is the
+evidence that it measures in CPU time.) The tach timer now ticks on
+`cpu_tick` too, so the ROM sees the hardware-proven 9996 again, trimmed or
+not, for the 800K table and the 400K PWM map alike.
+- `sim/tb_floppy_byte_clock.v` now measures the tach half period in CPU
+  clocks: 9997 both ways with the gate, 9615 trimmed without it.
+- `sim/tb_drive_tach.v` 11/11 unchanged.
+- Everything else in the floppy/IWM path was checked for the same exposure:
+  the IWM read-latch clear (14 cen = 1.75 us against a 2.04 us poll gap, margin
+  improves under the trim), step/motor/eject strobes (edge-driven), SDRAM
+  acks (real time). The DCD byte budget sits on clk8 and is handshake-driven;
+  HD20 goes on the regression list.
+- Rule, sharpened: anything the ROM MEASURES in its own clock must count CPU
+  clocks, not just things the real machine clocks from C8M.
 
 **Also on `0bf0de6d`:** System Picker (Plus mode, System 7) crashed with error 28
 when its menu was opened mid-search, and the disk now gives error 39
