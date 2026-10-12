@@ -633,7 +633,7 @@ assign wc_ext_wr_ack  = slot3_ext_ack & ~ldr_ext_wr_req;
 wire wp_int = ~status[6] | ldr_int_readonly;
 wire wp_ext = ~status[6] | ldr_ext_readonly;
 
-wire cpu_wait_hold;  // see cpu_wait below
+wire cpu_wait_hold, cpu_skip;  // see cpu_wait below
 
 // dtack generation in turbo mode
 reg  turbo_dtack_en, cpuBusControl_d;
@@ -660,14 +660,15 @@ assign      _cpuVPA = (cpuFC == 3'b111) ? 1'b0 : ~(!_cpuAS && cpuAddr[23:21] == 
 // and thereby releases the hold.
 assign      _cpuDTACK = ~(!_cpuAS && cpuAddr[23:21] != 3'b111) | (status_turbo & !turbo_dtack_en) | scsi_bus_hold | cpu_wait_hold;
 
-wire        cpu_en_p      = status_turbo ? clk16_en_p : clk8_en_p;
-wire        cpu_en_n      = status_turbo ? clk16_en_n : clk8_en_n;
+wire        cpu_en_p      = status_turbo ? clk16_en_p : clk8_en_p & !cpu_skip;
+wire        cpu_en_n      = status_turbo ? clk16_en_n : clk8_en_n & !cpu_skip;
 
 wire        is68000       = status_cpu == 0;
 
 // The real machines' wait states at 8 MHz (CPU_TIMING_PLAN.md): RAM and ROM
 // on the TSM's 4-clock grid, display RAM on video's alternate slots, the SCC
-// on C1M. Turbo and the 68010/68020 options keep today's zero-wait timing.
+// on C1M, and the CPU clock trimmed from 8.125 to the real 7.8336 MHz per
+// frame. Turbo and the 68010/68020 options keep today's timing.
 cpu_wait cpu_wait
 (
 	.clk         ( clk_sys                  ),
@@ -684,7 +685,8 @@ cpu_wait cpu_wait
 	.selectSCC   ( selectSCC                ),
 	.phase       (                          ),
 	.display     (                          ),
-	.hold        ( cpu_wait_hold            )
+	.hold        ( cpu_wait_hold            ),
+	.cpu_skip    ( cpu_skip                 )
 );
 assign      _cpuReset_o   = is68000 ? fx68_reset_n : tg68_reset_n;
 assign      _cpuRW        = is68000 ? fx68_rw : tg68_rw;

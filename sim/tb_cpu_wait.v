@@ -30,10 +30,13 @@ module tb_cpu_wait;
 	always #5 clk = ~clk;
 
 	// the core's clock enables (addrController_top.v): phi1 at busPhase 3
+	// cpu_skip drops whole CPU clocks (both phases), as MacPlus.sv does
 	reg [1:0] busPhase = 0;
 	always @(posedge clk) busPhase <= busPhase + 2'd1;
-	wire enPhi1 = busPhase == 2'b11;
-	wire enPhi2 = busPhase == 2'b01;
+	wire clk8_en_p = busPhase == 2'b11;
+	wire cpu_skip;
+	wire enPhi1 = clk8_en_p && !cpu_skip;
+	wire enPhi2 = busPhase == 2'b01 && !cpu_skip;
 
 	reg         reset = 1;
 	reg         display = 0, machineType = 0, authentic = 1;
@@ -62,13 +65,13 @@ module tb_cpu_wait;
 	wire       hold, dut_display;
 	reg        vblank_n = 1, snd_adv = 0;
 	cpu_wait dut (
-		.clk(clk), .clk8_en_p(enPhi1), .authentic(authentic),
+		.clk(clk), .clk8_en_p(clk8_en_p), .authentic(authentic),
 		.machineType(machineType), ._vblank(vblank_n), .snd_advance(snd_adv),
 		._cpuAS(ASn),
 		.selectRAM(!ASn && isRAM), .selectROM(!ASn && isROM),
 		.selectSCSI(!ASn && isSCSI), .selectIWM(!ASn && isIWM),
 		.selectSCC(!ASn && isSCC),
-		.phase(phase), .display(dut_display), .hold(hold));
+		.phase(phase), .display(dut_display), .hold(hold), .cpu_skip(cpu_skip));
 
 	fx68k cpu (
 		.clk(clk), .HALTn(1'b1), .extReset(reset), .pwrUp(reset),
@@ -227,9 +230,18 @@ module tb_cpu_wait;
 	// the virtual raster: line 0 at the VBL edge, one line per sound word,
 	// lines 0-27 blank, then 266 of ~366 clocks display, and the last 8 clocks
 	// of every line the sound slot. Drive one frame and sample per line.
+	// CPU clocks since the last sound advance, counted independently of the DUT
+	integer gx = 0;
+	always @(posedge clk) if (clk8_en_p) begin
+		if (snd_adv) gx <= 0;
+		else if (!cpu_skip) gx <= gx + 1;
+	end
+
 	task check_raster;
-		integer ln, x, bad;
+		integer ln, x, bad, gmax, gmin;
 		begin
+			gmax = 0; gmin = 1 << 30;
+			authentic = 1; machineType = 0;                     // the turbo run left it 0
 			bad = 0;
 			@(posedge clk) while (!enPhi1) @(posedge clk);
 			#1 vblank_n = 0;                                   // VBL
@@ -238,15 +250,54 @@ module tb_cpu_wait;
 			for (ln = 0; ln < 370; ln = ln + 1) begin
 				for (x = 1; x < 366; x = x + 1) begin
 					repeat (4) @(posedge clk); #1;
-					if (dut_display !== ((ln >= 28 && x < 266) || x >= 358)) begin
-						if (bad < 4) $display("    RASTER line %0d clock %0d: display %b", ln, x, dut_display);
+					if (dut_display !== ((ln >= 28 && gx < 256) || gx >= 344)) begin
+						if (bad < 4) $display("    RASTER line %0d CPU clock %0d: display %b", ln, gx, dut_display);
 						bad = bad + 1;
 					end
 				end
 				if (ln == 10) vblank_n = 1;
+				if (ln > 0 && gx > gmax) gmax = gx;
+				if (ln > 0 && gx < gmin) gmin = gx;
 				snd_adv = 1; repeat (4) @(posedge clk); #1 snd_adv = 0;
 			end
-			$display("  %0s virtual raster: %0d wrong samples in one frame", bad ? "FAIL" : "ok  ", bad);
+			// 366 clk8 lines less their skips must be the real 352 CPU clocks
+			if (gmin < 351 || gmax > 353) begin
+				$display("    RASTER line length %0d..%0d CPU clocks, want ~352", gmin + 1, gmax + 1);
+				bad = bad + 1;
+			end
+			$display("  %0s virtual raster: %0d wrong samples in one frame, lines %0d..%0d CPU clocks",
+			         bad ? "FAIL" : "ok  ", bad, gmin + 1, gmax + 1);
+			n_bad_total = n_bad_total + bad;
+		end
+	endtask
+
+	// 135,408 clk8 (one core frame) must hold exactly 130,240 CPU clocks (a
+	// real Plus frame), never two skips in a row, gaps of 26 or 27 clk8
+	task check_skip_rate;
+		integer i, cpu, last, gap, gmin, gmax, bad;
+		begin
+			authentic = 1; cpu = 0; last = -1; gmin = 1 << 30; gmax = 0; bad = 0;
+			for (i = 0; i < 135408; i = i + 1) begin
+				@(posedge clk); while (!clk8_en_p) @(posedge clk);
+				if (!cpu_skip) cpu = cpu + 1;
+				else begin
+					if (last >= 0) begin
+						gap = i - last;
+						if (gap < gmin) gmin = gap;
+						if (gap > gmax) gmax = gap;
+					end
+					last = i;
+				end
+			end
+			if (cpu != 130240 || gmin < 26 || gmax > 27) bad = 1;
+			$display("  %0s CPU clock trim: %0d CPU clocks in 135408 clk8 (want 130240), skip gaps %0d..%0d",
+			         bad ? "FAIL" : "ok  ", cpu, gmin, gmax);
+			authentic = 0;
+			for (i = 0; i < 1000; i = i + 1) begin
+				@(posedge clk); while (!clk8_en_p) @(posedge clk);
+				#1 if (cpu_skip) bad = bad + 1;
+			end
+			if (bad > 1) $display("  FAIL turbo: CPU clock skipped");
 			n_bad_total = n_bad_total + bad;
 		end
 	endtask
@@ -269,6 +320,7 @@ module tb_cpu_wait;
 		run("turbo: PoP fill, display",24'h000200, 24'h000210, 1, 0, 0, 30);
 		release dut.display;
 		check_raster;
+		check_skip_rate;
 		if (n_bad_total == 0)
 			$display("PASS: %0d bus cycles checked", n_checked_total);
 		else

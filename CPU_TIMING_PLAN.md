@@ -286,7 +286,9 @@ Original Phase 2 text:
 - 0 errors, 120 warnings (the debug-deck count).
 - Worst setup slack +0.380 ns, no negative slack.
 - 50% ALMs, 135/553 RAM blocks, Fitter peak 9,056 MB.
-- **HARDWARE 2026-10-12: ALL TESTS PASS** (Daniel), PoP included.
+- **HARDWARE 2026-10-12: ALL TESTS PASS** (Daniel).
+- PoP is "much cleaner than it was; hard to say whether it is perfect".
+  Improved, NOT confirmed clean. The expanded-RAM real Plus is the reference.
 - Speedometer 3.2, Plus mode, 8 MHz, against the real Plus 0.880 / 0.933 / 0.996
   (`C:/temp/Mac/Screenshots/20261012_175052-screen.png`):
 
@@ -302,7 +304,21 @@ Original Phase 2 text:
   (8.125 / 7.8336 MHz) and nothing else: divided out, Graphics and Math match
   to the third decimal and CPU is within 0.8%. The contention model is complete;
   the remaining error is Phase 5.
-- SE-mode figures not yet reported.
+- **SE mode** (`20261012_182026-screen.png`; the menu bar shows System 7, NOT
+  6.0.8). Against Low End Mac's real SE 0.98 / 0.98 / 0.99 (Speedometer 3.06,
+  System 7.5.5):
+
+| Test | Real SE | Core before | `fa939f22` | x real | After the trim (/1.0372) |
+|---|---|---|---|---|---|
+| CPU | 0.98 | 1.30 | 0.981 | 1.001 | ~0.946 (x0.965) |
+| Graphics | 0.98 | 1.08 | 0.944 | 0.963 | ~0.910 (x0.929) |
+| Math | 0.99 | 1.05 | 0.960 | 0.970 | ~0.926 (x0.935) |
+
+  After Phase 5 the SE will be 3.5-7% SLOW, most of it on the ROM-heavy tests.
+  One reading is that the BBU does not impose the TSM's 4-clock grid, at least
+  not on ROM. But the reference differs from our run in Speedometer version and
+  in System, so it is weak. Do NOT change the SE rule on this alone. The
+  decisive data point is a real SE on Speedometer 3.2 under the same System.
 - Speedometer at 8 MHz, Plus and SE modes.
 - Targets: Plus CPU about 0.91 (0.88 x 1.037 for the clock), SE about 1.02.
   Graphics and Math should fall towards 0.93 and 1.00.
@@ -315,7 +331,26 @@ Original Phase 2 text:
   - Bard's Tale
   - Erase Disk
 
-**Phase 5 (optional): the 3.7% clock.**
+**Phase 5 (optional): the 3.7% clock.** IMPLEMENTED 2026-10-12, NOT COMPILED.
+- `cpu_wait` drops the CPU's clock (phi2 and phi1 together) for 5,168 of every
+  135,408 clk8, using Bresenham, registered on phi1. That gives 130,240 CPU
+  clocks per frame, as on a real Plus, so lines are 352 CPU clocks and
+  sound samples 352 per word.
+- Video, sound, IWM and SCC stay on clk8. The VIA follows E, so it slows too.
+  That gives the real 13,024 E ticks per frame and closes the
+  "VIA ticks per sound sample 36.6 vs 35.2" deviation.
+- Phase, AS age and raster x now count CPU clocks. The raster thresholds are
+  the real 256/344.
+- Turbo and the 68010/68020 options are untouched.
+- Gates passed:
+  - bench PASS: 130,240/135,408, skip gaps 26-27, lines 352-353 CPU clocks
+  - all wait checks still pass with skipping active
+  - 5/5 new mutations caught
+  - elaboration 0 errors, 83 warnings
+- Prediction: the Plus-mode Speedometer goes from x1.04 to x1.00 of the real
+  Plus (CPU ~0.887, Graphics ~0.933, Math ~0.997).
+
+Original Phase 5 text:
 - Only if Phase 4 lands within the clock error and the user wants the last few
   percent.
 - Options: an occasional extra wait state (one in about 27 slots), or a PLL
