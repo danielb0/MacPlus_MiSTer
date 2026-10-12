@@ -380,6 +380,10 @@ not, for the 800K table and the 400K PWM map alike.
 - Rule, sharpened: anything the ROM MEASURES in its own clock must count CPU
   clocks, not just things the real machine clocks from C8M.
 
+**COMPILED + HARDWARE 2026-10-12: `output_files/MacPlus_bf2c0945_tachfix.rbf`**
+(0 errors, 120 warnings, slack +0.437 ns, Fitter 9,063 MB). **Floppies mount**
+(Daniel). Speedometer on 6.0.8, PoP, HD20 and the regression set still to run.
+
 **Also on `0bf0de6d`:** System Picker (Plus mode, System 7) crashed with error 28
 when its menu was opened mid-search, and the disk now gives error 39
 (probably -39 eofErr). No SCSI mechanism found: ncr5380 is edge-driven off
