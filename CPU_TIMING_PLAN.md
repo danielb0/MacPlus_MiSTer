@@ -46,25 +46,62 @@ lines, 342 active; 60.15 Hz; one RAM cycle = 4 clocks):
 
 Both match the Guide, so the slot model is right at the level of averages.
 
-**Not yet settled: alignment.** Real RAM cycles run on a fixed 4-clock grid set
-by the TSM PAL. The 68000 can begin a bus cycle 2 clocks off that grid after an
-internal operation. The open question is whether it then waits for the next grid
-slot, and whether that applies in blanking and to ROM too. If it does, that is a
-cost on top of the bandwidth average and could account for several percent.
-This is the open question from the 2026-10-11 analysis; Phase 0 settles it from
-the PAL equations.
+**Alignment: SETTLED by Phase 0 (2026-10-12).** The TSM snaps every RAM and
+ROM bus cycle to a grid, in blanking as well as display. Let phi be the C8M
+clock (0-7) within the 1 MHz C1M period at which the bus cycle's S0 falls. The
+wait states are then:
+
+| Access | Waits | Effect |
+|---|---|---|
+| ROM (also IWM and SCSI, which the BMU decodes as /ROM) | (1 - phi) mod 4 | 4-clock grid |
+| RAM, blanking | (1 - phi) mod 4 | 4-clock grid |
+| RAM, display | (5 - phi) mod 8 | one CPU slot per 8 clocks |
+| SCC (/RAM and /ROM both low) | 1 + (4 - phi) mod 8 | C1M sync, at least 1 wait |
+
+These are the wait states between S4 and S5. Back-to-back cycles stay on the
+grid at no cost, so the Guide's 2.56 and 3.92 MB/s averages are reproduced.
+A cycle that starts 2 clocks off the grid, which happens after any 2-clock
+internal operation, pays 2 extra clocks. That applies to ROM and in blanking,
+where the core today pays nothing. It is the "unexplained remainder" from
+2026-10-11, and it is why Graphics and Math (ROM-heavy) are also ~1.2x fast on
+the core.
+
+The result is the same with 0 and 2 half-C16M steps of CPU-to-PAL delay, so it
+is a property of the equations, not of the timing assumptions. Free-running
+outputs are also consistent: C1M 1 MHz, C2M 2 MHz, one RAS per 4 clocks, and
+a video CAS once per C1M during display. Model: `scripts/tsm_pal_model.py`.
+It matches Jecel's account (`C:/temp/Mac/PALs/mac512.html`): during display "wait
+states were inserted to make memory access take up eight full clocks", and in
+retrace the CPU runs at full speed.
+
+**SE: no equations exist** (the BBU is a gate array). Jecel says the SE's memory
+timing "was unchanged from the original design" apart from page-mode video
+reads. Assumption: the same 4-clock grid, with display RAM losing one 4-clock
+slot in four (16-clock period) instead of one in two. The acceptance test is
+Speedometer against the real SE's 0.98.
+
+**128K/512K:** BMU0 instead of BMU2, but the same TSM design ("still the same
+design", Jecel). They use the Plus rules.
 
 ## Target design
 
-A wait-state generator that holds `_cpuDTACK` on CPU **RAM** accesses at 8 MHz
-until the access falls in a CPU-owned slot:
+A wait-state generator that holds `_cpuDTACK` at 8 MHz until the access falls
+on its grid point, per the Phase 0 table:
 
-- **Slot grid:** 4 CPU clocks per slot, the core's existing `busCycle` period.
+- **Slot grid:** 4 CPU clocks per slot, the core's existing `busCycle` period,
+  plus one bit for the 8-clock C1M period.
 - **Active display:** on the Plus, 128K and 512K (`machineType = 0`) every other
   slot belongs to video. On the SE (`machineType = 1`) one slot in four does.
 - **Blanking:** every slot belongs to the CPU, except one sound/disk-speed slot
   per Mac scan line.
-- **ROM and I/O:** unchanged, unless Phase 0 shows a grid wait for ROM.
+- **ROM, IWM and SCSI:** the 4-clock grid always. Display never affects them.
+- **SCC:** C1M sync, at least one wait.
+- **VIA:** unchanged. It is VPA/E-clock synchronised, which fx68k already models.
+- **SCSI back-pressure:** `scsi_bus_hold` stays ORed in on top.
+
+Because each rule is "waits = (target - phi) mod G", DTACK reduces to a fixed
+phase window: assert it only when the S4 sampling edge falls at the grid point.
+That is a gate on a phase counter, not a state machine.
 - **Turbo (16 MHz):** unchanged. It is the deliberate non-authentic option.
 - **No OSD option.** Authentic timing becomes the 8 MHz behaviour.
 
@@ -101,8 +138,13 @@ display would have given 0.666.
   wrap moves to about line 34. The overwritten range shrinks to 34-36 and the
   buzz remains at sound phase 0, which agrees with the PAL result.
 - PoP becomes clean at sound phase 0 only if it costs at least 36.5 clocks per
-  word overall, i.e. plan Phase 0 finds alignment waits in blanking. That would contradict
-  "a real Plus buzzes", and the real Plus (recapped) can settle it by ear.
+  word overall. **Phase 0 found the grid in blanking, so this is now OPEN.** A
+  30-clock loop cannot keep a 30-clock period on a 4-clock grid. It becomes at
+  least 32 clocks, and could be 36 or more, depending on where its bus cycles
+  fall. At 32 PoP still buzzes. At 36 or more the wrap reaches line 37 and PoP
+  is CLEAN at sound phase 0. The fill loop's exact instructions decide this:
+  decode them from MDRV (`scripts/mdrv_unpack.py`) and time them against the
+  table before predicting. The real Plus (expanded RAM) settles it by ear.
 
 **Sound tests run at Sound Scan Phase 0 only.** That is the real machine's
 setting, settled from the PALs on 2026-09-21: the scan is at word 0 when the VBL
@@ -117,7 +159,8 @@ correct. Writes repeat harmlessly. Turbo's `turbo_dtack_en` and the SCSI
 
 ## Phases
 
-**Phase 0: settle the real timing from the PALs (no RTL).**
+**Phase 0: settle the real timing from the PALs (no RTL).** DONE 2026-10-12,
+see "Alignment" above.
 - Transcribe the TSM (16R4) JED2EQN equations from `C:/temp/Mac/PALs/pals.txt`
   into a cycle model clocked at C16M. Pin map: i2 C16M, i3 C8M, i4 VID/u*,
   i5 /RAM, i6 /ROM, i7 /AS, i8 /UDS, i9 /LDS; rf14 /RAS, rf15 TC, rf16 C1M,
