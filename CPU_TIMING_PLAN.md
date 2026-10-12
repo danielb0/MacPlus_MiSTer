@@ -337,7 +337,12 @@ Original Phase 2 text:
   - Bard's Tale
   - Erase Disk
 
-**Phase 5 (optional): the 3.7% clock.** IMPLEMENTED 2026-10-12, NOT COMPILED.
+**Phase 5 (optional): the 3.7% clock.** COMPILED 2026-10-12:
+`output_files/MacPlus_0bf0de6d_cputrim.rbf`.
+- 0 errors, 120 warnings.
+- Worst slack +0.215 ns, none negative.
+- Fitter peak 9,074 MB.
+- Awaiting hardware.
 - `cpu_wait` drops the CPU's clock (phi2 and phi1 together) for 5,168 of every
   135,408 clk8, using Bresenham, registered on phi1. That gives 130,240 CPU
   clocks per frame, as on a real Plus, so lines are 352 CPU clocks and
