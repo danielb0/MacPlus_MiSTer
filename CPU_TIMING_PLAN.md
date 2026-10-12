@@ -382,7 +382,7 @@ not, for the 800K table and the 400K PWM map alike.
 
 **COMPILED + HARDWARE 2026-10-12: `output_files/MacPlus_bf2c0945_tachfix.rbf`**
 (0 errors, 120 warnings, slack +0.437 ns, Fitter 9,063 MB). **Floppies mount**
-(Daniel).
+(Daniel). Floppy WRITE not yet tested: Erase Disk plus a file copy is the test.
 
 **Speedometer 3.23 on System 6.0.8, Plus mode, bf2c0945 (screenshot
 `C:/temp/Mac/Screenshots/20261012_212144-screen.png`):** CPU 0.880 (real Plus
