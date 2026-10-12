@@ -382,7 +382,14 @@ not, for the 800K table and the 400K PWM map alike.
 
 **COMPILED + HARDWARE 2026-10-12: `output_files/MacPlus_bf2c0945_tachfix.rbf`**
 (0 errors, 120 warnings, slack +0.437 ns, Fitter 9,063 MB). **Floppies mount**
-(Daniel). Speedometer on 6.0.8, PoP, HD20 and the regression set still to run.
+(Daniel).
+
+**Speedometer 3.23 on System 6.0.8, Plus mode, bf2c0945 (screenshot
+`C:/temp/Mac/Screenshots/20261012_212144-screen.png`):** CPU 0.880 (real Plus
+0.880), Graphics 0.929 (0.933), Math 0.994 (0.996), Disk 0.745 (0.740), Old PR
+0.879, New PR 0.872. Every test within 0.7% of the real machine; the earlier
+Graphics outlier was System 7, not the core. PoP, HD20, System Picker on a copy
+and the regression set still to run.
 
 **Also on `0bf0de6d`:** System Picker (Plus mode, System 7) crashed with error 28
 when its menu was opened mid-search, and the disk now gives error 39
