@@ -352,10 +352,21 @@ SDRAM acks and everything else stay on every cep.
 - The seven floppy/IWM benches pass with `cpu_tick` = 1.
 - Elaboration 0 errors, 83 warnings.
 
+**COMPILED 2026-10-12: `output_files/MacPlus_aaa8db7d_floppyfix.rbf`.**
+- 0 errors, 120 warnings.
+- Worst slack +0.191 ns, none negative.
+- Fitter peak 9,058 MB.
+- Awaiting hardware.
+
 **Also on `0bf0de6d`:** System Picker (Plus mode, System 7) crashed with error 28
 when its menu was opened mid-search, and the disk now gives error 39
 (probably -39 eofErr). No SCSI mechanism found: ncr5380 is edge-driven off
-the CPU strobes on the 32.5 MHz clock, as asynchronous as a real 5380. Open:
+the CPU strobes on the 32.5 MHz clock, as asynchronous as a real 5380. **Daniel ran the same System Picker search, menu included, on the REAL Plus
+from another copy of the image: no crash.** So the crash is core- or
+build-specific. The real Plus has 1 MB, and more RAM makes error 28 less
+likely, not more. Prime suspect: the broken floppy driver on that build
+(a deep retry chain blowing the stack). The damaged image was deleted.
+Open:
 retest on the floppy-fixed build with a COPY of the image, and bisect on
 `fa939f22` if it recurs. `hfs_integrity.py` on the damaged image would tell
 crash damage (catalog/Desktop) from transfer damage (scattered bytes).
