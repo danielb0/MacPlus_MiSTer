@@ -288,7 +288,13 @@ Original Phase 2 text:
 - 50% ALMs, 135/553 RAM blocks, Fitter peak 9,056 MB.
 - **HARDWARE 2026-10-12: ALL TESTS PASS** (Daniel).
 - PoP is "much cleaner than it was; hard to say whether it is perfect".
-  Improved, NOT confirmed clean. The expanded-RAM real Plus is the reference.
+  At higher volume (Daniel, 2026-10-12): **"no buzzing ... a bit of lofi
+  sizzle"** in Plus mode, and "perfect" in SE mode. **The buzz prediction holds:
+  the splice is gone.** The sizzle is the expected asset ceiling: an 11 kHz
+  8-bit wavetable, pitch-shifted by nearest neighbour and mixed in software.
+  The SE run may be on the 22 kHz driver (PoP chooses it by System version and
+  machine type, and that run was under System 7); not checked. The
+  expanded-RAM real Plus is still the independent reference.
 - Speedometer 3.2, Plus mode, 8 MHz, against the real Plus 0.880 / 0.933 / 0.996
   (`C:/temp/Mac/Screenshots/20261012_175052-screen.png`):
 
