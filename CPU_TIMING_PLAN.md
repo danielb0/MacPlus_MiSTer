@@ -99,10 +99,16 @@ display would have given 0.666.
   read. That is the buzz.
 - With contention from line 28, its last ~34 words run at roughly 2x, so the
   wrap moves to about line 34. The overwritten range shrinks to 34-36 and the
-  buzz remains at phase 0, which agrees with the PAL result.
-- PoP becomes clean at phase 0 only if it costs at least 36.5 clocks per word
-  overall, i.e. Phase 0 finds alignment waits in blanking. That would contradict
+  buzz remains at sound phase 0, which agrees with the PAL result.
+- PoP becomes clean at sound phase 0 only if it costs at least 36.5 clocks per
+  word overall, i.e. plan Phase 0 finds alignment waits in blanking. That would contradict
   "a real Plus buzzes", and the real Plus (recapped) can settle it by ear.
+
+**Sound tests run at Sound Scan Phase 0 only.** That is the real machine's
+setting, settled from the PALs on 2026-09-21: the scan is at word 0 when the VBL
+fires. The other phase settings are enhancements, not what a Plus does, so a
+result there says nothing about authenticity. ("Sound phase 0" is the OSD
+setting; "Phase 0" alone is this plan's first phase.)
 
 **Mechanism.** We hold DTACK and the CPU stays in S4/S5. `dataController_top.sv`
 re-latches `cpu_data` on every CPU slot from the held address, so reads stay
@@ -147,13 +153,13 @@ correct. Writes repeat harmlessly. Turbo's `turbo_dtack_en` and the SCSI
 - Speedometer at 8 MHz, Plus and SE modes.
 - Targets: Plus CPU about 0.91 (0.88 x 1.037 for the clock), SE about 1.02.
   Graphics and Math should fall towards 0.93 and 1.00.
-- Regression set:
+- Regression set, all sound tests at sound phase 0:
   - chime and boot from floppy, HD20 and SCSI
   - CD audio
   - Lode Runner
   - PoP
   - Lemmings sound margin (see Risks)
-  - Bard's Tale at phase 0
+  - Bard's Tale
   - Erase Disk
 
 **Phase 5 (optional): the 3.7% clock.**
@@ -166,16 +172,16 @@ correct. Writes repeat harmlessly. Turbo's `turbo_dtack_en` and the SCSI
 
 - **Everything calibrated on the fast core must be re-measured.** Anything
   whose timing is pinned to CPU speed moves. That includes the sound-phase
-  results: interrupt latency lat = 2-3 words, the Bard's Tale bracket
-  29 < S <= 57, and the PoP/Lemmings phase table. It also includes the
-  mouse-fix sound margins. Re-run the `sound-phase` step-4 regression set on
+  results at sound phase 0: interrupt latency lat = 2-3 words, PoP buzzing,
+  Lemmings and Bard's Tale clean. It also includes the mouse-fix sound margins. Re-run the `sound-phase` step-4 regression set on
   this branch before either branch goes upstream.
 
-- **Lemmings sound margin.** The mouse-fix measurements (4 words at phase 0,
+- **Lemmings sound margin.** The mouse-fix measurements (4 words at sound phase 0,
   Very Slow) were taken on the fast core. A slower CPU spends longer in the
   mouse interrupt per frame, so the margin will shrink and may go negative. That
-  would be the authentic behaviour, but it must be measured, not assumed. The
-  phase selector is the instrument, as before.
+  would be the authentic behaviour, but it must be measured, not assumed.
+  Pass/fail is judged at sound phase 0. The phase selector may still be used to
+  MEASURE the margin, as before, but not as the configuration under test.
 - **Timing-tuned drivers.** DCD, floppy and SCSI pseudo-DMA were all
   hardware-tested on the fast core. A slower CPU moves them TOWARDS what the ROM
   was written for, so failures are unlikely but possible where we tuned a
