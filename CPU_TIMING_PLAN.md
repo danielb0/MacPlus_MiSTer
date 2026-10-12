@@ -387,6 +387,20 @@ onto it, unmounted, remounted and ran it from there. PoP loads and quits
 repeatedly without a crash. **HD20 passed:** booted from it, copied Word 4 on,
 restarted, ran Word; the DCD byte budget needs no change under the trim.
 
+**SE mode on bf2c0945, System 6 (2026-10-13, screenshot
+`C:/temp/Mac/Screenshots/20261013_000020-screen.png`):** CPU 0.945 Graphics 0.934
+Math 0.925 Disk 0.738 Old PR 0.899 New PR 0.890. Against Low End Mac's real SE
+(Speedometer 3.06, System 7.5.5: 0.98 / 0.98 / 0.99) that is CPU -3.6%, Gfx
+-4.7%, Math -6.6%: the slowdown predicted when the SE rule was written, ROM-heavy
+tests worst. Untrimmed fa939f22 in SE mode read CPU 0.981, i.e. the SE wait model
+is ~4% too heavy once the clock is right (our SE/Plus CPU ratio 1.07 vs real
+1.11). Guide 2nd ed.: Table 5-3 RAM rate Plus 2.56 / SE 3.2 MB/s (what the model
+reproduces), Table 5-9 ROM rate Plus = SE = 3.92 MB/s (nominal 4-clock figure,
+so it does not say whether the BBU grids ROM), and the only wait-state text is
+about the IIfx cache. The SE rule stays an assumption: no change without a
+matched real-SE run (Speedometer 3.23, 6.0.8) or BBU timing documentation. The
+forum is the cheapest source of that run.
+
 **Speedometer 3.23 on System 6.0.8, Plus mode, bf2c0945 (screenshot
 `C:/temp/Mac/Screenshots/20261012_212144-screen.png`):** CPU 0.880 (real Plus
 0.880), Graphics 0.929 (0.933), Math 0.994 (0.996), Disk 0.745 (0.740), Old PR
