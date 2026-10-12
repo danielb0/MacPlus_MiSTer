@@ -129,22 +129,47 @@ we lose nothing visible.
 The CPU share per frame with the virtual raster is the real 0.652. The core's
 display would have given 0.666.
 
-**Worked prediction: PoP.**
-- The music fill writes words 37-369, then 0-36, at 30 clocks per word,
-  starting at about word 2.5 after the VBL.
-- Uncontended, it wraps at line ~31 and overwrites words 31-36 before they are
-  read. That is the buzz.
-- With contention from line 28, its last ~34 words run at roughly 2x, so the
-  wrap moves to about line 34. The overwritten range shrinks to 34-36 and the
-  buzz remains at sound phase 0, which agrees with the PAL result.
-- PoP becomes clean at sound phase 0 only if it costs at least 36.5 clocks per
-  word overall. **Phase 0 found the grid in blanking, so this is now OPEN.** A
-  30-clock loop cannot keep a 30-clock period on a 4-clock grid. It becomes at
-  least 32 clocks, and could be 36 or more, depending on where its bus cycles
-  fall. At 32 PoP still buzzes. At 36 or more the wrap reaches line 37 and PoP
-  is CLEAN at sound phase 0. The fill loop's exact instructions decide this:
-  decode them from MDRV (`scripts/mdrv_unpack.py`) and time them against the
-  table before predicting. The real Plus (expanded RAM) settles it by ear.
+**Worked prediction: PoP. REVISED 2026-10-12: a real Plus plays it CLEAN at
+sound phase 0.**
+
+The fill loop, decoded from MDRV 11 at `$28d2`:
+
+| Instruction | Clocks | Bus cycles |
+|---|---|---|
+| `move.b (a2)+,(a3)` | 12 | 3 back-to-back |
+| `lea 2(a3),a3` | 8 | 2 |
+| `dbra d6` | 10 | 2 internal clocks, then 2 |
+
+That is 30 clocks for 7 bus cycles. MDRV 22 starts at the same word, 37.
+
+Timed against the Phase 0 table:
+- **Blanking: 32 clocks per word.** The `dbra` internal clocks put the next
+  fetch 2 clocks off the grid.
+- **Display: 56 clocks per word.** All 7 cycles are RAM, at 8 clocks each.
+
+The fill writes words 37-369, then 0-36. `scripts/pop_fill_race.py` runs it
+against the scan, with the VBL at word 0 and display from line 28:
+
+| Timing | Wrap at line | Words overwritten before read |
+|---|---|---|
+| Core today (30, no contention) | ~31 | 33-36: **buzz** |
+| Real Plus (32 / 56) | 34.7-36.9 | **none** for any lat >= 0.4 words (measured lat 2-3) |
+| Contention without the grid | | clean for lat >= 2.5 |
+
+**The earlier "still buzzes at 34-36" estimate was WRONG.** It slowed only the
+first part. The wrap part (0-36) is ALSO written during display, at 6.3 words
+per line against the scan's 1, so it never catches the reader.
+
+**Consequence:** the PoP buzz is the core's missing contention, not Presage's
+code. The PAL-based conclusion "a real Plus buzzes" assumed equal CPU speed
+on both machines. That assumption is what this plan shows to be false.
+
+**Two tests:**
+- The real Plus with expanded RAM at sound phase 0: predicted CLEAN.
+- The core with this fix at sound phase 0: predicted CLEAN.
+
+If the real Plus buzzes, the model is wrong somewhere, and PoP becomes the
+discriminating test for it.
 
 **Sound tests run at Sound Scan Phase 0 only.** That is the real machine's
 setting, settled from the PALs on 2026-09-21: the scan is at word 0 when the VBL
