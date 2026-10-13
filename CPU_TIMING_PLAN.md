@@ -401,6 +401,53 @@ about the IIfx cache. The SE rule stays an assumption: no change without a
 matched real-SE run (Speedometer 3.23, 6.0.8) or BBU timing documentation. The
 forum is the cheapest source of that run.
 
+### SE mode: the ADB idle tax (2026-10-13)
+
+The SE gap is not the wait rule. On the original core (no waits in either
+model) SE mode was already slower than Plus mode, while a real SE is faster.
+The Classic fork shows the same numbers. ADB is the SE-only path.
+
+- **Spec.** Guide ch. 8: in state 3 the transceiver repeats the last Talk every
+  11 ms "so the ADB Manager does not have to use processor time". The
+  transceiver firmware (`C:/temp/Mac/SE30/Docs/adb/macseadb88.asm`, a PIC16F88
+  reimplementation of the SE's PIC1654S) interrupts on an auto-poll only if
+  the device answered or an SRQ was seen (`lb_071`). It then asserts INT and
+  shifts the command byte to the VIA once (`DecCou2`). A timeout with no SRQ
+  never reaches the CPU.
+- **Core.** `rtl/adb.sv` idle branch shifts `$FF` to the VIA 11 ms after
+  every Talk, whether or not anything has data.
+- **ROM.** The SE ROM's ADB interrupt (`$4036DA` -> `$403610` -> `$403618`)
+  treats any shift-register interrupt in state 3 as auto-poll data. It runs
+  states 1 and 2 to read the response, then calls the device's completion
+  routine (`$4038FC`, `jsr (a1)`), i.e. the mouse driver with zero deltas.
+  So the core costs a full Talk R0 transaction and a driver call about every
+  11 ms while the mouse is still. A real SE costs nothing.
+- **Fix (three parts, `rtl/adb.sv` idle branch).**
+  1. Shift the idle byte only when the addressed device has data or another
+     device has data (SRQ). Otherwise poll silently every 11 ms.
+  2. Rewind `respCnt` in state 3. The ROM reads auto-poll data by going
+     straight from state 3 to 1, so the response must start at its first
+     byte. With a stale `respCnt` of 3, the original RTL returned `$FF $FF`,
+     and a report arriving in idle was marked as read at once.
+  3. Keep auto-polling after an offer, as the firmware does while in S3.
+     Previously polling stopped until the next state-0 command.
+- **Bench.** `sim/tb_adb_idle.v`, six rows:
+  - idle for 50 ms with no input: zero bytes
+  - a mouse report: offered
+  - the 3 -> 1 read-out: `$80 $85`, then `$FF` with INT low (the firmware's
+    `SBASrq0` read past the end)
+  - no re-offer after the read
+  - a second report with no new command: offered
+  - a key while the mouse is addressed (SRQ): offered
+
+  The original RTL fails three rows. Each part of the fix has a mutation,
+  and each mutation is caught. Without the gate, the bench sees 4 bytes per
+  50 ms of idle: the tax.
+- **Prediction.** SE-mode Speedometer rises by about the gap (CPU 0.945 ->
+  ~0.98 on 6.0.8). Plus mode is unchanged, because the Plus has no ADB.
+  The mouse and keyboard must still work, including a key typed while the
+  mouse is the active device (the SRQ path).
+
 **Speedometer 3.23 on System 6.0.8, Plus mode, bf2c0945 (screenshot
 `C:/temp/Mac/Screenshots/20261012_212144-screen.png`):** CPU 0.880 (real Plus
 0.880), Graphics 0.929 (0.933), Math 0.994 (0.996), Disk 0.745 (0.740), Old PR

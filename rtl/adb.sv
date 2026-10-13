@@ -33,6 +33,7 @@ wire  [3:0] cmd = adb_din[3:0];
 wire  [3:0] addr = adb_din[7:4];
 
 reg         sendResponse;
+wire        pollHasData;
 
 always @(posedge clk) begin
 	if (reset) begin
@@ -94,14 +95,18 @@ always @(posedge clk) begin
 
 		2'b11: // idle
 		begin
+			// Auto-poll: interrupt only if the device answered or an SRQ was seen;
+			// the ROM then reads the response from its first byte (state 3 -> 1)
+			respCnt <= 0;
 			if (cmd_r[3:2] == 2'b11 && idleActive) begin
 				if (talkTimer != 0)
 					talkTimer <= talkTimer - 1'd1;
+				else if (!pollHasData)
+					talkTimer <= TALKINTERVAL;
 				else begin
 					adb_dout <= 8'hFF;
 					adb_dout_strobe <= 1;
 					talkTimer <= TALKINTERVAL;
-					idleActive <= 0;
 				end
 			end
 		end
@@ -121,6 +126,9 @@ wire   int_inhibit = respCnt < 3 &&
                      ((addr_r == addrMouse && mouseValid == 2'b01) ||
 					  (addr_r == addrKeyboard && (keyboardValid == 1 || keyboardValid == 2)));
 assign _int = ~(irq && (st == 2'b01 || st == 2'b10)) | int_inhibit;
+assign pollHasData = mouseInt | keyboardInt |
+                     (addr_r == addrMouse && mouseValid == 2'b01) |
+                     (addr_r == addrKeyboard && (keyboardValid == 1 || keyboardValid == 2));
 
 // Mouse handler
 reg  [15:0] mouseReg3;
