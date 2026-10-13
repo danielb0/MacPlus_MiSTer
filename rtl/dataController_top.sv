@@ -658,6 +658,7 @@ module dataController_top(
 		.adb_dout_strobe(adb_dout_strobe),
 
 		.ps2_mouse(ps2_mouse),
+		.mouseDiv(mouseDiv),
 		.ps2_key(ps2_key)
 	);
 

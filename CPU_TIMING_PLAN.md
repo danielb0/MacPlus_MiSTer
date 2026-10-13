@@ -447,6 +447,46 @@ The Classic fork shows the same numbers. ADB is the SE-only path.
   ~0.98 on 6.0.8). Plus mode is unchanged, because the Plus has no ADB.
   The mouse and keyboard must still work, including a key typed while the
   mouse is the active device (the SRQ path).
+- **HARDWARE 2026-10-13, `MacPlus_528629a0_adbidle.rbf`, SE mode, System 6**
+  (`20261013_211346-screen.png`): CPU 0.999, Graphics 0.977, Math 0.977,
+  Disk 0.820, Old PR 0.955, New PR 0.949. That is +5-6% on every test over
+  `bf2c0945` (0.945 / 0.934 / 0.925), and within 2% of the Low End Mac real
+  SE (0.98 / 0.98 / 0.99). The idle tax was the SE gap; the `cpu_wait` SE rule
+  stays.
+
+### SE mode: the ADB mouse ignores Mouse Speed (2026-10-13)
+
+Daniel on `528629a0`: the SE mouse is smooth but very fast. Inherited from
+master, not the idle-tax fix.
+
+- **Spec.** Guide 2e, SE specifications: the ADB Apple Standard Mouse
+  generates 100 or 200 counts per inch. `adb.sv` reports handler 1, the
+  100 cpi mouse. The Plus counts 180 per inch (ch. 7).
+- **Core.** `rtl/adb.sv` puts each PS/2 report's deltas straight into the
+  Talk R0 register, clamped to 7 bits. The Mouse Speed divisor only reaches
+  `rtl/ps2_mouse.v` (the Plus path). A ~1440 cpi host mouse therefore runs
+  about 14x a real SE mouse. Reports arriving between two reads also
+  overwrite each other, so fast motion is lost as well as magnified.
+- **Fix.** Divide the ADB path by the same OSD divisor, scaled 9/5
+  (180 / 100), so one setting gives the same hand-to-cursor ratio in both
+  models: one ADB count = 9 x div / 5 host counts. Per axis, a signed backlog
+  takes 5 x each PS/2 delta and drains one count per clock into X/Y (each up
+  to +/-63) whenever the bus is in state 0 or 3 and the last read has been
+  flushed, so a remainder carries and nothing is lost. Motion keeps adding
+  to an offered report until the Talk reads it, as the real mouse
+  accumulates. The report is offered once the drain stops with motion or a
+  button change; the button bit is latched, not live, during the read. A
+  read is flushed on return to state 0 or 3 (it was state 0 only, which with
+  a held report would stall auto-poll).
+- **Bench.** `sim/tb_adb_mouse_div.v`, 12 rows: at div 8, +72 reads as 5;
+  +10 is not offered, +62 more is (5, remainder carried); -72 / +144 read as
+  -5 / -10 (ADB Y is down-positive); two reports before a read add up to 10;
+  at div 1, +255 reads as 63, 63, 15; a button press and release with zero
+  motion. The original RTL fails 7. `sim/tb_adb_idle.v` runs at div 1 with
+  its deltas scaled (9 host = 5 ADB) to keep its expected bytes.
+- **Hardware.** SE mode at the default divisor should feel like Plus mode;
+  Mouse Speed must now change the SE cursor; typing while mousing; Plus mode
+  unchanged.
 
 **Speedometer 3.23 on System 6.0.8, Plus mode, bf2c0945 (screenshot
 `C:/temp/Mac/Screenshots/20261012_212144-screen.png`):** CPU 0.880 (real Plus

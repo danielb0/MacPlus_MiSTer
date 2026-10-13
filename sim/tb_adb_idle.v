@@ -40,7 +40,7 @@ module tb_adb_idle;
       .viaBusy(1'b0), .listen(listen), .adb_din(din),
       .adb_din_strobe(din_strobe), .adb_dout(dout),
       .adb_dout_strobe(dout_strobe), .capslock(capslock),
-      .ps2_mouse(ps2_mouse), .ps2_key(ps2_key));
+      .ps2_mouse(ps2_mouse), .ps2_key(ps2_key), .mouseDiv(5'd1));
 
    integer idle_bytes = 0;
    reg     counting = 0;
@@ -118,7 +118,7 @@ module tb_adb_idle;
 
       // A mouse report: the addressed device has data.
       idle_bytes = 0;
-      ps2_mouse = {~ps2_mouse[24], 8'd0, 8'd5, 8'h00};
+      ps2_mouse = {~ps2_mouse[24], 8'd0, 8'd9, 8'h00};   // 9 host = 5 ADB at div 1
       ticks(15 * CE_MS);
       expect_offered("mouse report while idle");
 
@@ -150,7 +150,7 @@ module tb_adb_idle;
       // The transceiver keeps auto-polling in state 3: a second report with
       // no new command in between must still be offered.
       idle_bytes = 0;
-      ps2_mouse = {~ps2_mouse[24], 8'd0, 8'd3, 8'h00};
+      ps2_mouse = {~ps2_mouse[24], 8'd0, 8'd9, 8'h00};
       ticks(15 * CE_MS);
       expect_offered("second report, no new command");
 
