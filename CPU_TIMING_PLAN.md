@@ -487,6 +487,11 @@ master, not the idle-tax fix.
 - **Hardware.** SE mode at the default divisor should feel like Plus mode;
   Mouse Speed must now change the SE cursor; typing while mousing; Plus mode
   unchanged.
+- **HARDWARE PASS 2026-10-13, `MacPlus_a7571c8a_adbmouse.rbf`** (slack
+  +0.132): all five checks pass (SE feel, Mouse Speed in SE, SRQ typing, caps
+  lock, Plus unchanged). `528629a0` also passed its
+  remaining checks (SRQ typing, caps lock, Plus Speedometer unchanged:
+  CPU 0.879, Graphics 0.920, Math 0.993, Disk 0.743).
 
 **Speedometer 3.23 on System 6.0.8, Plus mode, bf2c0945 (screenshot
 `C:/temp/Mac/Screenshots/20261012_212144-screen.png`):** CPU 0.880 (real Plus
