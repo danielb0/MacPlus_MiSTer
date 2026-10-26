@@ -311,6 +311,8 @@ slower in wall time.
    0.930 / 0.994), and within 0.7% of Daniel's REAL Plus on 6.0.8
    (2026-10-12: 0.880 / 0.933 / 0.996 / 0.740). Screenshot 1536x1026
    (V-Integer).
+   **Daniel 2026-10-26: "All plus tests pass."** Mac clock against a watch
+   not yet checked; SE mode not yet reported.
    - desktop grey: no squares, at default scaling and V-Integer; the info
      OSD reads 512x342, ~22.25 kHz, ~60.15 Hz;
    - Speedometer 6.0.8, Plus and SE: within 1% of today (Plus 0.880 / 0.930
