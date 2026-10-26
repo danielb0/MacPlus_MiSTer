@@ -16,10 +16,10 @@
 //        rtl/adb.sv && vvp sim/out/tb_adb_idle.vvp
 module tb_adb_idle;
 
-   localparam CE_MS = 8125;         // clk8_en_p ticks in one millisecond
+   localparam CE_MS = 7834;         // clk8_en_p ticks in one millisecond (7833.6)
 
    reg clk = 0;
-   always #15.385 clk = ~clk;       // 32.5 MHz
+   always #15.957 clk = ~clk;       // 31.3344 MHz
 
    reg [1:0] cediv = 0;
    always @(posedge clk) cediv <= cediv + 1'b1;

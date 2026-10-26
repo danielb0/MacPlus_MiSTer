@@ -26,7 +26,7 @@
 // self-limiting.
 
 module cd_audio #(
-	parameter CLK_HZ = 32'd32_500_000   // clk rate, for the 44.1 kHz cadence
+	parameter CLK_HZ = 32'd31_334_400   // clk rate, for the 44.1 kHz cadence
 )(
 	input             clk,
 	input             rst,       // SYSTEM reset only (survives SCSI bus resets)
@@ -124,7 +124,7 @@ module cd_audio #(
 	output     [31:0] dbg_cda0,
 
 	// Underrun probe word (JTAG CDUR): [31:16]=starvation entries (wraps),
-	// [15:0]=starved clk/256 (7.9 us units at 32.5 MHz clk).
+	// [15:0]=starved clk/256 (8.2 us units at 31.3344 MHz clk).
 	output     [31:0] dbg_cdur
 );
 
@@ -1256,16 +1256,17 @@ assign frame_done = frame_done_r;
 // The 44.1 kHz targets are linearly interpolated on the way out (below):
 // sys/audio_out.sv picks AUDIO_L/R up with a free-running 48 kHz zero-order
 // hold, and feeding it the raw stair-step adds audible imaging ("not CD
-// quality" report, 07-28). Interpolating continuously in the 32.5 MHz domain
+// quality" report, 07-28). Interpolating continuously in the clk_sys domain
 // means whatever instant the framework samples, it sees a point on the
 // segment between the previous and current cadence targets — no knowledge of
 // the 48 kHz phase needed. frac16 is a Q16 approximation of the segment
-// phase (increment 89 ~= 65536*44100/32.5MHz per clk, saturating; reset at
+// phase (increment FRAC_STEP = 65536*44100/CLK_HZ per clk, saturating; reset at
 // each pair commit). Interpolation never leaves the [prev,target] range, so
 // the 16-bit output cannot overflow.
 reg signed [15:0] snd_l_t, snd_r_t;   // cadence-tick targets (was snd_l/r)
 reg signed [15:0] snd_l_p, snd_r_p;   // previous targets (segment start)
 reg        [16:0] frac16;             // Q16 segment phase, saturating at 1.0
+localparam [16:0] FRAC_STEP = (64'd65536 * 44100 + CLK_HZ / 2) / CLK_HZ;   // 92 at 31.3344 MHz
 
 always @(posedge clk) begin
 	if (rst) begin
@@ -1274,7 +1275,7 @@ always @(posedge clk) begin
 		frac16 <= 0; fr_half_r <= 0; frame_ra <= 0;
 	end else begin
 		frame_done_r <= 1'b0;
-		if (!frac16[16]) frac16 <= frac16 + 17'd89;
+		if (!frac16[16]) frac16 <= frac16 + FRAC_STEP;
 		if (flush) begin
 			widx <= 0; acc <= 0; sph <= 0; fr_half_r <= 1'b0;
 		end

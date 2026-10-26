@@ -2,14 +2,14 @@
 //
 // MOUSE_PLAN.md: the PS/2 -> quadrature converter's bursts, tail and scale.
 //
-// The REAL rtl/ps2_mouse.v, clk at 32.5 MHz with ce one cycle in four (as
+// The REAL rtl/ps2_mouse.v, clk at 31.3344 MHz with ce one cycle in four (as
 // clk8_en_p is), fed PS/2 reports on the ps2_mouse[24] toggle and decoded
 // the way the ROM does: one count per x1 edge, direction from x2 at that
 // edge (x2 != x1 is positive, the sense the module already emits).
 //
 // Every deadline is counted in ce ticks, not wall time, so the numbers are
-// exact whatever the clock period rounds to: 1 ms = 8125 ce, one report
-// interval (16 ms) = 130000 ce, the emitter's rate ceiling = 4096 ce and
+// exact whatever the clock period rounds to: 1 ms = 7834 ce, one report
+// interval (16 ms) = 125338 ce, the emitter's rate ceiling = 4096 ce and
 // the DDA interval (1024 fine ticks of 128 ce) = 131072 ce.
 //
 // Written before the fix, against the div port added unused in the same
@@ -21,14 +21,14 @@
 //        sim/tb_ps2_mouse.v && vvp sim/out/tb_ps2_mouse.vvp
 module tb_ps2_mouse;
 
-   localparam CE_MS    = 8125;      // ce ticks in one millisecond
-   localparam CE_RPT   = 130000;    // one 16 ms report interval
+   localparam CE_MS    = 7834;      // ce ticks in one millisecond (7833.6)
+   localparam CE_RPT   = 125338;    // one 16 ms report interval
    localparam CE_CEIL  = 4096;      // the per-axis rate ceiling
    localparam CE_DDA   = 131072;    // 1024 fine ticks, one planning interval
    localparam BIG      = 1000000000;
 
    reg clk = 0;
-   always #15.385 clk = ~clk;       // 32.5 MHz
+   always #15.957 clk = ~clk;       // 31.3344 MHz
 
    reg [1:0] cediv = 0;
    always @(posedge clk) cediv <= cediv + 1'b1;
@@ -128,12 +128,12 @@ module tb_ps2_mouse;
       end
    endtask
 
-   // One ce is 4 clk, i.e. 123.08 ns. Waiting in time rather than counting
+   // One ce is 4 clk, i.e. 127.66 ns. Waiting in time rather than counting
    // edges keeps the run down to minutes; every deadline is still measured
    // in ce_count, so nothing here depends on the delay being exact.
    task wait_ce(input integer n);
       begin
-         #(n * 123.08);
+         #(n * 127.66);
          @(posedge clk); #1;      // stimulus settles clear of the DUT's own edge
       end
    endtask

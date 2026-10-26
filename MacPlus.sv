@@ -384,11 +384,11 @@ wire [10:0] audio;
 // here, ahead of the adder. See SCSI_UPGRADE_PLAN.md 3C/3D.
 
 // 48 kHz strobe: that is where sys/audio_out.sv point-samples AUDIO_L/R.
-// 32.5 MHz / 677 = 48,006 Hz, 0.01% off -- irrelevant against a 1.9 Hz corner.
+// 31.3344 MHz / 653 = 47,985 Hz, 0.03% off -- irrelevant against a 1.9 Hz corner.
 reg  [9:0] snd_ce_div = 0;
 reg        snd_ce = 0;
 always @(posedge clk_sys) begin
-	if (snd_ce_div == 10'd676) begin snd_ce_div <= 0; snd_ce <= 1'b1; end
+	if (snd_ce_div == 10'd652) begin snd_ce_div <= 0; snd_ce <= 1'b1; end
 	else                       begin snd_ce_div <= snd_ce_div + 1'd1; snd_ce <= 1'b0; end
 end
 

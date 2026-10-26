@@ -84,7 +84,8 @@ At 31.3344 MHz the real 704 px = 352 clk8 divides by 4 (and 16).
 
 **Other raster consumers:** VIA CA1 (VBL, `_vblank` falling,
 `dataController_top.sv:378`), VIA PB6 (`_hblank`, Plus only, `:349`), the VBL
-counter at `dataController_top.sv:306`, `snd_phase_probe.sv` (VBL edge),
+counter at `dataController_top.sv:306` (replaced in Phase 2 by a clk_sys
+second), `snd_phase_probe.sv` (VBL edge),
 `cpu_wait.v` (VBL edge + `snd_advance`). All take edges, not counts, so they
 follow the new raster. `floppy.v:530`'s "every hsync" comment is stale (it
 uses `cpu_tick`).
@@ -186,10 +187,15 @@ findings carry over in words.
 | `MacPlus.sv:386-387` | 48 kHz audio strobe, divisor 677 | 653 (47,985 Hz, -0.03%) |
 | `rtl/cd_audio.sv:29`, `rtl/scsi.v:1686` | `CLK_HZ` 32,500,000, the 44.1 kHz cadence | 31,334,400 |
 | `rtl/cd_audio.sv:1277` (+ `:1263` comment) | `frac16` step 89 = 65536 x 44100 / clk | 92 |
-| `rtl/scc.v:871-911` | baud divisors for 32.5 MHz | x 0.96414 (31.3344 / 32.5), recomputed |
-| `dataController_top.sv:317` | RTC second = 60 VBLs | at 60.147 Hz that gains ~3.6 min/day; count 31,334,400 clk_sys instead (a real Plus RTC has its own crystal) |
+| `rtl/scc.v:911` | the one live divisor, 282 (fixed 115,200 baud; the table above it is commented out) | **272, exact** |
+| `dataController_top.sv:301` | VIA CA2 one-second tick = 60 VBLs | at 60.147 Hz that gains ~3.6 min/day; count 31,334,400 clk_sys instead (a real Plus RTC has its own crystal) |
+| `rtl/rtc.v:67` | the RTC's own seconds: 32,499,999 clk | **31,334,399** (found by the Phase 2 re-search) |
 | `rtl/scsi.v:1360-1379` | power-of-two spin-up / watchdog counts | 3.6% longer in time; leave |
 | `rtl/adb.sv:23` | TALKINTERVAL 11 ms in clk8 | 3.6% longer; leave |
+| `rtl/ps2_mouse.v` | fine tick and rate ceiling in clk8 | gain is the divisor, not time; max rate and drain 3.6% slower; leave |
+| `dataController_top.sv:418` | keyboard clock 1300 / 80 clk8 | 3.6% longer; leave |
+| `MacPlus.sv:1190` | disk LED hold 500,000 clk | cosmetic; leave |
+| `sim/tb_adb_idle.v`, `tb_adb_mouse_div.v`, `tb_ps2_mouse.v` | 32.5 MHz clock, `CE_MS` 8125, 16 ms = 130,000 ce | 31.3344 MHz, 7834, 125,338 |
 | `dataController_top.sv:218` | 100 ms reset in clk8 | leave |
 | `rtl/sdram.v` | refresh on idle slots, clocked by clk_mem | leave; video now takes half the slots it did, so more idle slots |
 | `addrController_top.v:6`, `dataController_top.sv:3`, `cpu_wait.v` header | comments naming 8.125 / 32.5 MHz | update |
@@ -199,16 +205,16 @@ baud tables, `_us`/`ms` constants) before calling this list complete.
 
 ### Floppy
 
-The IWM and the drive model run on clk8, the CPU on clk8 less its skips:
-today the floppy runs 3.7% fast against the CPU. After, they share 7.8336 MHz
-as on a real Plus. The tach table (`floppy.v:715-760`) was measured on Plus
-Too at 8.125 MHz with no skips; the ROM counts tach with the VIA (E clock =
-CPU / 10), so its readings move with the floppy/CPU ratio. **Bench check
-(Phase 6):** compute the ROM's timing value for each tach zone at the new
-ratio and compare with the acceptable ranges in the `floppy.v` comment
-(e.g. $1135-$11E9 for tracks 0-15). Rescale the periods if any zone leaves
-its range. The 400K spindle duty table, the DCD poll budget and formatting
-are re-tested on hardware (Daniel: fine).
+**Phase 2 finding: the floppy does not move.** `floppy.v` (header at :62-72)
+already counts its byte timers and the tach in CPU clocks (`cpu_tick`, clk8
+less the skips), because the IWM's FCLK is the CPU's C8M. After the change
+every clk8 is a CPU clock, so the tach periods and byte times are the same
+number of CPU clocks as today and the ROM reads the same values. The
+planned Phase 6 tach check is not needed. `dcd_link.v:260-265`'s 128-clk8
+byte becomes the real 2.042 us cell (its comment says why it was 2.000).
+The 400K spindle duty table, the DCD poll budget and formatting are still
+re-tested on hardware (Daniel: fine), since the SDRAM/HPS side runs 3.6%
+slower in wall time.
 
 ### Accepted costs (Daniel 2026-10-26)
 
@@ -241,14 +247,16 @@ are re-tested on hardware (Daniel: fine).
    DE exactly 512 x 342, column-tagged words checked for width and position
    (as `tb_video_de` on `video-de-512`), sync positions, VBL edge, 32 fetches
    per active line on video slots only. Fails against the current timer.
-2. **PLL and constants:** regenerate `rtl/pll` (31.3344 / 62.6688); every
-   row of the constants table; repeat the search. Benches that assume 32.5
-   MHz (`tb_cd_mix`, CD audio) updated.
+2. **Done:** `rtl/pll` retargeted by hand (the two output frequencies in
+   `pll_0002.v`, the wizard metadata in `pll.v`; fractional mode was
+   already on, VCO 940.032 MHz as the SE/30's); every row of the constants
+   table; the re-search found `rtc.v`. Three clocked benches moved to
+   31.3344 MHz and rerun.
 3. `videoTimer.v` + `videoShifter.v` + `MacPlus.sv`; `tb_video_native` green.
 4. Sound scan one word per line; `tb_snd_phase` updated and green.
 5. `cpu_wait.v`: skips removed, raster from the video counter;
    `tb_cpu_wait` updated and green.
-6. Floppy tach check (above); RTC second from clk_sys.
+6. ~~Floppy tach check; RTC second from clk_sys.~~ Both settled in Phase 2.
 7. Bench sweep (**ask first**), then the gated compile (**ask first**). Check
    the PLL output frequencies and timing in the reports. Mind the SE/30
    session's builds: no Quartus compile near 22:00 without checking.
