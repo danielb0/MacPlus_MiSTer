@@ -312,7 +312,13 @@ slower in wall time.
    (2026-10-12: 0.880 / 0.933 / 0.996 / 0.740). Screenshot 1536x1026
    (V-Integer).
    **Daniel 2026-10-26: "All plus tests pass."** Mac clock against a watch
-   not yet checked; SE mode not yet reported.
+   not yet checked.
+   **Speedometer 6.0.8, SE (2026-10-26):** CPU 1.005, Graphics 0.975, Math
+   0.979, Disk 0.795. Against `78f0529` (1.000 / 0.987 / 0.978 / 0.855)
+   Graphics is -1.2%, just past the 1% gate; but SE Graphics already moved
+   1% between builds (`528629a0` 0.977 -> `78f0529` 0.987) and today's
+   value is within 0.2% of 0.977; Disk moves 0.795-0.855 run to run. CPU
+   and Math unchanged. Read as noise, single runs; a repeat would confirm.
    - desktop grey: no squares, at default scaling and V-Integer; the info
      OSD reads 512x342, ~22.25 kHz, ~60.15 Hz;
    - Speedometer 6.0.8, Plus and SE: within 1% of today (Plus 0.880 / 0.930
