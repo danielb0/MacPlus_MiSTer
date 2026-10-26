@@ -98,7 +98,9 @@ module tb_snd_phase;
    endtask
 
    // ---- one frame of the scan, checked advance by advance ---------------
-   integer n, p, expect_w, bad_seq, bad_addr;
+   integer n, p, expect_w, bad_seq, bad_addr, bad_gap, last_c8;
+   integer c8 = 0;                 // clk8 count, for the advance spacing
+   always @(negedge clk) if (clk8_en_p) c8 = c8 + 1;   // stable at the posedge
    reg [21:0] base;
    task scan_frame(input [2:0] ph);
       begin
@@ -110,7 +112,7 @@ module tb_snd_phase;
          wait_frame_edge;          // ... and the next, which starts from it
          // this edge's own advance is the first sample of the frame
          @(negedge clk);
-         n = 1; bad_seq = 0; bad_addr = 0;
+         n = 1; bad_seq = 0; bad_addr = 0; bad_gap = 0; last_c8 = c8;
          if (snd_index !== p) bad_seq = bad_seq + 1;
          if (ac0.audioAddr !== base + {p, 1'b0}) bad_addr = bad_addr + 1;
          expect_w = p;
@@ -122,13 +124,16 @@ module tb_snd_phase;
                check(n == 370, "370 advances per frame");
                check(bad_seq == 0, "word sequence p..369,0..p-1");
                check(bad_addr == 0, "audioAddr == base + 2*snd_index at every advance");
+               check(bad_gap == 0, "advances exactly 352 clk8 apart, one per line");
                check(snd_index == p, "next frame restarts at p");
-               $display("  phase %0d: start word %0d, %0d advances, seq errors %0d, addr errors %0d",
-                        ph, p, n, bad_seq, bad_addr);
+               $display("  phase %0d: start word %0d, %0d advances, seq errors %0d, addr errors %0d, gap errors %0d",
+                        ph, p, n, bad_seq, bad_addr, bad_gap);
                disable scan_frame;
             end
-            if (clk8_en_p && ac0.sndAdvance === 1'b0 && ac0.snd_div_next >= ac0.SND_SIZE) begin
-               // an advance is being registered on this edge; look at the result
+            if (clk8_en_p && !ac0.hblankD && ac0._hblank) begin
+               // a line start: an advance is being registered on this edge
+               if (last_c8 >= 0 && c8 - last_c8 != 352) bad_gap = bad_gap + 1;
+               last_c8 = c8;
                @(negedge clk);
                n = n + 1;
                expect_w = (expect_w == 369) ? 0 : expect_w + 1;
@@ -167,15 +172,11 @@ module tb_snd_phase;
       force ac0.busPhase = 2'b00;
       force ac0.busCycle = 2'b00;
       force ac0.extra_slot_count = 2'b00;
-      // ... and the video timer's, which the scan's vblank edge comes from
-      force ac0.vt.xpos = 8'd0;
-      force ac0.vt.ypos = 10'd0;
+      // (the video timer powers up initialised, in step with busCycle)
       @(posedge clk);
       release ac0.busPhase;
       release ac0.busCycle;
       release ac0.extra_slot_count;
-      release ac0.vt.xpos;
-      release ac0.vt.ypos;
       // let a frame pass so the scan is running from a real vblank edge
       repeat (600000) @(posedge clk);
 

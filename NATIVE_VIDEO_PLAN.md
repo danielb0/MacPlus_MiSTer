@@ -260,7 +260,14 @@ slower in wall time.
    video slots go to SDRAM refresh. Two bench fixes on the way: the VBL check
    compared against the wrong frame's edge, and power-up levels counted as
    edges.
-4. Sound scan one word per line; `tb_snd_phase` updated and green.
+4. **Done:** sound scan one word per line, the Bresenham gone. The scan
+   advances where `_hblank` rises (each line start) and restarts on the VBL
+   edge (line 0's start, same clk8, VBL wins), so a frame is exactly 370
+   commits 352 clk8 apart. The real fetch is word 43, 16 px later; the commit
+   point only times the output sample, so that is inaudible, and keeping the
+   VBL edge as the restart keeps every sound-phase measurement's meaning.
+   `tb_snd_phase` updated (advances detected on the line edge, a new 352-clk8
+   spacing check, the old timer's forces removed): 57/57.
 5. `cpu_wait.v`: skips removed, raster from the video counter;
    `tb_cpu_wait` updated and green.
 6. ~~Floppy tach check; RTC second from clk_sys.~~ Both settled in Phase 2.
