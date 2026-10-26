@@ -276,7 +276,13 @@ slower in wall time.
    352; a frame of 130,240 clk8 is 130,240 CPU clocks): all wait-state loop
    periods unchanged, PASS 11,973 bus cycles.
 6. ~~Floppy tach check; RTC second from clk_sys.~~ Both settled in Phase 2.
-7. Bench sweep (**ask first**), then the gated compile (**ask first**). Check
+7. **Sweep done (2026-10-26):** all 39 benches on this branch against the
+   same benches on `dcf03a4` (the pre-native base), iverilog. Identical
+   verdicts everywhere; the only FAIL lines are `tb_dbg_probes`' "build tag
+   is stamped", on both trees (the tag is committed as 0 and stamped at
+   compile time). One harness fix: `tb_scsi_absence` seeded the removed
+   `snd_div`. The DCD/IWM benches need `rtl/scsi.v` (`scsi_dpram`) named on
+   the command line. Then the compile. Check
    the PLL output frequencies and timing in the reports. Mind the SE/30
    session's builds: no Quartus compile near 22:00 without checking.
 8. **HDMI hardware test** (Daniel):

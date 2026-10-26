@@ -84,8 +84,7 @@ module tb_scsi_absence;
 			ac.busPhase           = 2'd0;
 			ac.busCycle           = 2'd0;
 			ac.extra_slot_count   = 2'd0;
-			ac.audioAddr          = 22'd0;
-			ac.snd_div            = 18'd0;
+			ac.audioAddr          = 22'd0;	// (snd_div went with the 806-line Bresenham)
 			// These three feed the extra-slot arbiter, and an X here reaches
 			// memoryAddr through the dskReadAck/dskLoadGrant mux rather than
 			// through macAddr -- which is why it first showed up as a lone X
