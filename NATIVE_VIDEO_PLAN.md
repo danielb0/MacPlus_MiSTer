@@ -302,7 +302,9 @@ slower in wall time.
    non-integer scaling, and any difference from the SE/30 on screen is the
    per-core video filter (screenshots are taken before it). **At V-Integer
    with the default filter: "pretty much perfect"** -- 1536x1026, every Mac
-   pixel 3x3, where the old build managed only 1x. Open: make V-Integer the
+   pixel 3x3, where the old build managed only 1x; "even more so with the
+   filter switched off" (nothing left to smooth at an exact 3x). Forum
+   recommendation: Scale = V-Integer, video filter off. Open: make V-Integer the
    default Scale? Remaining checks below.
    - desktop grey: no squares, at default scaling and V-Integer; the info
      OSD reads 512x342, ~22.25 kHz, ~60.15 Hz;
