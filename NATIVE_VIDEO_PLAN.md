@@ -292,7 +292,18 @@ slower in wall time.
    (Original note:) Check
    the PLL output frequencies and timing in the reports. Mind the SE/30
    session's builds: no Quartus compile near 22:00 without checking.
-8. **HDMI hardware test** (Daniel):
+8. **HDMI hardware test** (Daniel). **First results, 2026-10-26, `e3e45a7a`:**
+   info OSD 512x342, 22.26 kHz, 60.1 Hz (HDMI 1920x1080, 178.64 MHz).
+   At Scale = Normal it looks the same as the old build, and it must: 684
+   doubled lines at 1.579x and 342 lines at 3.158x land on the same output
+   rows. All 40 1616x1080 screenshots (old MacPlus, SE/30, new) measure the
+   same 3,3,3,3,3,4 beat. **The 2026-10-20 premise of this plan, that the
+   doubled input was what scaled badly, was wrong:** the squares are
+   non-integer scaling, and any difference from the SE/30 on screen is the
+   per-core video filter (screenshots are taken before it). **At V-Integer
+   with the default filter: "pretty much perfect"** -- 1536x1026, every Mac
+   pixel 3x3, where the old build managed only 1x. Open: make V-Integer the
+   default Scale? Remaining checks below.
    - desktop grey: no squares, at default scaling and V-Integer; the info
      OSD reads 512x342, ~22.25 kHz, ~60.15 Hz;
    - Speedometer 6.0.8, Plus and SE: within 1% of today (Plus 0.880 / 0.930
