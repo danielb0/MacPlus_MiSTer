@@ -306,6 +306,9 @@ slower in wall time.
    filter switched off" (nothing left to smooth at an exact 3x). Forum
    recommendation: Scale = V-Integer, video filter off. Open: make V-Integer the
    default Scale? Remaining checks below.
+   **Speedometer 6.0.8, Plus (2026-10-26):** CPU 0.879, Graphics 0.931,
+   Math 0.994 (Disk 0.745, no reference) -- within 0.11% of 0.880 / 0.930 /
+   0.994. Screenshot 1536x1026 (V-Integer).
    - desktop grey: no squares, at default scaling and V-Integer; the info
      OSD reads 512x342, ~22.25 kHz, ~60.15 Hz;
    - Speedometer 6.0.8, Plus and SE: within 1% of today (Plus 0.880 / 0.930
