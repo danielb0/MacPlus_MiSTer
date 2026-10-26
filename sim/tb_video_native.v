@@ -20,6 +20,7 @@
 // Run: iverilog -g2012 -o sim/out/tb_video_native.vvp sim/tb_video_native.v rtl/videoTimer.v rtl/videoShifter.v
 //      vvp sim/out/tb_video_native.vvp
 // Against the pre-native modules (no pix_en/de ports): add -DOLD_TIMER.
+// -DMISALIGN powers the timer up out of step with busCycle, to prove it realigns.
 `timescale 1ns/1ps
 module tb_video_native;
 
@@ -105,6 +106,9 @@ module tb_video_native;
 	// scaler are already stable, and ce/memoryLatch describe that posedge.
 	always @(negedge clk) begin
 		t = t + 1;
+		if (t == 1) begin	// power-up levels are not edges
+			de_q = de; hs_q = hsync; vs_q = vsync; vbl_q = _vblank; hb_q = _hblank;
+		end
 
 		// _vblank and _hblank move on clk8, so they are timed in clk
 		if (vbl_q && !_vblank) vbl_fall_t = t;
@@ -177,8 +181,10 @@ module tb_video_native;
 					frames = frames + 1;
 					if (n - vs_fall != LINES * LINE_PX) e_frame = e_frame + 1;
 					if (de_lines != DE_LINES) e_de_lines = e_de_lines + 1;
-					// the frame just ended: its VBL fell with its VSYNC*, within one clk8
-					if (vbl_fall_t - vs_fall_t > 4 || vs_fall_t - vbl_fall_t > 4)
+					// VBL with VSYNC*, within one clk8: the last VBL fall is this
+					// frame's (it led or coincided) or the last frame's (it lagged)
+					if (!((t - vbl_fall_t <= 4 && vbl_fall_t - t <= 4) ||
+					      (vbl_fall_t - vs_fall_t <= 4 && vs_fall_t - vbl_fall_t <= 4)))
 						e_vbl_pos = e_vbl_pos + 1;
 				end
 				if (de_fall >= 0 && n - de_fall != LINE_PX - DE_PX && checking)
@@ -200,6 +206,8 @@ module tb_video_native;
 		vs.shiftRegister = 16'hFFFF;	// FPGA power-up state
 `ifdef OLD_TIMER
 		vt.xpos = 0; vt.ypos = 0;	// no initial values in the old timer
+`elsif MISALIGN
+		vt.hcnt = 10'd3;		// out of step with busCycle: must realign before frame 1
 `endif
 		repeat (4 * 806 * 672) @(posedge clk);	// >= 3 frames of either raster
 		errs = e_line + e_frame + e_de_w + e_de_pitch + e_de_lines + e_hs_pos + e_hs_w +

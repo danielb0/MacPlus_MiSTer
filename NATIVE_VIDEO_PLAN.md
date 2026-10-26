@@ -252,7 +252,14 @@ slower in wall time.
    already on, VCO 940.032 MHz as the SE/30's); every row of the constants
    table; the re-search found `rtc.v`. Three clocked benches moved to
    31.3344 MHz and rerun.
-3. `videoTimer.v` + `videoShifter.v` + `MacPlus.sv`; `tb_video_native` green.
+3. **Done:** `videoTimer.v` + `videoShifter.v` + `MacPlus.sv`; `tb_video_native`
+   green (and green with `-DMISALIGN`, which powers the timer up out of step
+   with busCycle); today's timer still fails it. The timer powers up at pixel
+   702 of line 369, in step with busCycle from the first clock. Video's RAM
+   output enable now follows the fetch (every other video slot), so the idle
+   video slots go to SDRAM refresh. Two bench fixes on the way: the VBL check
+   compared against the wrong frame's edge, and power-up levels counted as
+   edges.
 4. Sound scan one word per line; `tb_snd_phase` updated and green.
 5. `cpu_wait.v`: skips removed, raster from the video counter;
    `tb_cpu_wait` updated and green.

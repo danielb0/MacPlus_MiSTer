@@ -48,6 +48,7 @@ module addrController_top(
 	output vsync,
 	output _hblank,
 	output _vblank,
+	output de,				// VGA_DE: exactly the 512 x 342 shifter pixels
 	output loadPixels,
 	input  vid_alt,
 		
@@ -238,7 +239,7 @@ module addrController_top(
 	wire [21:0] videoAddr;
 	
 	// RAM/ROM control signals
-	wire videoControlActive = _hblank;
+	wire videoControlActive = loadPixels;	// every other video slot carries a word
 
 	assign _romOE = ~(cpuBusControl && selectROM && _cpuRW);
 	
@@ -380,6 +381,7 @@ module addrController_top(
 	videoTimer vt(
 		.clk(clk),
 		.clk_en(clk8_en_p),
+		.pix_en(clk16_en_p),
 		.busCycle(busCycle), 
 		.vid_alt(vid_alt),
 		.videoAddr(videoAddr), 
@@ -387,6 +389,7 @@ module addrController_top(
 		.vsync(vsync), 
 		._hblank(_hblank),
 		._vblank(_vblank), 
+		.de(de),
 		.loadPixels(loadPixels));
 		
 endmodule

@@ -361,12 +361,12 @@ hps_io #(.CONF_STR(CONF_STR), .VDNUM(VDNUM), .WIDE(1)) hps_io
 );
 
 assign CLK_VIDEO = clk_sys;
-assign CE_PIXEL  = 1;
+assign CE_PIXEL  = clk16_en_p;	// the 15.6672 MHz dot clock, as the SE/30 core
 
 assign VGA_R  = {8{pixelOut}};
 assign VGA_G  = {8{pixelOut}};
 assign VGA_B  = {8{pixelOut}};
-assign VGA_DE = _vblank & _hblank;
+assign VGA_DE = vid_de;
 assign VGA_VS = vsync;
 assign VGA_HS = hsync;
 assign VGA_F1 = 0;
@@ -562,7 +562,7 @@ wire [15:0] memoryDataOut;
 wire memoryLatch;
 
 // peripherals
-wire vid_alt, loadPixels, pixelOut, _hblank, _vblank, hsync, vsync;
+wire vid_alt, loadPixels, pixelOut, _hblank, _vblank, vid_de, hsync, vsync;
 wire memoryOverlayOn, selectSCSI, selectSCC, selectIWM, selectVIA, selectRAM, selectROM, selectSEOverlay;
 wire [15:0] scsi_dbg;   // raw 5380 state, for rtl/dbg_probes.sv
 wire        scsi_bus_hold; // SCSI pseudo-DMA back-pressure, see ncr5380.sv
@@ -837,6 +837,7 @@ addrController_top ac0
 	.vsync(vsync),
 	._hblank(_hblank),
 	._vblank(_vblank),
+	.de(vid_de),
 	.loadPixels(loadPixels),
 	.vid_alt(vid_alt),
 	.memoryOverlayOn(memoryOverlayOn),
@@ -878,6 +879,7 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.clk32(clk_sys), 
 	.clk8_en_p(clk8_en_p),
 	.clk8_en_n(clk8_en_n),
+	.clk16_en_p(clk16_en_p),
 	.cpu_skip(cpu_skip),
 	.clk16_en_n(clk16_en_n),
 	.E_rising(E_rising),

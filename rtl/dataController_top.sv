@@ -3,6 +3,7 @@ module dataController_top(
 	input clk32,					// clk_sys, 31.3344 MHz (2x the Plus dot clock)
 	input clk8_en_p,
 	input clk8_en_n,
+	input clk16_en_p,		// the pixel clock enable, for the video shifter
 	input cpu_skip,     // this clk8 is not a CPU clock (cpu_wait.v)
 	input clk16_en_n,		// for the IWM read-latch clear only, see iwm.v
 	input E_rising,
@@ -595,6 +596,7 @@ module dataController_top(
 	// Video
 	videoShifter vs(
 		.clk32(clk32), 
+		.pix_en(clk16_en_p),
 		.memoryLatch(memoryLatch),
 		.dataIn(memoryDataIn),
 		.loadPixels(loadPixels), 
