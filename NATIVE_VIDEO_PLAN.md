@@ -313,10 +313,14 @@ slower in wall time.
    (2026-10-12: 0.880 / 0.933 / 0.996 / 0.740). Screenshot 1536x1026
    (V-Integer).
    **Daniel 2026-10-26: "All plus tests pass."**
-   **Mac clock (2026-10-26):** 3 s behind a phone at core load, 4 s behind
-   after the run: -1 s, within reading error. A VBL-timed second would GAIN
-   about 2.5 s per 30 min (60.15 Hz against 60) and the old `rtc.v` constant
-   about 66 s; neither seen. No drift.
+   **Mac clock (2026-10-26):** 3 s behind a phone at core load, 5 s behind
+   after 2+ hours. Eye readings are +/-1 s each, so the drift is 0-4 s:
+   anywhere from none to about 0.05%. A VBL-timed second would GAIN about
+   5 s per hour and the old `rtc.v` constant about 130 s; neither seen.
+   For scale, a real Plus runs off a 32.768 kHz watch crystal (~20 ppm,
+   ~1.7 s/day). Daniel: "good enough for now. No point obsessing over it."
+   If ever revisited: overnight, read at the Mac's second rollover, and an
+   OSD Reset tells missed interrupts (time jumps) from a slow clock (no jump).
    **Speedometer 6.0.8, SE (2026-10-26):** CPU 1.005, Graphics 0.975, Math
    0.979, Disk 0.795. Against `78f0529` (1.000 / 0.987 / 0.978 / 0.855)
    Graphics is -1.2%, just past the 1% gate; but SE Graphics already moved
