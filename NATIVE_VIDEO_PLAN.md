@@ -304,8 +304,9 @@ slower in wall time.
    with the default filter: "pretty much perfect"** -- 1536x1026, every Mac
    pixel 3x3, where the old build managed only 1x; "even more so with the
    filter switched off" (nothing left to smooth at an exact 3x). Forum
-   recommendation: Scale = V-Integer, video filter off. Open: make V-Integer the
-   default Scale? Remaining checks below.
+   recommendation: Scale = V-Integer, video filter off. **Default Scale stays
+   Normal (Daniel 2026-10-26: "No reason to change v-integer. You can set it
+   and then save your settings").** Remaining checks below.
    **Speedometer 6.0.8, Plus (2026-10-26):** CPU 0.879, Graphics 0.931,
    Math 0.994, Disk 0.745 -- within 0.11% of the current build (0.880 /
    0.930 / 0.994), and within 0.7% of Daniel's REAL Plus on 6.0.8
