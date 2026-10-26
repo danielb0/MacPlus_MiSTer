@@ -89,6 +89,51 @@ counter at `dataController_top.sv:306`, `snd_phase_probe.sv` (VBL edge),
 follow the new raster. `floppy.v:530`'s "every hsync" comment is stale (it
 uses `cpu_tick`).
 
+## Phase 0b findings: the Plus's own raster (2026-10-26)
+
+Sources in `C:/temp/Mac/PALs/`: Jecel Assumpcao's Unitron notes
+(`apple_mac_logic.htm`, the 128K PAL tables), Bomarc M0001A sheet 4
+(`MacPlus-M0001A-MB-4-4.png`), Wouter's Plus LAG dump (`pals.txt`), and the
+"RESULT 2026-09-21" decode in `SOUND_PHASE_PLAN.md` on `sound-phase`.
+
+**Settled:**
+
+| | value | source |
+|---|---|---|
+| line | 44 words of 16 px = 704 px | Jecel: "32 ciclos ativas ... 11 ciclos de retraco ... 1 ciclo de som/pwm" |
+| active | words 0-31 (px 0-511) | Jecel: VA6..VA1 = 0 to $1F |
+| retrace | words 32-42 (11 words) | Jecel: $20 to $2A |
+| sound / disk-PWM fetch | **word 43, the last of every line** | Jecel: $2B; Hertzfeld via Wouter: "every 44 microseconds" in the blanking interval |
+| horizontal blank | words 32-43, 192 px | the two rows above |
+| frame | 370 lines: **28 blank first, then 342 active** | Jecel's line counter: retrace 128-155, active 156-497; checked against $1FFD00 / $1A700 in the sound-phase decode |
+| VBL | at the frame reset, the start of the 28 blank lines; the sound scan is at word 0 there | sound-phase decode: VIA CA1 = LAG pin 13 = VSYNC, asserted on the term that resets the line counter; ROM sets CA1 to the falling edge |
+| sound word n | fetched at the end of line n | the line counter IS the sound address |
+
+This is exactly the raster `cpu_wait.v` already models (lines 0-27 blank,
+display = the first 256 CPU clocks, the sound slot the last 8), so the
+contention model needs no new numbers.
+
+**Not settled: HSYNC position and width, VSYNC width.** The LAG's VC0/VC1
+inputs (pins 2, 3) do not come from the video counters: on sheet 4 they run
+toward BMU2 (E2, 20R4 342-0518), whose equations exist only behind the
+pldarchive bot check. A simulation of the LAG's horizontal equations alone
+(a throwaway script, not kept) does not close to a 44-word line, so it cannot be
+trusted for the sync widths. The sound-phase note's "HSYNC of seven memory
+cycles" was a polarity sanity check, not a simulation, and is not adopted.
+Only the start of VSYNC is settled (the VBL). Jecel's 128K reconstruction
+holds VSYNC through the 28-line window (`/VSYNC := RESLIN + /VSYNC*/L28`),
+but that is a reconstruction of the 128K, not a Plus dump.
+
+**Decision for the build:** where the Plus is settled, use the Plus; for the
+two open widths use the SE/30's PAL-derived values, which are a real compact
+Mac's timing on the same 704 x 370 raster:
+- HSYNC* low 288 px from pixel 535 (front porch 23), wrapping to pixel 119
+  of the next line;
+- VSYNC* low 4 lines from the VBL (the SE/30 also starts VSYNC on the line
+  after the last active one, the same place as the Plus's VBL).
+The internal CRT never saw these signals leave the case; only direct-analog
+users see the widths, and the forum build asks them anyway.
+
 ## Design
 
 ### Clock
@@ -103,10 +148,10 @@ Plus CPU clock.
   0-369, no line doubling.
 - One 16-pixel word every 8 clk8, on `busCycle == 0` with `xpos[2] == 0`:
   32 words in clk8 0-255, every other video slot, as on the real Plus.
-- Horizontal: 512 active, 192 blank. Vertical: 342 active, 28 blank.
-- Sync placement: the Plus's own, from the Guide, if it documents it
-  (Phase 0b); otherwise the SE/30's (front porch 23 px, HSYNC* 288 px; VSYNC*
-  4 lines starting the line after the last active one).
+- Horizontal: words 0-31 active, 32-42 retrace, 43 the sound fetch.
+  Vertical: lines 0-27 blank (VBL at the start of line 0), 28-369 active.
+- Syncs (Phase 0b): HSYNC* low pixels 535 to 118 of the next line; VSYNC*
+  low lines 0-3.
 - `_hblank` is the real 192-pixel blank (VIA PB6). `_vblank` falls at the
   start of vertical blank (VBL, VIA CA1).
 - `VGA_DE` exactly 512 x 342, registered, as the SE/30.
@@ -191,9 +236,7 @@ are re-tested on hardware (Daniel: fine).
 ## Phases
 
 0. **Done:** SE/30 video path and PLL read; findings above.
-   **0b.** Read the Guide (and the Plus schematic / PALs in `C:/temp/Mac`)
-   for the Plus's own HSYNC/VSYNC position and width, the sound fetch's
-   place in the line and the line the VBL falls on; record them here.
+   **0b. Done:** the Plus's raster, above; sync widths from the SE/30.
 1. **Failing bench** `sim/tb_video_native.v`: 704 x 370 at clk8 = clk_sys/4,
    DE exactly 512 x 342, column-tagged words checked for width and position
    (as `tb_video_de` on `video-de-512`), sync positions, VBL edge, 32 fetches
