@@ -312,8 +312,11 @@ slower in wall time.
    0.930 / 0.994), and within 0.7% of Daniel's REAL Plus on 6.0.8
    (2026-10-12: 0.880 / 0.933 / 0.996 / 0.740). Screenshot 1536x1026
    (V-Integer).
-   **Daniel 2026-10-26: "All plus tests pass."** Mac clock against a watch
-   not yet checked.
+   **Daniel 2026-10-26: "All plus tests pass."**
+   **Mac clock (2026-10-26):** 3 s behind a phone at core load, 4 s behind
+   after the run: -1 s, within reading error. A VBL-timed second would GAIN
+   about 2.5 s per 30 min (60.15 Hz against 60) and the old `rtc.v` constant
+   about 66 s; neither seen. No drift.
    **Speedometer 6.0.8, SE (2026-10-26):** CPU 1.005, Graphics 0.975, Math
    0.979, Disk 0.795. Against `78f0529` (1.000 / 0.987 / 0.978 / 0.855)
    Graphics is -1.2%, just past the 1% gate; but SE Graphics already moved
