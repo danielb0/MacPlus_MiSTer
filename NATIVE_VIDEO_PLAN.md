@@ -268,8 +268,13 @@ slower in wall time.
    VBL edge as the restart keeps every sound-phase measurement's meaning.
    `tb_snd_phase` updated (advances detected on the line edge, a new 352-clk8
    spacing check, the old timer's forces removed): 57/57.
-5. `cpu_wait.v`: skips removed, raster from the video counter;
-   `tb_cpu_wait` updated and green.
+5. **Done:** `cpu_wait.v`'s clock trim removed; `cpu_skip` kept as a port
+   tied 0 (the CPU enables and the floppy's `cpu_tick` take it, unchanged).
+   The raster stays on `snd_advance`: since Phase 4 that pulses at every
+   line start, so it IS the video raster and reading the video counter
+   instead would change nothing. `tb_cpu_wait` updated (352-clk8 lines, exact
+   352; a frame of 130,240 clk8 is 130,240 CPU clocks): all wait-state loop
+   periods unchanged, PASS 11,973 bus cycles.
 6. ~~Floppy tach check; RTC second from clk_sys.~~ Both settled in Phase 2.
 7. Bench sweep (**ask first**), then the gated compile (**ask first**). Check
    the PLL output frequencies and timing in the reports. Mind the SE/30

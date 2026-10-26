@@ -667,8 +667,8 @@ wire        is68000       = status_cpu == 0;
 
 // The real machines' wait states at 8 MHz (CPU_TIMING_PLAN.md): RAM and ROM
 // on the TSM's 4-clock grid, display RAM on video's alternate slots, the SCC
-// on C1M, and the CPU clock trimmed from 8.125 to the real 7.8336 MHz per
-// frame. Turbo and the 68010/68020 options keep today's timing.
+// on C1M. The clock is already the real 7.8336 MHz (NATIVE_VIDEO_PLAN.md), so
+// nothing is trimmed. Turbo and the 68010/68020 options take no wait states.
 cpu_wait cpu_wait
 (
 	.clk         ( clk_sys                  ),

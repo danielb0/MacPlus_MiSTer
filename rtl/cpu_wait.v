@@ -18,19 +18,17 @@
 // rule above is "waits = (target - phi) mod G", so DTACK reduces to a phase
 // window: release only when phase = target + 2.
 //
-// Contention follows a virtual Mac raster locked to the sound scan, not the
-// core's VGA-shaped display: line 0 starts at the VBL (the scan is at word 0
-// there on a real Plus), one line per sound word, lines 0-27 blank, and the
-// first 256/352 of every later line is display. The last slot of every line
-// is the sound/disk-speed fetch.
+// Contention follows the Mac raster through the sound scan: line 0 starts at
+// the VBL (the scan is at word 0 there on a real Plus), one line per sound
+// word, lines 0-27 blank, and the first 256/352 of every later line is
+// display. The last slot of every line is the sound/disk-speed fetch. Since
+// NATIVE_VIDEO_PLAN.md this is the video raster itself: snd_advance pulses at
+// every line start, 352 clk8 apart.
 //
-// The core's clk8 is 8.125 MHz against 7.8336, so a frame holds 135,408 clk8
-// where a Plus has 130,240 CPU clocks. `cpu_skip` drops the CPU's clock for
-// 5,168 of every 135,408 clk8, evenly spread, which restores the real CPU
-// clocks per frame, per line and per sound sample. Video, sound and the
-// IWM/SCC stay on clk8. The VIA runs from the CPU's E clock and so slows too,
-// which is right: a real VIA ticks 13,024 times a frame. Phase, AS age and
-// the raster's position within a line all count CPU clocks, not clk8.
+// clk_sys is 31.3344 MHz, so clk8 is the Plus's own 7.8336 MHz and every
+// clk8 is a CPU clock: 130,240 a frame, 352 a line, as the real machine. The
+// 5,168-a-frame clock trim the 8.125 MHz core needed is gone; cpu_skip stays
+// as a port, always 0, for the CPU and floppy enables that take it.
 //
 module cpu_wait(
 	input        clk,
@@ -48,37 +46,18 @@ module cpu_wait(
 	output [3:0] phase,         // C8M clock within the 16-clock slot frame
 	output       display,       // video owns its RAM slots now
 	output       hold,          // 1 = withhold DTACK
-	output       cpu_skip       // 1 = this clk8 is not a CPU clock
+	output       cpu_skip       // always 0: every clk8 is a CPU clock
 );
 
-	// Bresenham: 130,240 CPU clocks in each 135,408 clk8. Registered on phi1,
-	// so the next clock's phi2 AND phi1 are dropped together and fx68k still
-	// sees the two phases alternate.
-	localparam [17:0] FRAME_CLK8  = 18'd135408;
-	localparam [17:0] SKIPS       = 18'd5168;
-	reg  [17:0] skip_acc = 18'd0;
-	reg         skip = 1'b0;
-	wire [17:0] skip_next = skip_acc + SKIPS;
-	always @(posedge clk) if (clk8_en_p) begin
-		if (!authentic) begin
-			skip <= 1'b0;
-		end else if (skip_next >= FRAME_CLK8) begin
-			skip_acc <= skip_next - FRAME_CLK8;
-			skip     <= 1'b1;
-		end else begin
-			skip_acc <= skip_next;
-			skip     <= 1'b0;
-		end
-	end
-	assign cpu_skip = skip;
-	wire cpu_clk = clk8_en_p && !skip;
+	assign cpu_skip = 1'b0;
+	wire cpu_clk = clk8_en_p;
 
 	// 16-clock slot frame: the Plus uses phase[2:0] as C1M, the SE all four
 	reg [3:0] ph = 4'd0;
 	always @(posedge clk) if (cpu_clk) ph <= ph + 4'd1;
 	assign phase = ph;
 
-	// virtual raster, in CPU clocks: a line is 352 (~366 clk8 less its skips),
+	// the raster, in CPU clocks: a line is 352,
 	// the first 256 are display, and the sound slot is the last 8.
 	localparam [8:0] FIRST_DISPLAY_LINE = 9'd28;
 	localparam [8:0] DISPLAY_CLOCKS     = 9'd256;
@@ -94,7 +73,7 @@ module cpu_wait(
 			line          <= frame_pending ? 9'd0 : line + 9'd1;
 			frame_pending <= 1'b0;
 			xclk          <= 9'd0;
-		end else if (!skip && xclk != 9'h1FF)
+		end else if (xclk != 9'h1FF)
 			xclk <= xclk + 9'd1;
 	end
 	assign display = (line >= FIRST_DISPLAY_LINE && xclk < DISPLAY_CLOCKS) ||

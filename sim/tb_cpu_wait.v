@@ -227,9 +227,10 @@ module tb_cpu_wait;
 		end
 	endtask
 
-	// the virtual raster: line 0 at the VBL edge, one line per sound word,
-	// lines 0-27 blank, then 266 of ~366 clocks display, and the last 8 clocks
-	// of every line the sound slot. Drive one frame and sample per line.
+	// the raster: line 0 at the VBL edge, one line per sound word, lines 0-27
+	// blank, then 256 of 352 clocks display, and the last 8 clocks of every
+	// line the sound slot. Drive one frame of 352-clk8 lines (the video
+	// timer's, NATIVE_VIDEO_PLAN.md) and sample per line.
 	// CPU clocks since the last sound advance, counted independently of the DUT
 	integer gx = 0;
 	always @(posedge clk) if (clk8_en_p) begin
@@ -248,7 +249,7 @@ module tb_cpu_wait;
 			repeat (4) @(posedge clk);                         // one clk8 later:
 			#1 snd_adv = 1; repeat (4) @(posedge clk); #1 snd_adv = 0;  // first advance
 			for (ln = 0; ln < 370; ln = ln + 1) begin
-				for (x = 1; x < 366; x = x + 1) begin
+				for (x = 1; x < 352; x = x + 1) begin
 					repeat (4) @(posedge clk); #1;
 					if (dut_display !== ((ln >= 28 && gx < 256) || gx >= 344)) begin
 						if (bad < 4) $display("    RASTER line %0d CPU clock %0d: display %b", ln, gx, dut_display);
@@ -260,38 +261,30 @@ module tb_cpu_wait;
 				if (ln > 0 && gx < gmin) gmin = gx;
 				snd_adv = 1; repeat (4) @(posedge clk); #1 snd_adv = 0;
 			end
-			// 366 clk8 lines less their skips must be the real 352 CPU clocks
-			if (gmin < 351 || gmax > 353) begin
-				$display("    RASTER line length %0d..%0d CPU clocks, want ~352", gmin + 1, gmax + 1);
+			// every clk8 is a CPU clock: a 352-clk8 line is the real 352
+			if (gmin != 351 || gmax != 351) begin
+				$display("    RASTER line length %0d..%0d CPU clocks, want 352", gmin + 1, gmax + 1);
 				bad = bad + 1;
 			end
-			$display("  %0s virtual raster: %0d wrong samples in one frame, lines %0d..%0d CPU clocks",
+			$display("  %0s raster: %0d wrong samples in one frame, lines %0d..%0d CPU clocks",
 			         bad ? "FAIL" : "ok  ", bad, gmin + 1, gmax + 1);
 			n_bad_total = n_bad_total + bad;
 		end
 	endtask
 
-	// 135,408 clk8 (one core frame) must hold exactly 130,240 CPU clocks (a
-	// real Plus frame), never two skips in a row, gaps of 26 or 27 clk8
+	// clk8 is the real 7.8336 MHz: one frame, 130,240 clk8, must be 130,240
+	// CPU clocks, nothing skipped, authentic or not
 	task check_skip_rate;
-		integer i, cpu, last, gap, gmin, gmax, bad;
+		integer i, cpu, bad;
 		begin
-			authentic = 1; cpu = 0; last = -1; gmin = 1 << 30; gmax = 0; bad = 0;
-			for (i = 0; i < 135408; i = i + 1) begin
+			authentic = 1; cpu = 0; bad = 0;
+			for (i = 0; i < 130240; i = i + 1) begin
 				@(posedge clk); while (!clk8_en_p) @(posedge clk);
 				if (!cpu_skip) cpu = cpu + 1;
-				else begin
-					if (last >= 0) begin
-						gap = i - last;
-						if (gap < gmin) gmin = gap;
-						if (gap > gmax) gmax = gap;
-					end
-					last = i;
-				end
 			end
-			if (cpu != 130240 || gmin < 26 || gmax > 27) bad = 1;
-			$display("  %0s CPU clock trim: %0d CPU clocks in 135408 clk8 (want 130240), skip gaps %0d..%0d",
-			         bad ? "FAIL" : "ok  ", cpu, gmin, gmax);
+			if (cpu != 130240) bad = 1;
+			$display("  %0s CPU clock: %0d CPU clocks in a 130240-clk8 frame (want 130240)",
+			         bad ? "FAIL" : "ok  ", cpu);
 			authentic = 0;
 			for (i = 0; i < 1000; i = i + 1) begin
 				@(posedge clk); while (!clk8_en_p) @(posedge clk);
