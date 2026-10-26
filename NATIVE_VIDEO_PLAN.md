@@ -282,7 +282,14 @@ slower in wall time.
    is stamped", on both trees (the tag is committed as 0 and stamped at
    compile time). One harness fix: `tb_scsi_absence` seeded the removed
    `snd_div`. The DCD/IWM benches need `rtl/scsi.v` (`scsi_dpram`) named on
-   the command line. Then the compile. Check
+   the command line.
+   **Compile done (2026-10-26, 20m54s):** tag `e3e45a7a`, archived as
+   `output_files/MacPlus_e3e45a7a_native.rbf`. 0 errors, no negative slack.
+   PLL as fitted: VCO 438.6816 MHz (31.3344 x 14, fractional), clk_mem
+   62.668799, clk_sys 31.334399 MHz (-0.002 ppm). The timing report's
+   "31.34 MHz" is its integer-ratio model of the fractional PLL (4493/512),
+   not the hardware. Fmax 40.07 MHz on clk_sys, 113.6 on clk_mem. ALMs 50%.
+   (Original note:) Check
    the PLL output frequencies and timing in the reports. Mind the SE/30
    session's builds: no Quartus compile near 22:00 without checking.
 8. **HDMI hardware test** (Daniel):
